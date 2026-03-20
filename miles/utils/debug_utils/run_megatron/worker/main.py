@@ -30,6 +30,7 @@ from miles.backends.megatron_utils.checkpoint import load_checkpoint
 from miles.backends.megatron_utils.initialize import init
 from miles.backends.megatron_utils.model_provider import get_model_provider_func
 from miles.utils.debug_utils.run_megatron.worker.batch import loss_func, prepare_batch
+from miles.utils.debug_utils.run_megatron.worker.output import compute_and_save_output_info
 from miles.utils.debug_utils.run_megatron.worker.replay import (
     load_replay_data,
     save_replay_data,
@@ -77,6 +78,14 @@ def main() -> None:
     )
 
     is_last_pp_stage: bool = mpu.is_pipeline_last_stage()
+
+    if script.logprob_output is not None and captured_logits is not None and is_last_pp_stage:
+        compute_and_save_output_info(
+            logits=captured_logits,
+            labels=batch["labels"],
+            position_ids=batch["position_ids"],
+            output_dir=script.logprob_output,
+        )
 
     if script.top_k > 0 and captured_logits is not None and is_last_pp_stage:
         print_top_k(
