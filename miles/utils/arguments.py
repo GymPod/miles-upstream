@@ -1892,6 +1892,8 @@ def miles_validate_args(args):
         args.enable_event_analyzer = True
         args.enable_witness = True
         args.non_persistent_ckpt_type = "local"
+        if getattr(args, "non_persistent_local_ckpt_dir", None) is None:
+            args.non_persistent_local_ckpt_dir = "/tmp/miles_local_ckpt"
         if args.non_persistent_local_ckpt_algo is None:
             # atomic: each rank saves independently, no collective communication.
             # fully_parallel needs all_gather_object which hangs after ncclCommAbort in healing.
