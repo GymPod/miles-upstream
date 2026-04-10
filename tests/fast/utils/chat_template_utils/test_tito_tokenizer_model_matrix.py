@@ -19,6 +19,7 @@ from miles.utils.test_utils.mock_trajectories import (
 TOOL_CALL_TEST_MODELS = [
     "Qwen/Qwen2.5-0.5B-Instruct",
     "Qwen/Qwen3-0.6B",
+    "Qwen/Qwen3.5-0.8B",
     "Qwen/Qwen3-4B-Instruct-2507",
     "Qwen/Qwen3-Coder-30B-A3B-Instruct",
     # "meta-llama/Llama-3.2-1B-Instruct",  # Skipped: gated repo, requires HF_TOKEN in CI
@@ -26,12 +27,18 @@ TOOL_CALL_TEST_MODELS = [
     "deepseek-ai/DeepSeek-V3",
     "stepfun-ai/step3",
     "MiniMaxAI/MiniMax-M2",
+    "MiniMaxAI/MiniMax-M2.5",
+    "moonshotai/Kimi-K2.5",
     "XiaomiMiMo/MiMo-7B-RL",
 ]
 
 # Models excluded from TITO testing due to known template incompatibilities.
 # Filtered out of parametrized test cases below.
 _TITO_EXCLUDED_MODELS: dict[str, str] = {
+    "Qwen/Qwen3.5-0.8B": (
+        "The qwen3.5 fixed template rejects the synthetic tool/system dummy base "
+        "used by TITO's segment diff with 'No user query found in messages'."
+    ),
     "deepseek-ai/DeepSeek-V3": (
         "TITO tokenizes each tool segment independently via _tokenize_tool_segment, "
         "which causes DeepSeek-V3's template to emit extra "
@@ -48,12 +55,18 @@ _ASSISTANT_START_BY_MODEL: dict[str, str] = {
     "deepseek-ai/DeepSeek-V3": "<｜Assistant｜>",
     "stepfun-ai/step3": "<|BOT|>assistant\n",
     "MiniMaxAI/MiniMax-M2": "]~b]ai\n",
+    "MiniMaxAI/MiniMax-M2.5": "]~b]ai\n",
+    "moonshotai/Kimi-K2.5": "<|im_assistant|>assistant<|im_middle|>",
     "XiaomiMiMo/MiMo-7B-RL": "<|im_start|>assistant\n",
 }
 _NO_SYSTEM_APPEND_MODELS = {
     "deepseek-ai/DeepSeek-V3",
     "stepfun-ai/step3",
     "MiniMaxAI/MiniMax-M2",
+    "MiniMaxAI/MiniMax-M2.5",
+}
+_CONTENT_WHITESPACE_AGNOSTIC_MODELS = {
+    "stepfun-ai/step3",
 }
 
 
@@ -199,6 +212,9 @@ def _assert_only_assistant_mismatches(tito: TITOTokenizer, expected: list[int], 
 def _assert_contents_in_order(
     incremental_text: str, required_contents: tuple[str, ...], *, model_name: str, case_name: str
 ) -> None:
+    if model_name in _CONTENT_WHITESPACE_AGNOSTIC_MODELS:
+        incremental_text = "".join(incremental_text.split())
+        required_contents = tuple("".join(content.split()) for content in required_contents)
     cursor = 0
     for content in required_contents:
         found = incremental_text.find(content, cursor)
