@@ -4,7 +4,7 @@ import logging
 import uuid
 from argparse import Namespace
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 import numpy as np
@@ -72,6 +72,13 @@ class GenerateState(metaclass=SingletonMeta):
 
         self.semaphore = asyncio.Semaphore(
             args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
+        )
+        # Agentic-only cap on concurrent `custom_generate_function_path` calls. Useful for
+        # throttling traffic to an external agent server. None => no extra cap.
+        self.agent_semaphore = (
+            asyncio.Semaphore(args.max_concurrent_agent_tasks)
+            if getattr(args, "max_concurrent_agent_tasks", None) is not None
+            else None
         )
         self.sampling_params: dict[str, Any] = dict(
             temperature=args.rollout_temperature,
@@ -262,9 +269,13 @@ async def generate_and_rm(
 
             generate_fn = load_generate_function(custom_func_path) if custom_func_path else None
             if generate_fn is not None:
-                output = await generate_fn(
-                    GenerateFnInput(state=state, sample=sample, sampling_params=sampling_params, evaluation=evaluation)
-                )
+                agent_cm = state.agent_semaphore if state.agent_semaphore is not None else nullcontext()
+                async with agent_cm:
+                    output = await generate_fn(
+                        GenerateFnInput(
+                            state=state, sample=sample, sampling_params=sampling_params, evaluation=evaluation
+                        )
+                    )
                 sample = output.samples
             else:
                 sample = await generate(args, sample, sampling_params)
