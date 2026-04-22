@@ -40,8 +40,14 @@ def setup_session_routes(app, backend, args):
 
     registry = SessionRegistry(args, tokenizer, tito_tokenizer=tito_tokenizer)
 
+    # /health is defined as a sync function so Starlette dispatches it to the
+    # default threadpool rather than the asyncio event loop. The event loop is
+    # occasionally starved by CPU-bound tokenization in chat_completions, which
+    # makes async /health responses miss the agent-server's 60s heartbeat
+    # window and triggers Flushed-group cancellation on the agent server.
+    # Running /health in a threadpool worker sidesteps that queueing.
     @app.get("/health")
-    async def health():
+    def health():
         body = {"status": "ok"}
         if session_server_instance_id is not None:
             body["session_server_instance_id"] = session_server_instance_id
@@ -52,6 +58,11 @@ def setup_session_routes(app, backend, args):
 
     @app.middleware("http")
     async def debug_request_logger(request: Request, call_next):
+        # Heartbeat probes are high-frequency and latency-sensitive; skip the
+        # per-request INFO logging (two string formats + log calls per request)
+        # so a backed-up event loop does not delay the /health response.
+        if request.url.path == "/health":
+            return await call_next(request)
         client = request.client
         client_info = f"{client.host}:{client.port}" if client else "unknown"
         logger.info(
