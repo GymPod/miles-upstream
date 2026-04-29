@@ -16,6 +16,10 @@ Each test asserts that our ``apply_chat_template`` produces identical token IDs.
 
 from __future__ import annotations
 
+from tests.ci.ci_register import register_cpu_ci
+
+register_cpu_ci(est_time=60, suite="stage-a-fast")
+
 import copy
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -26,6 +30,7 @@ from sglang.srt.entrypoints.openai.serving_chat import OpenAIServingChat
 from transformers import AutoTokenizer
 
 from miles.utils.chat_template_utils.template import apply_chat_template
+from miles.utils.processing_utils import load_tokenizer
 from miles.utils.test_utils.mock_trajectories import (
     IntermediateSystemThinkingTrajectory,
     IntermediateSystemTrajectory,
@@ -60,6 +65,7 @@ def _make_serving(tokenizer) -> OpenAIServingChat:
     serving.use_dpsk_v32_encoding = False
     serving.is_gpt_oss = False
     serving.tool_call_parser = None
+    serving.reasoning_parser = None
     return serving
 
 
@@ -91,7 +97,7 @@ _TOK_CACHE: dict[str, AutoTokenizer] = {}
 
 def _get_tokenizer(model_id: str) -> AutoTokenizer:
     if model_id not in _TOK_CACHE:
-        _TOK_CACHE[model_id] = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        _TOK_CACHE[model_id] = load_tokenizer(model_id, trust_remote_code=True)
     return _TOK_CACHE[model_id]
 
 
@@ -118,6 +124,10 @@ def tokenizer(request) -> AutoTokenizer:
 # Trajectory / kwargs definitions
 # ---------------------------------------------------------------------------
 
+_NO_INTERMEDIATE_SYSTEM_MODELS = {
+    "Qwen/Qwen3.5-4B",
+}
+
 _STANDARD_CASES = [
     pytest.param(SingleToolTrajectory, {}, id="single_tool"),
     pytest.param(MultiTurnTrajectory, {}, id="multi_turn"),
@@ -128,7 +138,7 @@ _STANDARD_CASES = [
     pytest.param(MultiTurnNoToolTrajectory, {}, id="multi_turn_no_tool"),
 ]
 
-# Trajectories with intermediate system messages (Qwen3.5 uses fixed template).
+# Trajectories with intermediate system messages.
 _INTERMEDIATE_SYSTEM_CASES = [
     pytest.param(RetrySystemTrajectory, {}, id="retry_system"),
     pytest.param(IntermediateSystemTrajectory, {}, id="intermediate_system"),
@@ -180,6 +190,8 @@ class TestAlignWithSGLang:
 
     @pytest.mark.parametrize("traj_cls, kwargs", _INTERMEDIATE_SYSTEM_CASES)
     def test_intermediate_system(self, tokenizer, traj_cls, kwargs):
+        if tokenizer.name_or_path in _NO_INTERMEDIATE_SYSTEM_MODELS:
+            pytest.skip(f"{tokenizer.name_or_path} intentionally forbids intermediate system messages")
         _assert_aligned(tokenizer, traj_cls, kwargs)
 
     @pytest.mark.parametrize("traj_cls, kwargs", _THINKING_CASES)
@@ -188,6 +200,8 @@ class TestAlignWithSGLang:
 
     @pytest.mark.parametrize("traj_cls, kwargs", _INTERMEDIATE_SYSTEM_THINKING_CASES)
     def test_intermediate_system_thinking(self, tokenizer, traj_cls, kwargs):
+        if tokenizer.name_or_path in _NO_INTERMEDIATE_SYSTEM_MODELS:
+            pytest.skip(f"{tokenizer.name_or_path} intentionally forbids intermediate system messages")
         _assert_aligned(tokenizer, traj_cls, kwargs)
 
     def test_json_string_arguments(self, tokenizer):
