@@ -482,13 +482,7 @@ def train_one_step(
 
         check_mtp_only_grad(model, step_id)
 
-    if disable_optimizer:
-        if is_megatron_main_rank():
-            logger.warning(
-                "Skipping optimizer.prepare_grads(), optimizer.step(), and LR scheduler step "
-                "because --debug-disable-optimizer is set."
-            )
-    elif valid_step:
+    if not disable_optimizer and valid_step:
         # Update parameters.
         update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
 
