@@ -6,6 +6,7 @@ import datetime
 import json
 import os
 import random
+import shlex
 import time
 from dataclasses import dataclass
 from functools import partial
@@ -37,6 +38,15 @@ def _runtime_pythonpath(megatron_path: str) -> str:
             deduped.append(path)
             seen.add(path)
     return os.pathsep.join(deduped)
+
+
+def _shell_export_env_vars(env_vars: dict[str, str]) -> str:
+    if not env_vars:
+        return ""
+    return "".join(
+        f"export {key}={shlex.quote(str(value))} && "
+        for key, value in env_vars.items()
+    )
 
 
 def convert_checkpoint(
@@ -163,6 +173,11 @@ def execute_train(
     if (f := before_ray_job_submit) is not None:
         f()
 
+    runtime_env_vars = {
+        **extra_env_vars,
+        **_parse_extra_env_vars(config.extra_env_vars),
+    }
+
     runtime_env_json = json.dumps(
         {
             "env_vars": {
@@ -190,13 +205,13 @@ def execute_train(
                     if config.cuda_core_dump
                     else {}
                 ),
-                **extra_env_vars,
-                **_parse_extra_env_vars(config.extra_env_vars),
+                **runtime_env_vars,
             }
         }
     )
 
     if get_bool_env_var("MILES_SCRIPT_ENABLE_RAY_SUBMIT", "1"):
+        source_env_exports = _shell_export_env_vars(runtime_env_vars)
         cmd_megatron_model_source = (
             f'source "{repo_base_dir}/scripts/models/{megatron_model_type}.sh" && '
             if megatron_model_type is not None
@@ -204,6 +219,7 @@ def execute_train(
         )
         exec_command(
             f"export no_proxy=127.0.0.1 && export PYTHONBUFFERED=16 && "
+            f"{source_env_exports}"
             f"{cmd_megatron_model_source}"
             f"""ray job submit {'' if 'RAY_ADDRESS' in os.environ else '--address="http://127.0.0.1:8265" '}"""
             f"--runtime-env-json='{runtime_env_json}' "

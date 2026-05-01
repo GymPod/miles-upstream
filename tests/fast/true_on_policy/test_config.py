@@ -256,8 +256,8 @@ def test_qwen3_moe_rejects_train_tp_with_ep_until_sequence_parallel_is_supported
 def test_qwen3_moe_rejects_ep_that_does_not_fit_8_gpu_megatron_dp():
     args = _args(
         model_name="Qwen3-30B-A3B",
-        tensor_model_parallel_size=4,
-        context_parallel_size=2,
+        tensor_model_parallel_size=1,
+        context_parallel_size=4,
         expert_model_parallel_size=4,
         expert_tensor_parallel_size=1,
         rollout_num_gpus_per_engine=4,
@@ -266,7 +266,7 @@ def test_qwen3_moe_rejects_ep_that_does_not_fit_8_gpu_megatron_dp():
         num_gpus_per_node=8,
     )
 
-    with pytest.raises(ValueError, match="needs at least 32 train GPUs"):
+    with pytest.raises(ValueError, match="needs at least 16 train GPUs"):
         build_true_on_policy_launch_plan(args)
 
 
