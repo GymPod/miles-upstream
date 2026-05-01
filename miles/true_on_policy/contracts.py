@@ -62,14 +62,13 @@ class TrueOnPolicyContract:
                 or parallel_layout.uses_rollout_tp
             )
             uses_ep_invariant_moe = parallel_layout.uses_train_ep or parallel_layout.uses_rollout_ep
-            sglang_attention_data_parallel_size = self._sglang_attention_data_parallel_size(
-                parallel_layout
-            )
         else:
             uses_tp_invariant_rollout = sglang_target == "fsdp_tp"
             uses_ep_invariant_moe = False
-            sglang_attention_data_parallel_size = 1
         is_moe = self.model_family == "qwen3_moe"
+        # SGLang attention-DP + EP is not parity-gated for Qwen3-30B-A3B yet.
+        # Keep the true-on-policy launch on the verified EP-only rollout path.
+        sglang_attention_data_parallel_size = 1
         return {
             "deterministic_inference": True,
             "deterministic_training": True,
@@ -85,20 +84,8 @@ class TrueOnPolicyContract:
             "deterministic_moe_dispatch": is_moe and uses_ep_invariant_moe,
             "deterministic_moe_combine": is_moe and uses_ep_invariant_moe,
             "ep_invariant_moe": is_moe and uses_ep_invariant_moe,
-            "sglang_attention_data_parallel_size": (
-                sglang_attention_data_parallel_size if is_moe else 1
-            ),
+            "sglang_attention_data_parallel_size": sglang_attention_data_parallel_size,
         }
-
-    def _sglang_attention_data_parallel_size(self, parallel_layout) -> int:
-        if self.model_family != "qwen3_moe" or not parallel_layout.uses_rollout_ep:
-            return 1
-
-        # TODO: Re-enable this once the SGLang DP-attention + EP topology is
-        # parity-gated. With Qwen3-30B-A3B, DP-attention+EP currently produces
-        # corrupted rollout text and low logprob scale, while EP-only rollout is
-        # healthy. Keep the true-on-policy contract on the verified EP path.
-        return 1
 
 
 QWEN3_DENSE_TRUE_ON_POLICY_V1 = TrueOnPolicyContract(

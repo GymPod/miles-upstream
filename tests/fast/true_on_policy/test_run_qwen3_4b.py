@@ -20,7 +20,6 @@ def test_qwen3_script_true_on_policy_single_knob_expands_to_megatron_contract(mo
         use_kl_loss=False,
     )
 
-    assert args.sglang_rl_on_policy_target is None
     assert args.use_sequence_parallel is False
 
     run_qwen3_4b.execute(args)
@@ -31,7 +30,6 @@ def test_qwen3_script_true_on_policy_single_knob_expands_to_megatron_contract(mo
     assert "--true-on-policy-mode" in train_args
     assert "--sglang-enable-deterministic-inference" in train_args
     assert "--sglang-true-on-policy-contract qwen3_dense_true_on_policy_v1" in train_args
-    assert "--sglang-rl-on-policy-target" not in train_args
     assert "--sglang-attention-backend fa3" in train_args
     assert "--true-on-policy-contract qwen3_dense_true_on_policy_v1" in train_args
     assert "--recompute-logprobs-via-prefill" not in train_args
@@ -69,7 +67,6 @@ def test_qwen3_script_true_on_policy_tp2_cp4_normal_topology_contract(monkeypatc
     args.rollout_num_gpus_per_engine = 8
     args.extra_args = "--rollout-num-gpus 8 "
 
-    assert args.sglang_rl_on_policy_target is None
     assert args.use_sequence_parallel is False
 
     run_qwen3_4b.execute(args)
@@ -85,7 +82,6 @@ def test_qwen3_script_true_on_policy_tp2_cp4_normal_topology_contract(monkeypatc
     assert "--load /root/models/Qwen3-4B_torch_dist" in train_args
     assert "--save /root/shared_data/unit-test-tp2-cp4/checkpoints" in train_args
     assert "--sglang-true-on-policy-contract qwen3_dense_true_on_policy_v1" in train_args
-    assert "--sglang-rl-on-policy-target" not in train_args
     assert "--sglang-attention-backend fa3" in train_args
     assert "--recompute-logprobs-via-prefill" not in train_args
     assert "--use-sglang" not in train_args
@@ -124,7 +120,6 @@ def test_qwen3_script_off_policy_does_not_emit_true_on_policy_contract(monkeypat
 
     assert "--true-on-policy-mode" not in train_args
     assert "--sglang-true-on-policy-contract" not in train_args
-    assert "--sglang-rl-on-policy-target" not in train_args
     assert "--true-on-policy-contract" not in train_args
     assert "--recompute-logprobs-via-prefill" not in train_args
     assert "--use-sglang" not in train_args

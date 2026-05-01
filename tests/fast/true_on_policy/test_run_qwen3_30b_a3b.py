@@ -28,7 +28,6 @@ def test_qwen3_moe_script_true_on_policy_tp1_ep4_cp2_contract(monkeypatch):
     )
 
     assert args.use_sequence_parallel is False
-    assert args.sglang_rl_on_policy_target is None
 
     run_qwen3_30b_a3b.execute(args)
 

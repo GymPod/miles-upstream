@@ -27,7 +27,6 @@ def _args(**overrides):
         "expert_tensor_parallel_size": 1,
         "rollout_num_gpus_per_engine": 1,
         "sglang_expert_parallel_size": 1,
-        "sglang_rl_on_policy_target": None,
         "true_on_policy_contract": None,
         "true_on_policy_fast_decode": False,
         "use_sequence_parallel": True,
@@ -101,7 +100,6 @@ def test_true_on_policy_target_is_derived_from_train_and_rollout_tp(
     apply_true_on_policy_script_defaults(args)
     plan = build_true_on_policy_launch_plan(args)
 
-    assert args.sglang_rl_on_policy_target is None
     assert plan.sglang_target == expected_target
     assert plan.contract is QWEN3_DENSE_TRUE_ON_POLICY_V1
     assert plan.sglang_args.values == (
@@ -111,7 +109,6 @@ def test_true_on_policy_target_is_derived_from_train_and_rollout_tp(
         "--sglang-attention-backend",
         "fa3",
     )
-    assert "--sglang-rl-on-policy-target" not in plan.train_args
 
 
 def test_qwen3_moe_ep_is_separate_from_tp_invariant_rollout():
@@ -270,25 +267,6 @@ def test_qwen3_moe_rejects_ep_that_does_not_fit_8_gpu_megatron_dp():
         build_true_on_policy_launch_plan(args)
 
 
-def test_legacy_sglang_target_override_does_not_change_contract_policy():
-    args = _args(
-        tensor_model_parallel_size=2,
-        context_parallel_size=1,
-        rollout_num_gpus_per_engine=1,
-        sglang_rl_on_policy_target="fsdp",
-    )
-
-    apply_true_on_policy_script_defaults(args)
-    plan = build_true_on_policy_launch_plan(args)
-
-    assert args.sglang_rl_on_policy_target == "fsdp"
-    assert plan.sglang_target == "fsdp_tp"
-    assert plan.kernel_policy is not None
-    assert plan.kernel_policy.tp_invariant_row_linear
-    assert "--sglang-rl-on-policy-target" not in plan.train_args
-    assert "ROW_LINEAR_ENABLE_INV" not in plan.env_vars
-
-
 def test_contract_object_owns_miles_kernel_policy_values():
     args = _args(
         train_backend="megatron",
@@ -343,7 +321,6 @@ def test_megatron_tp2_cp4_normal_topology_has_complete_true_on_policy_contract(m
     plan = build_true_on_policy_launch_plan(args)
 
     assert args.use_sequence_parallel is False
-    assert args.sglang_rl_on_policy_target is None
     assert plan.parallel_layout is not None
     assert plan.parallel_layout.train_tensor_parallel_size == 2
     assert plan.parallel_layout.train_context_parallel_size == 4
@@ -418,7 +395,6 @@ def test_off_policy_builds_empty_launch_plan_and_does_not_mutate_args():
     plan = build_true_on_policy_launch_plan(args)
 
     assert args.use_sequence_parallel is True
-    assert args.sglang_rl_on_policy_target is None
     assert not plan.enabled
     assert plan.train_args == ""
     assert plan.env_vars == {}

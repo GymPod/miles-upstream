@@ -34,7 +34,6 @@ class ScriptArgs(U.ExecuteTrainConfig):
     rollout_num_gpus: int | None = None
     rollout_num_gpus_per_engine: int | None = None
     sglang_expert_parallel_size: int | None = None
-    sglang_rl_on_policy_target: Literal["fsdp", "fsdp_tp"] | None = None
     use_sequence_parallel: bool = True
     max_tokens_per_gpu: int = 32768
     extra_args: str = ""
