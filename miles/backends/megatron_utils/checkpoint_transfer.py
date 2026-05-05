@@ -107,6 +107,12 @@ def _serialize_for_transport(
     # which rejects torch.nn.Parameter. Detach into plain Tensors that share
     # storage but pass the type check.
     tensors = [t.detach() if type(t) is not torch.Tensor else t for t in tensors]
+    total_bytes = sum(t.nbytes for t in tensors)
+    logger.info(
+        "[OOM_DEBUG] _serialize_for_transport: %d tensors, total %.2f GB",
+        len(tensors),
+        total_bytes / 1024 / 1024 / 1024,
+    )
     return {
         "tensors": tensors,
         "hollow_state_dict": state_dict,
