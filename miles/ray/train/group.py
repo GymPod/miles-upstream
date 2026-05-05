@@ -299,10 +299,6 @@ class RayTrainGroup:
         if not needs_reconfigure:
             return
 
-        # Pause health checks during healing — actors block on send_ckpt/recv_ckpt
-        for c in self._cells:
-            c.health_checker.pause()
-
         # Step 1: Bump states
         self._indep_dp_quorum_id += 1
 
@@ -337,10 +333,6 @@ class RayTrainGroup:
         )
         # No need to do anything else - cells with exceptions will auto mark itself as errored
         AsyncioGatherUtils.log_error(coop_prepare_outputs, debug_name="refresh_cells#cooperatively_prepare")
-
-        # Resume health checks after healing
-        for c in self._cells:
-            c.health_checker.resume()
 
         if not AsyncioGatherUtils.has_error(coop_prepare_outputs):
             assert [c.cell_index for c in self._cells if c.is_alive] == will_alive_indices
