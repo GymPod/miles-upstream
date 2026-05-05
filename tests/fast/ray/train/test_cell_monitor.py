@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock
 
 import pytest
+import ray
 
 from miles.ray.train.cell_monitor import compute_cell_status
 from miles.ray.train.cell_state import (
@@ -12,6 +13,10 @@ from miles.ray.train.cell_state import (
 )
 from miles.utils.control_server.models import TriState
 from miles.utils.indep_dp import IndepDPInfo
+
+
+def _make_actor_handle_mock() -> MagicMock:
+    return MagicMock(spec=ray.actor.ActorHandle)
 
 
 def _make_indep_dp_info() -> IndepDPInfo:
@@ -26,7 +31,7 @@ def _make_indep_dp_info() -> IndepDPInfo:
 
 
 def _make_alive_state() -> StateAllocatedAlive:
-    return StateAllocatedAlive(actor_handles=[MagicMock()], indep_dp_info=_make_indep_dp_info())
+    return StateAllocatedAlive(actor_handles=[_make_actor_handle_mock()], indep_dp_info=_make_indep_dp_info())
 
 
 def _find_condition(status, type_: str):
@@ -64,7 +69,7 @@ class TestComputeCellStatusAlive:
 class TestComputeCellStatusOtherStates:
     @pytest.mark.parametrize("health_status", [TriState.TRUE, TriState.FALSE, TriState.UNKNOWN])
     def test_uninitialized_ignores_health_checker(self, health_status: TriState):
-        state = StateAllocatedUninitialized(actor_handles=[MagicMock()])
+        state = StateAllocatedUninitialized(actor_handles=[_make_actor_handle_mock()])
 
         result = compute_cell_status(state, health_status)
 
@@ -74,7 +79,7 @@ class TestComputeCellStatusOtherStates:
 
     @pytest.mark.parametrize("health_status", [TriState.TRUE, TriState.FALSE, TriState.UNKNOWN])
     def test_errored_always_reports_unhealthy(self, health_status: TriState):
-        state = StateAllocatedErrored(actor_handles=[MagicMock()], indep_dp_info=_make_indep_dp_info())
+        state = StateAllocatedErrored(actor_handles=[_make_actor_handle_mock()], indep_dp_info=_make_indep_dp_info())
 
         result = compute_cell_status(state, health_status)
 

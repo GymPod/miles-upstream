@@ -23,6 +23,7 @@ def _make_mock_args(*, indep_dp: bool = True, enable_witness: bool = False) -> M
     args.trainer_heartbeat_checker_timeout = 10.0
     args.trainer_heartbeat_checker_max_heartbeat_age = 90.0
     args.trainer_heartbeat_checker_first_wait = 300.0
+    args.ci_ft_test_actions = None
     return args
 
 
