@@ -1,3 +1,4 @@
+import os
 from unittest.mock import MagicMock
 
 import pytest
@@ -11,7 +12,11 @@ from miles.utils.indep_dp import IndepDPInfo
 
 @pytest.fixture(scope="module", autouse=True)
 def ray_env():
-    ray.init(num_cpus=4, num_gpus=0, ignore_reinit_error=True)
+    init_kwargs: dict = {"ignore_reinit_error": True}
+    if not ray.is_initialized() and "RAY_ADDRESS" not in os.environ:
+        init_kwargs["num_cpus"] = 4
+        init_kwargs["num_gpus"] = 0
+    ray.init(**init_kwargs)
     yield
     ray.shutdown()
 
