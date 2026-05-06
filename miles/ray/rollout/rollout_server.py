@@ -222,10 +222,10 @@ class RolloutServer:
                     ]
                 )
 
-    async def offload(self):
+    async def offload(self, tags: list[str] | None = None):
         handles = []
         for g in self.server_groups:
-            handles.extend(g.offload())
+            handles.extend(g.offload(tags))
         return await asyncio.gather(*handles)
 
     async def onload(self, tags: list[str] | None = None):
