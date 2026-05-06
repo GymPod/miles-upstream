@@ -15,10 +15,9 @@ BuildArgsFn = Callable[[FTTestMode, str, bool], str]
 
 
 def resolve_dump_dir(test_name: str) -> str:
-    # Debug: NFS so phase_a ckpts survive pod migration on OOM eviction.
-    # Restore /node_public when ft trainer e2e is stable (NFS slower for writes).
-    output_dir = "/cluster_public/miles_data/outputs/ft_dumps"
-    dump_dir = str(Path(output_dir) / test_name)
+    # TODO make it configurable, but on local disk instead of remote disk
+    output_dir = "/node_public"
+    dump_dir = str(Path(output_dir) / "dumps" / test_name)
     os.makedirs(dump_dir, exist_ok=True)
     return dump_dir
 
