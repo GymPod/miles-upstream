@@ -38,11 +38,22 @@ def gather_log_data(
     parallel_state = get_parallel_state()
 
     pg = parallel_state.effective_dp_cp
-    # Not sure if this will be a performance bottleneck.
-    gathered_log_dict = MultiPGUtil.gather_object(
-        obj=log_dict,
-        groups_inner_to_outer=pg.gloo_groups_inner_to_outer,
-    )
+    # effective_dp_cp spans intra-cell DP×CP plus indep_dp peers under FT.
+    # If a peer cell crashed, this Gloo gather will hang and time out (120s),
+    # which would propagate up and mark THIS healthy cell as errored — same
+    # cascade pattern as the rmtree-on-NFS case. Logging is convenience; do
+    # not let a failed gather take down the cell.
+    try:
+        gathered_log_dict = MultiPGUtil.gather_object(
+            obj=log_dict,
+            groups_inner_to_outer=pg.gloo_groups_inner_to_outer,
+        )
+    except RuntimeError:
+        logger.warning(
+            "gather_log_data failed (peer cell likely dead); skipping log this step",
+            exc_info=True,
+        )
+        return None
 
     if pg.rank == 0:
         reduced_log_dict = {
