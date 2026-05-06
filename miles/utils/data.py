@@ -285,20 +285,11 @@ def process_rollout_data(
             raw = {**raw, "seq_witness_ids": x.witness_ids}
         # Under delay_split (FT mode), rollout did not pre-compute dynamic_gbs
         # because it didn't know the post-healing dp_size. Compute it now using
-        # the current dp_size, which already reflects healing, and trim the
-        # per-sample lists to that count so split_train_data_by_dp partitions
-        # evenly across ranks.
+        # the current dp_size, which already reflects healing.
         if args.use_dynamic_global_batch_size:
-            n_total = len(raw["tokens"])
-            n_kept = compute_dynamic_global_batch_size(
-                args, dp_size=dp_size, num_samples=n_total
+            raw["dynamic_global_batch_size"] = compute_dynamic_global_batch_size(
+                args, dp_size=dp_size, num_samples=len(raw["tokens"])
             )
-            raw["dynamic_global_batch_size"] = n_kept
-            assert n_kept <= n_total, f"dynamic_global_batch_size={n_kept} exceeds num_samples={n_total}"
-            if n_kept < n_total:
-                for key in list(raw.keys()):
-                    if isinstance(raw[key], list) and len(raw[key]) == n_total:
-                        raw[key] = raw[key][:n_kept]
         raw = split_train_data_by_dp(args, raw, dp_size=dp_size)
         rollout_data = raw[dp_rank]
     else:
