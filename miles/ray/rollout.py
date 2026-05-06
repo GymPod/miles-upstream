@@ -588,7 +588,11 @@ class RolloutManager:
 
             if not self.args.disable_rollout_trim_samples:
                 global_batch_size = self.args.global_batch_size
-                if self.args.use_dynamic_global_batch_size:
+                # Under delay_split (FT mode) we cannot pre-compute dynamic_gbs here:
+                # rollout-time dp_size may differ from the post-healing dp_size used
+                # at training time. process_rollout_data on the training side will
+                # compute and trim with the correct dp_size.
+                if self.args.use_dynamic_global_batch_size and not self.args.delay_split_train_data_by_dp:
                     logger.info(f"Collected {len(data)} samples from rollout to train with dynamic global batch size")
                     # TODO: this is a temporary solution, we should directly save dynamic_global_batch_size to rollout data
                     self._dynamic_global_batch_size = self._compute_dynamic_global_batch_size(len(data))
@@ -743,11 +747,13 @@ class RolloutManager:
         if "teacher_log_probs" in samples[0].__dict__:
             train_data["teacher_log_probs"] = [sample.teacher_log_probs for sample in samples]
 
-        # Pass dynamic global_batch_size to training side. When set on self it
-        # came from _get_rollout_data; the debug-rollout path skips that compute
-        # and under delay_split FT the training side recomputes using the
-        # post-healing dp_size, so we tolerate the attribute being absent.
-        assert not hasattr(self, "_dynamic_global_batch_size") or self.args.use_dynamic_global_batch_size
+        # Pass dynamic global_batch_size to training side. The attribute is set in
+        # _get_rollout_data only when dynamic_gbs is enabled and we're NOT in
+        # delay_split mode (under delay_split the training side computes it using
+        # the post-healing dp_size).
+        assert hasattr(self, "_dynamic_global_batch_size") == (
+            self.args.use_dynamic_global_batch_size and not self.args.delay_split_train_data_by_dp
+        )
         if hasattr(self, "_dynamic_global_batch_size"):
             train_data["dynamic_global_batch_size"] = self._dynamic_global_batch_size
 
