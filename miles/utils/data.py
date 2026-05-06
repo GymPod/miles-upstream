@@ -275,30 +275,21 @@ def get_minimum_num_micro_batch_size(total_lengths, max_tokens_per_gpu):
 def _compute_dynamic_global_batch_size(args, *, dp_size: int, num_samples: int) -> int:
     """Compute the dynamic global batch size for the given dp_size and sample count.
 
-    Trim is to a multiple of LCM(dp_size, n_samples_per_prompt) so that:
-      - the remaining count is exactly divisible across dp ranks, AND
-      - no GRPO group is left partial (advantages are computed within a group of
-        n_samples_per_prompt samples; chopping a group corrupts its mean/std).
+    DUPLICATION: this mirrors RolloutManager._compute_dynamic_global_batch_size. The
+    rollout-side method cannot be reused directly because @ray.remote replaces it with
+    an ActorMethod wrapper. Will be deduplicated when that method is refactored into a
+    stateless free function.
     """
-    import math as _math
-
     original_gbs = args.global_batch_size
-    group_size = max(1, getattr(args, "n_samples_per_prompt", 1))
-    trim_unit = _math.lcm(dp_size, group_size)
-    dynamic_gbs = (num_samples // trim_unit) * trim_unit
+    dynamic_gbs = (num_samples // dp_size) * dp_size
     if dynamic_gbs == 0:
-        dynamic_gbs = trim_unit
-        logger.warning(
-            f"num_samples={num_samples} < trim_unit={trim_unit} (dp_size={dp_size}, "
-            f"n_samples_per_prompt={group_size}), using trim_unit as global_batch_size"
-        )
+        dynamic_gbs = dp_size
+        logger.warning(f"num_samples={num_samples} < dp_size={dp_size}, using dp_size as global_batch_size")
     wasted = num_samples - dynamic_gbs
     if dynamic_gbs != original_gbs or wasted > 0:
         logger.info(
             f"Dynamic global_batch_size: {original_gbs} -> {dynamic_gbs} "
-            f"(num_samples={num_samples}, dp_size={dp_size}, "
-            f"n_samples_per_prompt={group_size}, trim_unit={trim_unit}, "
-            f"num_steps=1, wasted={wasted})"
+            f"(num_samples={num_samples}, dp_size={dp_size}, num_steps=1, wasted={wasted})"
         )
     return dynamic_gbs
 
