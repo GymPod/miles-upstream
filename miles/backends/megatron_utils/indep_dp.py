@@ -103,15 +103,5 @@ def _allreduce_grads_across_replicas(args, model: Sequence["DDP"], parallel_stat
         logger.error("indep_dp PG has async error: %s", e)
 
     # Intra-cell consensus: if ANY rank's allreduce failed, ALL ranks discard.
-    # NOTE: get_gloo_group() is created from the default world PG, which under FT
-    # spans BOTH cells (not truly cell-local). If the peer cell died, this collective
-    # may throw (e.g., Gloo "Connection closed by peer"). A throw here would propagate
-    # up to cell._execute_raw and incorrectly mark THIS healthy cell as errored,
-    # causing cascade failure (Cannot recover when all cells are dead). Catch and
-    # return False so the step is cleanly discarded; the orchestrator will retry +
-    # reconfigure indep_dp PG to exclude the dead peer.
-    try:
-        return collective_bool_and(value=allreduce_success, group=get_gloo_group())
-    except Exception:
-        logger.exception("intra-cell consensus collective failed (peer cell likely dead); discarding step")
-        return False
+    # get_gloo_group() is cell-local (created from the default world PG).
+    return collective_bool_and(value=allreduce_success, group=get_gloo_group())
