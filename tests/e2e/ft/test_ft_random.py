@@ -27,7 +27,7 @@ from miles.utils.test_utils.fault_injector import FailureMode
 app: typer.Typer = typer.Typer()
 
 _CONTROL_SERVER_PORT: int = 18080
-_MEAN_INTERVAL_SECONDS: float = 30.0
+_MEAN_INTERVAL_SECONDS: float = 60.0
 # Hard floor between consecutive injections so the FT controller has time to
 # spawn the replacement actor and let it rejoin before the next crash. Without
 # this, the exponential delay can produce several injections within a few
@@ -68,13 +68,23 @@ def _run_fault_injection_loop(
             logger.info("Failed to list cells from control server", exc_info=True)
             continue
 
-        alive = [c for c in cells if c["status"]["phase"] == "Running"]
-        # Only inject when ALL known cells report Running. Any cell mid-recovery
-        # (Pending / Failed / etc) means we should wait — injecting another
-        # fault now risks the all-cells-dead cascade.
-        if len(alive) < len(cells) or len(alive) <= 1:
+        # A cell is "alive" iff its Healthy condition is TRUE. Note: phase=="Running"
+        # is also true for StateAllocatedErrored (cell crashed mid-step but not yet
+        # cleaned up), so phase alone is too permissive.
+        def _is_alive(cell: dict) -> bool:
+            for cond in cell["status"]["conditions"]:
+                if cond["type"] == "Healthy" and cond["status"] == "True":
+                    return True
+            return False
+
+        alive = [c for c in cells if _is_alive(c)]
+        # Skip injection only when killing one more would leave us with no
+        # redundancy left (≤1 alive). Otherwise inject — even if some peers
+        # are still mid-recovery, we tolerate further reductions because dp
+        # still has spare cells.
+        if len(alive) <= 1:
             logger.info(
-                "Skipping injection: %d/%d cells alive (waiting for full recovery)",
+                "Skipping injection: %d/%d cells alive (need >1 to keep redundancy)",
                 len(alive),
                 len(cells),
             )
