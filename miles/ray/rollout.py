@@ -588,6 +588,10 @@ class RolloutManager:
 
             if not self.args.disable_rollout_trim_samples:
                 global_batch_size = self.args.global_batch_size
+                # Under delay_split (FT mode) we cannot pre-compute dynamic_gbs here:
+                # rollout-time dp_size may differ from the post-healing dp_size used
+                # at training time. process_rollout_data on the training side will
+                # compute and trim with the correct dp_size.
                 if self.args.use_dynamic_global_batch_size and not self.args.delay_split_train_data_by_dp:
                     logger.info(f"Collected {len(data)} samples from rollout to train with dynamic global batch size")
                     # TODO: this is a temporary solution, we should directly save dynamic_global_batch_size to rollout data
