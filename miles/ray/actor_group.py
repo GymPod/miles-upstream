@@ -1,3 +1,8 @@
+# FROZEN: v1 RayTrainGroup is the non-FT default path. Only critical bugfixes
+# go here; new features land in miles/ray/train/group.py (v2). Dispatch between
+# v1 and v2 happens in miles/ray/placement_group.py based on the env var
+# MILES_EXPERIMENTAL_FT_TRAINER (default off -> v1).
+
 import asyncio
 
 from ray.util.placement_group import PlacementGroup
