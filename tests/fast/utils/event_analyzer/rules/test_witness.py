@@ -8,8 +8,8 @@ from miles.backends.megatron_utils.types import TrainStepOutcome
 from miles.utils.event_analyzer.rules.witness import WitnessDataMismatchIssue, WitnessMissingSnapshotIssue, check
 from miles.utils.event_logger.models import (
     Event,
-    TrainGroupStepEndEvent,
     TrainAdvantageComputationEvent,
+    TrainGroupStepEndEvent,
     WitnessAllocateIdEvent,
     WitnessSnapshotParamEvent,
 )
@@ -300,7 +300,9 @@ class TestZeroAdvantageExclusion:
         events: list[Event] = [
             _make_allocate(rollout_id=0, witness_id_to_sample_index={10: 0, 11: 1}),
             # Cell 0: sample 10 has zero advantage
-            _make_loss_computation(rollout_id=0, advantages=[[0.0, 0.0], [5.0]], witness_ids=[[10], [11]], cell_index=0),
+            _make_loss_computation(
+                rollout_id=0, advantages=[[0.0, 0.0], [5.0]], witness_ids=[[10], [11]], cell_index=0
+            ),
             _make_snapshot(rollout_id=0, nonzero_witness_ids=[11], cell_index=0),  # OK: 10 excluded
             # Cell 1: sample 10 has nonzero advantage
             _make_loss_computation(rollout_id=0, advantages=[[3.0], [5.0]], witness_ids=[[10], [11]], cell_index=1),
