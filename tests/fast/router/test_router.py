@@ -10,8 +10,8 @@ import requests
 
 from miles.router.router import MilesRouter
 from miles.utils.net_utils import find_available_port
-from miles.utils.test_utils.mock_sglang_server import MockSGLangServer, default_process_fn
-from miles.utils.test_utils.uvicorn_thread_server import UvicornThreadServer
+from miles.testing.mock_sglang_server import MockSGLangServer, default_process_fn
+from miles.testing.uvicorn_thread_server import UvicornThreadServer
 
 
 def make_router_args(router_port: int, **overrides) -> Namespace:

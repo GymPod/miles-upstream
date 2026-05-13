@@ -13,7 +13,7 @@ from tests.fast.fixtures.generation_fixtures import GenerateEnv, generation_env,
 from transformers import AutoProcessor
 
 from miles.utils.data_utils import encode_image_for_rollout_engine
-from miles.utils.test_utils.mock_sglang_server import ProcessResult, ProcessResultMetaInfo
+from miles.testing.mock_sglang_server import ProcessResult, ProcessResultMetaInfo
 from miles.utils.types import Sample
 
 _ = generation_env

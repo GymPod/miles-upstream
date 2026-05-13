@@ -4,7 +4,7 @@ from copy import deepcopy
 from typing import Any
 
 from miles.utils.data_utils import load_tokenizer
-from miles.utils.test_utils.mock_sglang_server import ProcessResult
+from miles.testing.mock_sglang_server import ProcessResult
 
 AGENTIC_MAX_TURNS: int | None = None
 from miles.utils.net_utils import post

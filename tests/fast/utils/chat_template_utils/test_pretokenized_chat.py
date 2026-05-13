@@ -18,7 +18,7 @@ import pytest
 
 from miles.utils.chat_template_utils import TITOTokenizerType, resolve_fixed_chat_template
 from miles.utils.chat_template_utils.template import load_hf_chat_template
-from miles.utils.test_utils.chat_template_verify import (
+from miles.testing.chat_template_verify import (
     CaseSpec,
     assert_pretokenized_equals_standard,
     enable_thinking_variants,
@@ -26,7 +26,7 @@ from miles.utils.test_utils.chat_template_verify import (
     select_cases,
     simulate_pretokenized_path,
 )
-from miles.utils.test_utils.mock_trajectories import (
+from miles.testing.mock_trajectories import (
     MultiTurnTrajectory,
     MultiUserTurnThinkingTrajectory,
     SingleToolTrajectory,

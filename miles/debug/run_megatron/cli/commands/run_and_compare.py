@@ -7,15 +7,15 @@ from pathlib import Path
 
 import typer
 
-from miles.utils.debug_utils.run_megatron.cli.commands.args import (
+from miles.debug.run_megatron.cli.commands.args import (
     CommonRunArgs,
     CompareArgs,
     RunAndCompareArgs,
     RunArgs,
 )
-from miles.utils.debug_utils.run_megatron.cli.commands.compare import compare_impl
-from miles.utils.debug_utils.run_megatron.cli.commands.run import run_impl
-from miles.utils.debug_utils.run_megatron.cli.parallel_utils import ParallelConfig, parse_parallel_args
+from miles.debug.run_megatron.cli.commands.compare import compare_impl
+from miles.debug.run_megatron.cli.commands.run import run_impl
+from miles.debug.run_megatron.cli.parallel_utils import ParallelConfig, parse_parallel_args
 from miles.utils.typer_utils import dataclass_cli
 
 

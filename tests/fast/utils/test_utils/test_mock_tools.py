@@ -10,7 +10,7 @@ from sglang.srt.entrypoints.openai.protocol import Tool
 from sglang.srt.function_call.core_types import ToolCallItem
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 
-from miles.utils.test_utils.mock_tools import SAMPLE_TOOLS, TwoTurnStub, execute_tool_call
+from miles.testing.mock_tools import SAMPLE_TOOLS, TwoTurnStub, execute_tool_call
 
 
 class TestExecuteToolCall:

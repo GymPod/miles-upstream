@@ -160,7 +160,7 @@ def main() -> int:
     else:
         chat_template, source_desc = _load_template_from_model(args.model)
 
-    from miles.utils.test_utils.chat_template_verify import (
+    from miles.testing.chat_template_verify import (
         ALL_CASES,
         check_coverage,
         run_all_checks,

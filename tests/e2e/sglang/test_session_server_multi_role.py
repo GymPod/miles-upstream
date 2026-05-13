@@ -1,7 +1,7 @@
 """E2E test: multi-role session-server TITO verification under real model inference.
 
 Thin wrapper around
-``miles.utils.test_utils.session_verify_runner.run_session_verify`` (driver
+``miles.testing.session_verify_runner.run_session_verify`` (driver
 and coverage assertions live in ``session_verify_agent``).  Requires 8 GPUs.
 """
 
@@ -15,7 +15,7 @@ register_cuda_ci(est_time=2400, suite="stage-b-sglang-8-gpu", num_gpus=8)
 import os
 from dataclasses import dataclass
 
-from miles.utils.test_utils.session_verify_runner import run_session_verify
+from miles.testing.session_verify_runner import run_session_verify
 
 
 @dataclass(frozen=True)

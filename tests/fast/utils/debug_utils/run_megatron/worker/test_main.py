@@ -75,14 +75,14 @@ for _sub in [
         if not hasattr(mod, name):
             setattr(mod, name, MagicMock())
 
-from miles.utils.debug_utils.run_megatron.worker.main import (  # noqa: E402
+from miles.debug.run_megatron.worker.main import (  # noqa: E402
     _apply_source_patches,
     _finalize_dumper,
     _parse_args,
     _run_forward_backward,
 )
 
-_MODULE = "miles.utils.debug_utils.run_megatron.worker.main"
+_MODULE = "miles.debug.run_megatron.worker.main"
 
 
 class TestParseArgs:

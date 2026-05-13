@@ -31,13 +31,13 @@ from transformers import AutoTokenizer
 from miles.utils.chat_template_utils import TITOTokenizerType, resolve_fixed_chat_template
 from miles.utils.chat_template_utils.template import apply_chat_template
 from miles.utils.data_utils import load_tokenizer
-from miles.utils.test_utils.chat_template_verify import (
+from miles.testing.chat_template_verify import (
     CaseSpec,
     enable_thinking_variants,
     format_case_id,
     select_cases,
 )
-from miles.utils.test_utils.mock_trajectories import (
+from miles.testing.mock_trajectories import (
     MultiRoleSequenceTrajectory,
     SimpleNoToolTrajectory,
     SingleToolThinkingTrajectory,

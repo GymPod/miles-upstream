@@ -55,7 +55,7 @@ def _ensure_prompt_data() -> str:
 
 def _ensure_model_downloaded(hf_checkpoint: str) -> str:
     """Download the model to ``/root/models/<short-name>`` if not already there."""
-    import miles.utils.external_utils.command_utils as U
+    import miles.cli.command_utils as U
 
     short = hf_checkpoint.split("/")[-1]
     local_dir = os.path.join(LOCAL_MODELS_ROOT, short)
@@ -111,9 +111,9 @@ def build_train_args(
 
     generate_args = (
         "--custom-generate-function-path "
-        "miles.utils.test_utils.session_verify_agent.generate "
+        "miles.testing.session_verify_agent.generate "
         "--custom-agent-function-path "
-        "miles.utils.test_utils.session_verify_agent.run_agent "
+        "miles.testing.session_verify_agent.run_agent "
         f"--session-verify-cycles {cycles} "
     )
 
@@ -170,7 +170,7 @@ def run_session_verify(
     work starts.  Pass ``None`` for either to auto-resolve from the TITO
     subclass.
     """
-    import miles.utils.external_utils.command_utils as U
+    import miles.cli.command_utils as U
     from miles.utils.chat_template_utils import resolve_reasoning_and_tool_call_parser
 
     reasoning_parser, tool_call_parser = resolve_reasoning_and_tool_call_parser(

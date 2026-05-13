@@ -9,7 +9,7 @@ from typing import NamedTuple
 
 import torch
 
-from miles.utils.debug_utils.run_megatron.worker.script_args import WorkerScriptArgs
+from miles.debug.run_megatron.worker.script_args import WorkerScriptArgs
 from miles.utils.replay_utils import routing_replay_manager
 
 

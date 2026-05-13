@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from miles.utils.debug_utils.run_megatron.worker.top_k_print import (
+from miles.debug.run_megatron.worker.top_k_print import (
     _decode_token,
     _get_dist_info,
     _print_top_predictions_all_ranks,
@@ -30,14 +30,14 @@ class TestDecodeToken:
 
 
 class TestGetDistInfo:
-    @patch("miles.utils.debug_utils.run_megatron.worker.top_k_print.dist")
+    @patch("miles.debug.run_megatron.worker.top_k_print.dist")
     def test_not_initialized(self, mock_dist: MagicMock) -> None:
         mock_dist.is_initialized.return_value = False
         rank, world_size = _get_dist_info()
         assert rank == 0
         assert world_size == 1
 
-    @patch("miles.utils.debug_utils.run_megatron.worker.top_k_print.dist")
+    @patch("miles.debug.run_megatron.worker.top_k_print.dist")
     def test_initialized(self, mock_dist: MagicMock) -> None:
         mock_dist.is_initialized.return_value = True
         mock_dist.get_rank.return_value = 2
@@ -112,7 +112,7 @@ class TestPrintTopPredictionsForRank:
         assert mock_tok.decode.call_count == 12
 
 
-_TOP_K_MODULE = "miles.utils.debug_utils.run_megatron.worker.top_k_print"
+_TOP_K_MODULE = "miles.debug.run_megatron.worker.top_k_print"
 
 
 class TestPrintTopK:

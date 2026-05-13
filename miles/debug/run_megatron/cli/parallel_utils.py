@@ -7,7 +7,7 @@ import dataclasses
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from miles.utils.debug_utils.run_megatron.cli.commands.args import RunArgs
+    from miles.debug.run_megatron.cli.commands.args import RunArgs
 
 _FIELD_NAMES: tuple[str, ...] = ("tp", "pp", "cp", "ep", "etp")
 

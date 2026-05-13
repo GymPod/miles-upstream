@@ -25,7 +25,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from miles.utils.test_utils.mock_sglang_server import ProcessFn, ProcessResult
+from miles.testing.mock_sglang_server import ProcessFn, ProcessResult
 
 # ---------------------------------------------------------------------------
 # Shared tool definitions

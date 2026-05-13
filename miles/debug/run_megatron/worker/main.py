@@ -4,7 +4,7 @@ This script is launched by ``cli.py run`` via ``torchrun`` and runs inside
 each GPU process.  It uses Megatron's argparse (to consume ``MODEL_ARGS``
 from the shell script) plus a handful of custom arguments.
 
-Not intended to be run directly — use ``python -m miles.utils.debug_utils.run_megatron run`` instead.
+Not intended to be run directly — use ``python -m miles.debug.run_megatron run`` instead.
 """
 
 import argparse
@@ -30,15 +30,15 @@ from miles.backends.megatron_utils.checkpoint import load_checkpoint
 from miles.backends.megatron_utils.initialize import init
 from miles.backends.megatron_utils.model_provider import get_model_provider_func
 from miles.backends.training_utils.parallel import get_parallel_state
-from miles.utils.debug_utils.run_megatron.worker.batch import loss_func, prepare_batch
-from miles.utils.debug_utils.run_megatron.worker.output import compute_and_save_output_info
-from miles.utils.debug_utils.run_megatron.worker.replay import (
+from miles.debug.run_megatron.worker.batch import loss_func, prepare_batch
+from miles.debug.run_megatron.worker.output import compute_and_save_output_info
+from miles.debug.run_megatron.worker.replay import (
     load_replay_data,
     save_replay_data,
     setup_replay_before_model,
 )
-from miles.utils.debug_utils.run_megatron.worker.script_args import WORKER_SCRIPT_ARGS_BRIDGE, WorkerScriptArgs
-from miles.utils.debug_utils.run_megatron.worker.top_k_print import print_top_k
+from miles.debug.run_megatron.worker.script_args import WORKER_SCRIPT_ARGS_BRIDGE, WorkerScriptArgs
+from miles.debug.run_megatron.worker.top_k_print import print_top_k
 
 
 def main() -> None:

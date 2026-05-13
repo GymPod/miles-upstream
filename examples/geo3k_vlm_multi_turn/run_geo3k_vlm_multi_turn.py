@@ -1,7 +1,7 @@
 import os
 
 import miles.utils.misc as U
-from miles.utils.external_utils.command_utils import execute_train
+from miles.cli.command_utils import execute_train
 
 MODEL_NAME = os.environ.get("MILES_SCRIPT_MODEL_NAME", "Qwen3-VL-2B-Instruct")
 assert MODEL_NAME in {

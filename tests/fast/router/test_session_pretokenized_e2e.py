@@ -32,7 +32,7 @@ from tests.fast.router.session_pretokenized_test_utils import (
 )
 
 from miles.utils.chat_template_utils import TITOTokenizerType, resolve_fixed_chat_template
-from miles.utils.test_utils.mock_trajectories import LongChainTrajectory, build_trajectory
+from miles.testing.mock_trajectories import LongChainTrajectory, build_trajectory
 
 
 @dataclass(frozen=True)

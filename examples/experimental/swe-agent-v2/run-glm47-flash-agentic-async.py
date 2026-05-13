@@ -32,7 +32,7 @@ from typing import Literal
 
 import typer
 
-import miles.utils.external_utils.command_utils as U
+import miles.cli.command_utils as U
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 FULLY_ASYNC_DIR = (Path(__file__).resolve().parent.parent.parent / "fully_async").resolve()

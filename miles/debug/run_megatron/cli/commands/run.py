@@ -5,20 +5,20 @@ from typing import Annotated
 
 import typer
 
-from miles.utils.debug_utils.run_megatron.cli.commands.args import RunArgs
-from miles.utils.debug_utils.run_megatron.cli.parallel_utils import ParallelConfig
-from miles.utils.debug_utils.run_megatron.cli.path_utils import resolve_megatron_path, resolve_model_script
-from miles.utils.debug_utils.run_megatron.cli.prompt_utils import (
+from miles.debug.run_megatron.cli.commands.args import RunArgs
+from miles.debug.run_megatron.cli.parallel_utils import ParallelConfig
+from miles.debug.run_megatron.cli.path_utils import resolve_megatron_path, resolve_model_script
+from miles.debug.run_megatron.cli.prompt_utils import (
     PromptConfig,
     generate_token_ids,
     write_token_ids_to_tmpfile,
 )
-from miles.utils.debug_utils.run_megatron.cli.worker_executor import (
+from miles.debug.run_megatron.cli.worker_executor import (
     build_dumper_env,
     build_torchrun_cmd,
     build_worker_args,
 )
-from miles.utils.debug_utils.run_megatron.worker.script_args import WorkerScriptArgs
+from miles.debug.run_megatron.worker.script_args import WorkerScriptArgs
 from miles.utils.misc import exec_command
 from miles.utils.typer_utils import dataclass_cli
 

@@ -2,7 +2,7 @@ import os
 
 from tests.ci.ci_register import register_cuda_ci
 
-import miles.utils.external_utils.command_utils as U
+import miles.cli.command_utils as U
 
 # Sweeps enabled rollout / dispatcher variants in one job so the previously
 # matrix-parameterized CI is back. est_time stays conservative while the

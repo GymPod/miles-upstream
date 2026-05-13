@@ -54,7 +54,7 @@ python examples/formal_math/single_round/run_minimal.py
 
 ## Advanced Usage
 
-For full-scale training or standard runs, use `run.py`. This script leverages `miles.utils.external_utils.command_utils` to handle cluster setup and execution.
+For full-scale training or standard runs, use `run.py`. This script leverages `miles.cli.command_utils` to handle cluster setup and execution.
 
 ```bash
 python examples/formal_math/single_round/run.py

@@ -3,8 +3,8 @@ from unittest.mock import patch
 
 from tests.fast.utils.debug_utils.run_megatron.conftest import make_script_args
 
-from miles.utils.debug_utils.run_megatron.cli.parallel_utils import ParallelConfig
-from miles.utils.debug_utils.run_megatron.cli.worker_executor import (
+from miles.debug.run_megatron.cli.parallel_utils import ParallelConfig
+from miles.debug.run_megatron.cli.worker_executor import (
     _build_megatron_flags,
     build_dumper_env,
     build_torchrun_cmd,
@@ -182,7 +182,7 @@ class TestBuildWorkerArgs:
 
 
 class TestBuildTorchrunCmd:
-    @patch("miles.utils.debug_utils.run_megatron.cli.worker_executor.resolve_model_script")
+    @patch("miles.debug.run_megatron.cli.worker_executor.resolve_model_script")
     def test_basic_structure(self, mock_resolve: object) -> None:
         mock_resolve.return_value = Path("/repo/scripts/models/deepseek_v3.sh")  # type: ignore[union-attr]
         cmd = build_torchrun_cmd(
@@ -195,7 +195,7 @@ class TestBuildTorchrunCmd:
         assert "source" in cmd
         assert "PYTHONPATH" in cmd
 
-    @patch("miles.utils.debug_utils.run_megatron.cli.worker_executor.resolve_model_script")
+    @patch("miles.debug.run_megatron.cli.worker_executor.resolve_model_script")
     def test_nproc(self, mock_resolve: object) -> None:
         mock_resolve.return_value = Path("/repo/scripts/models/test.sh")  # type: ignore[union-attr]
         cmd = build_torchrun_cmd(
@@ -206,7 +206,7 @@ class TestBuildTorchrunCmd:
         )
         assert "--nproc-per-node 8" in cmd
 
-    @patch("miles.utils.debug_utils.run_megatron.cli.worker_executor.resolve_model_script")
+    @patch("miles.debug.run_megatron.cli.worker_executor.resolve_model_script")
     def test_worker_args_in_cmd(self, mock_resolve: object) -> None:
         mock_resolve.return_value = Path("/repo/scripts/models/test.sh")  # type: ignore[union-attr]
         cmd = build_torchrun_cmd(
@@ -217,7 +217,7 @@ class TestBuildTorchrunCmd:
         )
         assert "--my-flag 42" in cmd
 
-    @patch("miles.utils.debug_utils.run_megatron.cli.worker_executor.resolve_model_script")
+    @patch("miles.debug.run_megatron.cli.worker_executor.resolve_model_script")
     def test_megatron_in_pythonpath(self, mock_resolve: object) -> None:
         mock_resolve.return_value = Path("/repo/scripts/models/test.sh")  # type: ignore[union-attr]
         cmd = build_torchrun_cmd(

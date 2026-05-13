@@ -11,7 +11,7 @@ from tests.fast.fixtures.generation_fixtures import extra_argv_for_variant
 from tests.fast.fixtures.rollout_fixtures import RolloutEnvConfig
 from tests.fast.rollout.inference_rollout.integration.utils import MODULAR_ROLLOUT_BASE_ARGV, load_and_call_rollout
 
-from miles.utils.test_utils.mock_tools import TwoTurnStub
+from miles.testing.mock_tools import TwoTurnStub
 from miles.utils.types import Sample
 
 

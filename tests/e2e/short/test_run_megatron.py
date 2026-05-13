@@ -19,8 +19,8 @@ if str(_MILES_ROOT) not in sys.path:
 import typer
 from tests.e2e.conftest_dumper import MEGATRON_PATCHER_YAMLS, clear_proxy_env
 
-import miles.utils.external_utils.command_utils as U
-from miles.utils.debug_utils.run_megatron.cli.parallel_utils import ParallelConfig, parse_parallel_args
+import miles.cli.command_utils as U
+from miles.debug.run_megatron.cli.parallel_utils import ParallelConfig, parse_parallel_args
 from miles.utils.misc import exec_command
 
 app: typer.Typer = typer.Typer()
@@ -106,7 +106,7 @@ def run(
         target_extra_args_part = f"--target-extra-args '{config.target_extra_megatron_args}' "
 
     cmd: str = (
-        f"python -m miles.utils.debug_utils.run_megatron run-and-compare "
+        f"python -m miles.debug.run_megatron run-and-compare "
         f"--model-type {MODEL_TYPE} "
         f"--hf-checkpoint /root/models/{MODEL_NAME} "
         f"--ref-load /root/{MODEL_NAME}_torch_dist "
@@ -140,7 +140,7 @@ def compare(
     target_dir_name: str = ParallelConfig.from_parsed_args(parse_parallel_args(config.target_args)).dir_name()
 
     cmd: str = (
-        f"python -m miles.utils.debug_utils.run_megatron compare "
+        f"python -m miles.debug.run_megatron compare "
         f"--baseline-dir {base / baseline_dir_name / 'standalone'} "
         f"--target-dir {base / target_dir_name / 'standalone'}"
     )

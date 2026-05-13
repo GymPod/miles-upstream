@@ -34,8 +34,8 @@ import requests
 
 from miles.rollout.session.session_server import SessionServer
 from miles.utils.net_utils import find_available_port
-from miles.utils.test_utils.mock_sglang_server import MockSGLangServer, ProcessResult, with_mock_server
-from miles.utils.test_utils.uvicorn_thread_server import UvicornThreadServer
+from miles.testing.mock_sglang_server import MockSGLangServer, ProcessResult, with_mock_server
+from miles.testing.uvicorn_thread_server import UvicornThreadServer
 
 HF_CHECKPOINT = "Qwen/Qwen3-0.6B"
 

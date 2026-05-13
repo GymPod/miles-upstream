@@ -6,7 +6,7 @@ duplicated all-gather computation.  See: https://github.com/radixark/miles/issue
 
 import os
 
-import miles.utils.external_utils.command_utils as U
+import miles.cli.command_utils as U
 
 MODEL_NAME = "Qwen3.5-35B-A3B"
 MODEL_TYPE = "qwen3.5-35B-A3B"

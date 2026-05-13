@@ -4,7 +4,7 @@ from typing import Literal
 
 import typer
 
-import miles.utils.external_utils.command_utils as U
+import miles.cli.command_utils as U
 
 WANDB_PROJECT = "miles-dev-retool-v2"
 WANDB_GROUP = "sft-multi-turn-batch-32"

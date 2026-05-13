@@ -35,7 +35,7 @@ register_cuda_ci(est_time=1200, suite="stage-b-sglang-8-gpu", num_gpus=8)
 import json
 import os
 from dataclasses import dataclass
-import miles.utils.external_utils.command_utils as U
+import miles.cli.command_utils as U
 
 # ---------------------------------------------------------------------------
 # Model family registry

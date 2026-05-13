@@ -2,7 +2,7 @@ import os
 
 from tests.ci.ci_register import register_cuda_ci
 
-import miles.utils.external_utils.command_utils as U
+import miles.cli.command_utils as U
 
 # Covers two ckpt modes back-to-back in one job (save + async_save, each
 # followed by a load roundtrip), so est_time is roughly 2x of a single mode.

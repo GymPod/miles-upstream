@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import torch
 
-from miles.utils.debug_utils.run_megatron.worker.output import (
+from miles.debug.run_megatron.worker.output import (
     _compute_logprob_entries,
     _compute_output_info,
     compute_and_save_output_info,
@@ -121,8 +121,8 @@ class TestComputeLogprobEntries:
 # ---------------------------------------------------------------------------
 
 
-_MOCK_MPU = "miles.utils.debug_utils.run_megatron.worker.output.mpu"
-_MOCK_DIST = "miles.utils.debug_utils.run_megatron.worker.output.dist"
+_MOCK_MPU = "miles.debug.run_megatron.worker.output.mpu"
+_MOCK_DIST = "miles.debug.run_megatron.worker.output.dist"
 
 
 def _patch_distributed(

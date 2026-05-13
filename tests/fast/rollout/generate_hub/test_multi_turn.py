@@ -12,8 +12,8 @@ from tests.fast.fixtures.generation_fixtures import GenerateEnv, generation_env,
 
 from miles.utils.chat_template_utils import TITOTokenizerType, get_tito_tokenizer
 from miles.utils.data_utils import load_tokenizer
-from miles.utils.test_utils.mock_sglang_server import ProcessResult, ProcessResultMetaInfo
-from miles.utils.test_utils.mock_tools import SAMPLE_TOOLS, ThreeTurnStub, TwoTurnStub
+from miles.testing.mock_sglang_server import ProcessResult, ProcessResultMetaInfo
+from miles.testing.mock_tools import SAMPLE_TOOLS, ThreeTurnStub, TwoTurnStub
 from miles.utils.types import Sample
 
 # generate_hub tests use generation_env → parse_args(fsdp) → fsdp_utils
@@ -697,7 +697,7 @@ class TestAgentMetadata:
             assert "reward" not in s.metadata
 
     def test_session_server_identity_forwarded_to_agent_metadata(self, variant, generation_env):
-        from miles.utils.test_utils import mock_tools
+        from miles.testing import mock_tools
 
         generation_env.mock_server.process_fn = TwoTurnStub.process_fn
 
@@ -733,7 +733,7 @@ class TestAgentNoRecords:
         )
         from miles.utils.net_utils import find_available_port
         from miles.utils.misc import SingletonMeta
-        from miles.utils.test_utils.mock_sglang_server import with_mock_server
+        from miles.testing.mock_sglang_server import with_mock_server
 
         SingletonMeta.clear_all_instances()
 
@@ -744,7 +744,7 @@ class TestAgentNoRecords:
             session_port = find_available_port(31000)
             noop_argv = extra_argv_for_variant(
                 agentic_variant,
-                custom_agent_function_path="miles.utils.test_utils.mock_tools.run_agentic_noop",
+                custom_agent_function_path="miles.testing.mock_tools.run_agentic_noop",
             )
             args = make_args(
                 variant=agentic_variant,

@@ -55,7 +55,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-import miles.utils.external_utils.command_utils as U
+import miles.cli.command_utils as U
 
 DUMP_ROOT = Path(os.environ.get("ROUTER_EQ_DUMP_ROOT", "/tmp/router-eq"))
 PROMPT_DATA_PATH = "/root/datasets/dapo-math-17k/dapo-math-17k.jsonl"

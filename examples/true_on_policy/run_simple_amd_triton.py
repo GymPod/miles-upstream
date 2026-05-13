@@ -6,7 +6,7 @@ _MILES_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 if str(_MILES_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_MILES_REPO_ROOT))
 
-import miles.utils.external_utils.command_utils as U
+import miles.cli.command_utils as U
 
 MODEL_NAME = os.environ.get("MILES_SCRIPT_MODEL_NAME", "Qwen3-0.6B")
 assert MODEL_NAME in {"Qwen3-0.6B"}

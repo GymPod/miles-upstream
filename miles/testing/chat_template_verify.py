@@ -147,7 +147,7 @@ def verify_append_only(
 
 import re  # noqa: E402
 
-from miles.utils.test_utils.mock_trajectories import (  # noqa: E402
+from miles.testing.mock_trajectories import (  # noqa: E402
     IntermediateSystemThinkingTrajectory,
     IntermediateSystemTrajectory,
     LongChainThinkingTrajectory,

@@ -18,9 +18,9 @@ from miles.rollout.session.session_server import SessionServer
 from miles.utils.concurrency_utils import run
 from miles.utils.net_utils import find_available_port, init_http_client
 from miles.utils.misc import SingletonMeta
-from miles.utils.test_utils import mock_tools
-from miles.utils.test_utils.mock_sglang_server import ProcessResult, ProcessResultMetaInfo, with_mock_server
-from miles.utils.test_utils.uvicorn_thread_server import UvicornThreadServer
+from miles.testing import mock_tools
+from miles.testing.mock_sglang_server import ProcessResult, ProcessResultMetaInfo, with_mock_server
+from miles.testing.uvicorn_thread_server import UvicornThreadServer
 from miles.utils.types import Sample
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -44,10 +44,10 @@ def extra_argv_for_variant(
     *,
     custom_generate_function_path: str | None = None,
     generate_max_turns: int = 16,
-    generate_tool_specs_path: str = "miles.utils.test_utils.mock_tools.SAMPLE_TOOLS",
+    generate_tool_specs_path: str = "miles.testing.mock_tools.SAMPLE_TOOLS",
     generate_tool_call_parser: str = "qwen25",
-    generate_execute_tool_function_path: str = "miles.utils.test_utils.mock_tools.execute_tool_call",
-    custom_agent_function_path: str = "miles.utils.test_utils.mock_tools.run_agentic_tool_call",
+    generate_execute_tool_function_path: str = "miles.testing.mock_tools.execute_tool_call",
+    custom_agent_function_path: str = "miles.testing.mock_tools.run_agentic_tool_call",
 ) -> list[str]:
     argv = [
         "--custom-generate-function-path",
@@ -153,9 +153,9 @@ def make_args(
     extra_argv: list[str] | None = None,
     custom_generate_function_path: str | None = None,
     generate_max_turns: int = 16,
-    generate_tool_specs_path: str = "miles.utils.test_utils.mock_tools.SAMPLE_TOOLS",
+    generate_tool_specs_path: str = "miles.testing.mock_tools.SAMPLE_TOOLS",
     generate_tool_call_parser: str = "qwen25",
-    generate_execute_tool_function_path: str = "miles.utils.test_utils.mock_tools.execute_tool_call",
+    generate_execute_tool_function_path: str = "miles.testing.mock_tools.execute_tool_call",
     rollout_max_context_len: int | None = None,
     chat_template_path: str | None = None,
 ) -> Namespace:

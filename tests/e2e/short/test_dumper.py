@@ -28,7 +28,7 @@ from tests.e2e.conftest_dumper import (
     run_and_verify_comparator,
 )
 
-import miles.utils.external_utils.command_utils as U
+import miles.cli.command_utils as U
 
 app: typer.Typer = typer.Typer()
 

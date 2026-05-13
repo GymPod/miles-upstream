@@ -2,9 +2,9 @@
 
 from pathlib import Path
 
-from miles.utils.debug_utils.run_megatron.cli.parallel_utils import ParallelConfig
-from miles.utils.debug_utils.run_megatron.cli.path_utils import resolve_model_script
-from miles.utils.debug_utils.run_megatron.worker.script_args import WORKER_SCRIPT_ARGS_BRIDGE, WorkerScriptArgs
+from miles.debug.run_megatron.cli.parallel_utils import ParallelConfig
+from miles.debug.run_megatron.cli.path_utils import resolve_model_script
+from miles.debug.run_megatron.worker.script_args import WORKER_SCRIPT_ARGS_BRIDGE, WorkerScriptArgs
 
 
 def build_torchrun_cmd(
@@ -16,7 +16,7 @@ def build_torchrun_cmd(
 ) -> str:
     """Build the full shell command to launch the worker via torchrun."""
     model_script: Path = resolve_model_script(model_type)
-    worker_module: str = "miles.utils.debug_utils.run_megatron.worker.main"
+    worker_module: str = "miles.debug.run_megatron.worker.main"
 
     cmd: str = (
         f'source "{model_script}" && '

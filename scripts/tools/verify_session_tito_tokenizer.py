@@ -4,7 +4,7 @@
 Boots the miles rollout pipeline (sglang + miles-router) under
 ``--debug-rollout-only`` and drives the schedule registered for the requested
 ``--tito-allowed-append-roles`` surface (see
-``miles.utils.test_utils.session_verify_agent``).  PASS iff every sample
+``miles.testing.session_verify_agent``).  PASS iff every sample
 completes without HTTP error from the server-side prefix check and the
 custom-generate coverage assertion is satisfied.
 
@@ -34,8 +34,8 @@ import logging
 import sys
 
 from miles.utils.chat_template_utils.tito_tokenizer import TITOTokenizerType
-from miles.utils.test_utils.session_verify_agent import select_schedule
-from miles.utils.test_utils.session_verify_runner import run_session_verify
+from miles.testing.session_verify_agent import select_schedule
+from miles.testing.session_verify_runner import run_session_verify
 
 
 def _print_action_table(allowed_roles: list[str]) -> None:
