@@ -12,7 +12,8 @@ from miles.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_fil
 from miles.rollout.inference_rollout.inference_rollout_common import GenerateState, generate_and_rm_group
 from miles.utils import dumping_utils
 from miles.utils.net_utils import get, post
-from miles.utils.misc import as_completed_async, load_function
+from miles.utils.iter_utils import as_completed_async
+from miles.utils.registry import load_function
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)

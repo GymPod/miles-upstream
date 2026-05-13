@@ -8,9 +8,10 @@ import requests
 from kimina_client import AsyncKiminaClient, CheckResponse
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-from miles.utils.misc import exec_command, get_free_port
+from miles.utils.shell import exec_command
 
 # TODO handle docker stop more gracefully later
+from miles.utils.net_utils import get_free_port
 _KILL_PREVIOUS_KIMINA_DOCKER = bool(int(os.environ.get("MILES_KILL_PREVIOUS_KIMINA_DOCKER", "1")))
 
 

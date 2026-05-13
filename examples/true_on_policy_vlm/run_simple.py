@@ -1,6 +1,6 @@
 import os
 
-import miles.utils.misc as U
+from miles.utils.shell import exec_command
 from miles.cli.command_utils import execute_train, get_default_wandb_args
 
 MODEL_NAME = os.environ.get("MILES_SCRIPT_MODEL_NAME", "Qwen3-VL-2B-Instruct")
@@ -11,11 +11,11 @@ EXTERNAL_RAY = int(os.environ.get("MILES_SCRIPT_EXTERNAL_RAY", "0"))
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
+    exec_command("mkdir -p /root/models /root/datasets")
+    exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
     dataset_name = "chenhegu/geo3k_imgurl"
     _, partial_name = dataset_name.split("/")
-    U.exec_command(f"hf download --repo-type dataset {dataset_name} --local-dir /root/datasets/{partial_name}")
+    exec_command(f"hf download --repo-type dataset {dataset_name} --local-dir /root/datasets/{partial_name}")
 
 
 def execute():

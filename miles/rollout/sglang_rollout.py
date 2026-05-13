@@ -22,7 +22,8 @@ from miles.utils.concurrency_utils import run
 from miles.utils.data_utils import Dataset
 from miles.utils.eval_config import EvalDatasetConfig
 from miles.utils.net_utils import get, post
-from miles.utils.misc import SingletonMeta, load_function
+from miles.utils.singleton import SingletonMeta
+from miles.utils.registry import load_function
 from miles.utils.data_utils import (
     build_processor_kwargs,
     encode_image_for_rollout_engine,

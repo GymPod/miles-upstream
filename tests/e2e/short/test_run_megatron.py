@@ -21,7 +21,7 @@ from tests.e2e.conftest_dumper import MEGATRON_PATCHER_YAMLS, clear_proxy_env
 
 import miles.cli.command_utils as U
 from miles.debug.run_megatron.cli.parallel_utils import ParallelConfig, parse_parallel_args
-from miles.utils.misc import exec_command
+from miles.utils.shell import exec_command
 
 app: typer.Typer = typer.Typer()
 

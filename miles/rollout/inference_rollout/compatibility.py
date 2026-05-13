@@ -11,7 +11,7 @@ from miles.rollout.base_types import (
     RolloutFnTrainOutput,
 )
 from miles.utils.concurrency_utils import run
-from miles.utils.misc import load_function
+from miles.utils.registry import load_function
 
 
 class LegacyRolloutFnAdapter:

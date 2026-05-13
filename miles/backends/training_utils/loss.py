@@ -7,7 +7,7 @@ import torch.distributed as dist
 from torch.utils.checkpoint import checkpoint
 
 from miles.utils.distributed_utils import distributed_masked_whiten
-from miles.utils.misc import load_function
+from miles.utils.registry import load_function
 from miles.utils.ppo_utils import (
     calculate_log_probs_and_entropy,
     compute_approx_kl,

@@ -287,7 +287,7 @@ def forward_only(
         model_module.eval()
 
     if args.custom_megatron_before_log_prob_hook_path:
-        from miles.utils.misc import load_function
+        from miles.utils.registry import load_function
 
         custom_before_log_prob_hook = load_function(args.custom_megatron_before_log_prob_hook_path)
         custom_before_log_prob_hook(args, model, store_prefix)
@@ -364,7 +364,7 @@ def train_one_step(
         optimizer.zero_grad()
 
     if args.custom_megatron_before_train_step_hook_path:
-        from miles.utils.misc import load_function
+        from miles.utils.registry import load_function
 
         custom_before_train_step_hook = load_function(args.custom_megatron_before_train_step_hook_path)
         custom_before_train_step_hook(args, rollout_id, step_id, model, optimizer, opt_param_scheduler)

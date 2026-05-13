@@ -1,7 +1,7 @@
 import datetime
 import logging
 import os
-from miles.utils.misc import SingletonMeta
+from miles.utils.singleton import SingletonMeta
 
 try:
     from torch.utils.tensorboard import SummaryWriter

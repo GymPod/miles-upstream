@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-from miles.utils.misc import FunctionRegistry, function_registry, load_function
+from miles.utils.registry import FunctionRegistry, function_registry, load_function
 
 
 def _fn_a():

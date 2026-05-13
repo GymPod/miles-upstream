@@ -1,3 +1,4 @@
+import asyncio
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -40,3 +41,8 @@ def _chunk_by_size(objects: Iterable[Any], compute_size: Callable[[Any], int], c
 
     if bucket:
         yield bucket
+
+
+async def as_completed_async(tasks):
+    for coro in asyncio.as_completed(tasks):
+        yield await coro

@@ -185,7 +185,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
         self.rollout_data_postprocess = None
         if self.args.rollout_data_postprocess_path is not None:
-            from miles.utils.misc import load_function
+            from miles.utils.registry import load_function
 
             self.rollout_data_postprocess = load_function(self.args.rollout_data_postprocess_path)
 

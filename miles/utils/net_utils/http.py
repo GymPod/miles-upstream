@@ -40,6 +40,14 @@ def is_port_available(port):
             return False
 
 
+def get_free_port(start_port=10000, consecutive=1):
+    """Find the lowest port >= start_port where consecutive ports are all available."""
+    port = start_port
+    while not all(is_port_available(port + i) for i in range(consecutive)):
+        port += 1
+    return port
+
+
 def wait_for_server_ready(
     host: str,
     port: int,

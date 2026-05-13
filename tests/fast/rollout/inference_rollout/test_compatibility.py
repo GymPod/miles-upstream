@@ -24,7 +24,7 @@ from miles.rollout.inference_rollout.compatibility import (
     load_rollout_function,
 )
 from miles.utils.concurrency_utils import run
-from miles.utils.misc import function_registry
+from miles.utils.registry import function_registry
 
 
 @pytest.fixture

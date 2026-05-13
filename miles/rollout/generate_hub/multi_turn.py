@@ -17,7 +17,7 @@ from miles.rollout.generate_utils.tool_call_utils import (
     update_sample_with_tool_responses,
 )
 from miles.utils.net_utils import post
-from miles.utils.misc import load_function
+from miles.utils.registry import load_function
 
 
 async def generate(input: GenerateFnInput) -> GenerateFnOutput:

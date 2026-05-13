@@ -73,7 +73,7 @@ from miles.rollout.generate_utils.openai_endpoint_utils import (
 )
 from miles.rollout.generate_utils.sample_utils import merge_samples
 from miles.utils.net_utils import post
-from miles.utils.misc import load_function
+from miles.utils.registry import load_function
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)

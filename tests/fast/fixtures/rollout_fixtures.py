@@ -18,7 +18,7 @@ from miles.rollout.session.session_server import SessionServer
 from miles.router.router import MilesRouter
 from miles.utils.arguments import parse_args
 from miles.utils.net_utils import find_available_port, init_http_client
-from miles.utils.misc import SingletonMeta
+from miles.utils.singleton import SingletonMeta
 from miles.testing.mock_sglang_server import MockSGLangServer, with_mock_server
 from miles.testing.uvicorn_thread_server import UvicornThreadServer
 

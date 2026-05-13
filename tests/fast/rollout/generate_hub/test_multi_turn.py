@@ -732,7 +732,7 @@ class TestAgentNoRecords:
             with_session_server,
         )
         from miles.utils.net_utils import find_available_port
-        from miles.utils.misc import SingletonMeta
+        from miles.utils.singleton import SingletonMeta
         from miles.testing.mock_sglang_server import with_mock_server
 
         SingletonMeta.clear_all_instances()

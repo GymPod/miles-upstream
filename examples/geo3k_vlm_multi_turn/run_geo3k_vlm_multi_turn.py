@@ -1,6 +1,6 @@
 import os
 
-import miles.utils.misc as U
+from miles.utils.shell import exec_command
 from miles.cli.command_utils import execute_train
 
 MODEL_NAME = os.environ.get("MILES_SCRIPT_MODEL_NAME", "Qwen3-VL-2B-Instruct")
@@ -30,11 +30,11 @@ def get_megatron_model_type(model_name: str) -> str:
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
+    exec_command("mkdir -p /root/models /root/datasets")
+    exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
     data_missing = not os.path.exists(TRAIN_DATA_PATH)
     if data_missing:
-        U.exec_command(f"hf download --repo-type dataset {DATASET_NAME} --local-dir {DATA_ROOT}")
+        exec_command(f"hf download --repo-type dataset {DATASET_NAME} --local-dir {DATA_ROOT}")
     if not os.path.exists(TRAIN_DATA_PATH):
         raise FileNotFoundError(f"Dataset not found. Expected local dataset at {TRAIN_DATA_PATH}; ")
 

@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 
 from miles.utils.data_utils import Dataset
-from miles.utils.misc import load_function
+from miles.utils.registry import load_function
 from miles.utils.data_utils import load_processor, load_tokenizer
 from miles.utils.types import Sample
 

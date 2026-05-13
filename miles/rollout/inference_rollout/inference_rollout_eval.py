@@ -12,7 +12,7 @@ from miles.rollout.inference_rollout.inference_rollout_common import (
 )
 from miles.utils.data_utils import Dataset
 from miles.utils.eval_config import EvalDatasetConfig
-from miles.utils.misc import as_completed_async
+from miles.utils.iter_utils import as_completed_async
 from miles.utils.data_utils import load_processor, load_tokenizer
 from miles.utils.types import Sample
 

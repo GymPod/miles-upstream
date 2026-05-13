@@ -19,7 +19,7 @@ from miles.debug.run_megatron.cli.worker_executor import (
     build_worker_args,
 )
 from miles.debug.run_megatron.worker.script_args import WorkerScriptArgs
-from miles.utils.misc import exec_command
+from miles.utils.shell import exec_command
 from miles.utils.typer_utils import dataclass_cli
 
 

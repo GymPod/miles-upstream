@@ -14,7 +14,7 @@ from miles.utils.chat_template_utils.tito_tokenizer import TITOTokenizerType
 from miles.utils.environ import enable_experimental_rollout_refactor
 from miles.utils.eval_config import EvalDatasetConfig, build_eval_dataset_configs, ensure_dataset_list
 from miles.utils.observability_utils import configure_logger
-from miles.utils.misc import load_function
+from miles.utils.registry import load_function
 
 logger = logging.getLogger(__name__)
 

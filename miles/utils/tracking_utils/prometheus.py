@@ -4,7 +4,7 @@ import time
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-from miles.utils.misc import get_current_node_ip
+from miles.utils.concurrency_utils import get_current_node_ip
 
 logger = logging.getLogger(__name__)
 

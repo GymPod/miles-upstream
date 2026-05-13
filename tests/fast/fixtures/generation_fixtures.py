@@ -17,7 +17,7 @@ from miles.rollout.inference_rollout.inference_rollout_common import GenerateSta
 from miles.rollout.session.session_server import SessionServer
 from miles.utils.concurrency_utils import run
 from miles.utils.net_utils import find_available_port, init_http_client
-from miles.utils.misc import SingletonMeta
+from miles.utils.singleton import SingletonMeta
 from miles.testing import mock_tools
 from miles.testing.mock_sglang_server import ProcessResult, ProcessResultMetaInfo, with_mock_server
 from miles.testing.uvicorn_thread_server import UvicornThreadServer

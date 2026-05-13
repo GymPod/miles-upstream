@@ -1,6 +1,7 @@
-from miles.utils.misc import get_current_node_ip, get_free_port
+from miles.utils.concurrency_utils import get_current_node_ip
 
 
+from miles.utils.net_utils import get_free_port
 class RayActor:
     @staticmethod
     def _get_current_node_ip_and_free_port(start_port=10000, consecutive=1):

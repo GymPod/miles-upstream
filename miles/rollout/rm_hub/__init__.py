@@ -3,7 +3,7 @@ import random
 
 import aiohttp
 
-from miles.utils.misc import load_function
+from miles.utils.registry import load_function
 from miles.utils.types import Sample
 
 from .deepscaler import get_deepscaler_rule_based_reward

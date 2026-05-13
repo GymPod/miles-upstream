@@ -38,7 +38,7 @@ from miles.rollout.generate_utils.openai_endpoint_utils import (
     truncate_samples_by_total_tokens,
 )
 from miles.rollout.generate_utils.sample_utils import merge_samples
-from miles.utils.misc import load_function
+from miles.utils.registry import load_function
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)

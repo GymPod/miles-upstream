@@ -4,7 +4,7 @@ from miles.ray.placement_group import create_placement_groups, create_rollout_ma
 from miles.utils.arguments import parse_args
 from miles.utils.concurrency_utils import eager_create_task
 from miles.utils.observability_utils import configure_logger
-from miles.utils.misc import should_run_periodic_action
+from miles.utils.periodic_utils import should_run_periodic_action
 from miles.utils.tracking_utils import finish_tracking, init_tracking
 
 

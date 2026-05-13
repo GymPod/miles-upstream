@@ -11,7 +11,7 @@ from tests.fast.rollout.inference_rollout.integration.utils import (
     load_and_call_train,
 )
 
-from miles.utils.misc import function_registry
+from miles.utils.registry import function_registry
 
 _DATA_ROWS = [
     {"input": "What is 1+7?", "label": "8"},

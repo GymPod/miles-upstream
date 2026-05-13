@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.responses import Response
 
-from miles.utils.misc import load_function
+from miles.utils.registry import load_function
 
 logger = logging.getLogger(__name__)
 
