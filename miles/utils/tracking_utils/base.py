@@ -38,7 +38,7 @@ class WandbBackend(TrackingBackend):
     # Delegates to the existing ``wandb_utils`` helpers.
 
     def init(self, args, *, primary: bool = True, **kwargs) -> None:
-        from . import wandb_utils
+        from . import wandb as wandb_utils
 
         if primary:
             wandb_utils.init_wandb_primary(args, **kwargs)
@@ -61,7 +61,7 @@ class TensorboardBackend(TrackingBackend):
         self._adapter = None
 
     def init(self, args, *, primary: bool = True, **kwargs) -> None:
-        from .tensorboard_utils import _TensorboardAdapter
+        from .tensorboard import _TensorboardAdapter
 
         self._adapter = _TensorboardAdapter(args)
 
@@ -80,17 +80,17 @@ class TensorboardBackend(TrackingBackend):
 class MlflowBackend(TrackingBackend):
 
     def init(self, args, *, primary: bool = True, **kwargs) -> None:
-        from . import mlflow_utils
+        from . import mlflow as mlflow_utils
 
         mlflow_utils.init_mlflow(args, primary=primary, **kwargs)
 
     def log(self, metrics: dict[str, Any], step: int | None = None) -> None:
-        from . import mlflow_utils
+        from . import mlflow as mlflow_utils
 
         mlflow_utils.log_metrics(metrics, step=step)
 
     def finish(self) -> None:
-        from . import mlflow_utils
+        from . import mlflow as mlflow_utils
 
         mlflow_utils.finish()
 
@@ -100,12 +100,12 @@ class PrometheusBackend(TrackingBackend):
     # tied to the Ray job, so finish() is intentionally a no-op.
 
     def init(self, args, *, primary: bool = True, **kwargs) -> None:
-        from .prometheus_utils import init_prometheus
+        from .prometheus import init_prometheus
 
         init_prometheus(args, start_server=primary)
 
     def log(self, metrics: dict[str, Any], step: int | None = None) -> None:
-        from .prometheus_utils import get_prometheus
+        from .prometheus import get_prometheus
 
         prom = get_prometheus()
         assert prom is not None, (
