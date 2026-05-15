@@ -24,7 +24,10 @@ CONFIGS: list[dict] = [
         "USE_INT4_ROLLOUT": False,
         "USE_BRIDGE": False,
     },
-    # TODO: This deepep test need fix.
+    # TODO(bridge+deepep): Two issues prevent this config from passing:
+    # 1. HfWeightIteratorBridge does not EP-gather expert weights before export,
+    #    causing shape mismatch (hidden/TP/EP vs hidden) during weight sync.
+    # 2. bridge.load_hf_weights() cannot load FP8 checkpoints correctly.
     # {
     #     "USE_DEEPEP": True,
     #     "USE_FP8_ROLLOUT": True,
@@ -161,7 +164,7 @@ def execute(USE_DEEPEP: bool, USE_FP8_ROLLOUT: bool, USE_INT4_ROLLOUT: bool, USE
         )
 
     if USE_DEEPEP:
-        sglang_args += "--sglang-moe-a2a-backend deepep --sglang-deepep-mode auto "
+        sglang_args += "--sglang-moe-a2a-backend deepep --sglang-deepep-mode normal "
 
     ci_args = "--ci-test "
 
