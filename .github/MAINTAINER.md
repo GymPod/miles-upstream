@@ -62,76 +62,73 @@ This section lists the oncalls for each module or feature. The format is
 @github-username (Slack username, if different).
 
 ### Trainer (Megatron backend)
-[@fzyzcjy](https://github.com/fzyzcjy), [@yueming-yuan](https://github.com/yueming-yuan),
-[@maocheng23](https://github.com/maocheng23),
-[@yushengsu-thu](https://github.com/yushengsu-thu),
-[@Zhichenzzz](https://github.com/Zhichenzzz)
+@fzyzcjy, @yueming-yuan,
+@maocheng23,
+@yushengsu-thu,
+@Zhichenzzz
 
 related files
+- train.py
 - miles/backends/megatron_utils/
 
 ### Rollout (SGLang backend)
-[@fzyzcjy](https://github.com/fzyzcjy), [@yueming-yuan](https://github.com/yueming-yuan),
-[@maocheng23](https://github.com/maocheng23),
-[@yushengsu-thu](https://github.com/yushengsu-thu),
-[@Zhichenzzz](https://github.com/Zhichenzzz),
-[@guapisolo](https://github.com/guapisolo)
+@fzyzcjy, @yueming-yuan,
+@maocheng23,
+@yushengsu-thu,
+@Zhichenzzz,
+@guapisolo
 
 related files
 - miles/backends/sglang_utils/
 - miles/rollout/
 
 ### Ray actors and orchestration
-[@fzyzcjy](https://github.com/fzyzcjy), [@yueming-yuan](https://github.com/yueming-yuan),
-[@maocheng23](https://github.com/maocheng23)
+@fzyzcjy, @yueming-yuan,
+@maocheng23
 
 related files
 - miles/ray/
 
 ### Router
-[@fzyzcjy](https://github.com/fzyzcjy), [@yueming-yuan](https://github.com/yueming-yuan),
-[@guapisolo](https://github.com/guapisolo)
+@fzyzcjy, @yueming-yuan,
+@guapisolo
 
 related files
 - miles/router/
 
 ### Multi-turn / rollout sessions
-[@fzyzcjy](https://github.com/fzyzcjy), [@yueming-yuan](https://github.com/yueming-yuan),
-[@guapisolo](https://github.com/guapisolo),
-[@maocheng23](https://github.com/maocheng23),
-[@jybsuper](https://github.com/jybsuper)
+@fzyzcjy, @yueming-yuan,
+@guapisolo,
+@maocheng23,
+@jybsuper
 
 related files
 - miles/rollout/session/
 
 ### Utils
-[@fzyzcjy](https://github.com/fzyzcjy), [@yueming-yuan](https://github.com/yueming-yuan),
-[@guapisolo](https://github.com/guapisolo),
-[@maocheng23](https://github.com/maocheng23),
-[@jybsuper](https://github.com/jybsuper),
-[@Zhichenzzz](https://github.com/Zhichenzzz)
+@fzyzcjy, @yueming-yuan,
+@guapisolo,
+@maocheng23,
+@jybsuper,
+@Zhichenzzz
 
 related files
 - miles/utils/
 
 ### CI, Release, Package
-[@yushengsu-thu](https://github.com/yushengsu-thu)
+@yushengsu-thu
 
 related files
 - .github/workflows/
+- requirements.txt
+- setup.py
 
-### Documentation
-[@Shi-Dong](https://github.com/Shi-Dong)
-
-related files
-- README.md
-- Documentation lives in the [radixark/miles-doc](https://github.com/radixark/miles-doc) repo.
 
 ### Other Notes
 
 This list is based on the current situation. If you or someone you know would like to
 take on more responsibility and are qualified, please ping
-[@Ying1123](https://github.com/Ying1123) and [@fzyzcjy](https://github.com/fzyzcjy) in
+@Ying1123 and @fzyzcjy in
 the Slack channel. They will start a nomination and internal review process.
 
 ## The List of CI Oncalls
@@ -147,7 +144,7 @@ _TBD — please contribute names._
 
 This list is based on the current situation. If you or someone you know would like to
 donate machines for CI, they can serve as CI oncalls for their machines. Please ping
-[@Ying1123](https://github.com/Ying1123) and [@fzyzcjy](https://github.com/fzyzcjy) in
+@Ying1123 and @fzyzcjy in
 the Slack channel. They will start a nomination and internal review process.
 
 ## CI Maintenance Mode
