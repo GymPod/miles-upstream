@@ -54,12 +54,12 @@ __Note__: Difference between Merge Oncall and Codeowner
      a Merge Oncall can bypass branch protection to merge the PR — and is then on
      the hook for any follow-up revert or hotfix.
 
-If you hit issues during the merge, ping `#miles` on the [SGLang Slack](https://slack.sglang.ai).
+If you hit issues during the merge, ping `#miles-rl` on the [SGLang Slack](https://slack.sglang.ai).
 
 ## The List of Merge Oncalls and Reviewers
 
 This section lists the oncalls for each module or feature. The format is
-@github-username (Slack username, if different).
+@github-username.
 
 ### Trainer (Megatron backend)
 @fzyzcjy, @yueming-yuan,
