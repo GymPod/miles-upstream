@@ -132,7 +132,11 @@ RUN rm -rf /root/.cache/pip /root/flash-attention
 
 # Overlay the sglang source from the third_party/sglang submodule onto the
 # base image's /sgl-workspace/sglang directory. The submodule pointer is
-# the source of truth for which sglang revision the image carries.
+# the source of truth for which sglang revision the image carries. The
+# base image ships a stale `.git/` dir at this path — drop it before COPY
+# so the resulting image isn't carrying a git index that disagrees with
+# the working tree.
+RUN rm -rf /sgl-workspace/sglang/.git
 COPY third_party/sglang /sgl-workspace/sglang
 RUN cd /sgl-workspace/sglang && pip install -e "python[all]" --no-deps
 
