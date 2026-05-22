@@ -68,12 +68,12 @@ def test_qwen3_moe_default_rollout_engine_size_fits_sglang_ep():
         enable_eval=False,
         tensor_model_parallel_size=1,
         context_parallel_size=2,
-        cp_comm_type="a2a",
         expert_model_parallel_size=4,
         expert_tensor_parallel_size=1,
         rollout_num_gpus=8,
         use_sequence_parallel=True,
     )
 
+    assert args.cp_comm_type == "a2a"
     assert args.sglang_expert_parallel_size == 4
     assert args.rollout_num_gpus_per_engine == 8

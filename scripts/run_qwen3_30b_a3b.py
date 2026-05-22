@@ -4,19 +4,17 @@ from typing import Literal
 import typer
 
 import miles.utils.external_utils.command_utils as U
-from miles.true_on_policy import get_megatron_model_type
 
 
 @dataclass
 class ScriptArgs(U.ExecuteTrainConfig):
-    mode: Literal["normal", "debug_minimal", "debug_one_sample"] = "normal"
+    mode: Literal["normal", "debug_minimal"] = "normal"
     run_id: str = U.create_run_id()
     model_name: str = "Qwen3-30B-A3B"
-    megatron_model_type: str | None = None
+    megatron_model_type: str = "qwen3-30B-A3B"
     num_gpus_per_node: int | None = None
     hardware: Literal["H100", "B200", "B300", "GB200", "GB300"] = "H100"
     enable_eval: bool = True
-    train_backend: Literal["megatron"] = "megatron"
     tensor_model_parallel_size: int | None = None
     pipeline_model_parallel_size: int = 1
     context_parallel_size: int | None = None
@@ -45,7 +43,6 @@ class ScriptArgs(U.ExecuteTrainConfig):
     def __post_init__(self):
         if self.cp_comm_type == "allgather":
             self.cp_comm_type = "all_gather"
-        self.megatron_model_type = self.megatron_model_type or get_megatron_model_type(self.model_name)
         self.num_gpus_per_node = self.num_gpus_per_node or U.NUM_GPUS_OF_HARDWARE[self.hardware]
         if self.tensor_model_parallel_size is None:
             self.tensor_model_parallel_size = 4
@@ -119,16 +116,7 @@ def prepare(args: ScriptArgs):
 
 # TODO improve layering: split algorithm vs infra
 def execute(args: ScriptArgs):
-    is_debug_mode = args.mode != "normal"
-    is_debug_one_sample = args.mode == "debug_one_sample"
-    train_data_parallel_size = (
-        args.num_nodes
-        * args.num_gpus_per_node
-        // (args.tensor_model_parallel_size * args.pipeline_model_parallel_size * args.context_parallel_size)
-    )
-    debug_global_batch_size = max(1, train_data_parallel_size)
-    debug_rollout_batch_size = debug_global_batch_size
-    debug_num_rollout = 1
+    is_debug_mode = args.mode == "debug_minimal"
     ref_load_path = (
         f"{args.model_dir}/{args.model_name}/"
         if args.enable_megatron_bridge
@@ -160,12 +148,12 @@ def execute(args: ScriptArgs):
         "--apply-chat-template "
         "--rollout-shuffle "
         "--rm-type deepscaler "
-        f"--num-rollout {debug_num_rollout if is_debug_one_sample else 3000} "
-        f"--rollout-batch-size {debug_rollout_batch_size if is_debug_one_sample else 32} "
-        f"--n-samples-per-prompt {1 if is_debug_one_sample else 8} "
-        f"--rollout-max-response-len {2 if is_debug_one_sample else (100 if args.mode == 'debug_minimal' else 8192)} "
+        "--num-rollout 3000 "
+        "--rollout-batch-size 32 "
+        "--n-samples-per-prompt 8 "
+        f"--rollout-max-response-len {100 if args.mode == 'debug_minimal' else 8192} "
         "--rollout-temperature 1 "
-        f"--global-batch-size {debug_global_batch_size if is_debug_one_sample else 256} "
+        "--global-batch-size 256 "
         "--balance-data "
     )
 
@@ -187,7 +175,6 @@ def execute(args: ScriptArgs):
         "--use-dynamic-batch-size "
         f"--max-tokens-per-gpu {args.max_tokens_per_gpu} "
     )
-    ci_args = "--ci-test --ci-disable-kl-checker " if is_debug_one_sample else ""
 
     grpo_args = (
         "--advantage-estimator grpo "
@@ -277,7 +264,6 @@ def execute(args: ScriptArgs):
                 f"{f'--sglang-ep-size {args.sglang_expert_parallel_size} ' if args.sglang_expert_parallel_size > 1 else ''}"
                 "--sglang-mem-fraction-static 0.7 "
                 "--sglang-cuda-graph-max-bs 512 "
-                f"{'--sglang-disable-cuda-graph ' if is_debug_one_sample else ''}"
             )
             optimizer_args += (
                 "--optimizer-cpu-offload " "--overlap-cpu-optimizer-d2h-h2d " "--use-precision-aware-optimizer "
@@ -297,7 +283,6 @@ def execute(args: ScriptArgs):
                 "--sglang-attention-backend trtllm_mha "
                 f"{f'--rollout-num-gpus {args.rollout_num_gpus} ' if args.rollout_num_gpus is not None else ''}"
                 f"{f'--sglang-ep-size {args.sglang_expert_parallel_size} ' if args.sglang_expert_parallel_size > 1 else ''}"
-                f"{'--sglang-disable-cuda-graph ' if is_debug_one_sample else ''}"
             )
             if args.rollout_fp8:
                 sglang_world_size = 2
@@ -366,7 +351,6 @@ tis_batch_normalize: true
         f"{U.get_default_wandb_args(__file__, run_id=args.run_id)} "
         f"{perf_args} "
         f"{eval_args} "
-        f"{ci_args} "
         f"{sglang_args} "
         f"{misc_args} "
         f"{args.extra_args} "

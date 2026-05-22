@@ -397,3 +397,9 @@ def apply_true_on_policy_script_defaults(args: Any) -> None:
     config.validate()
     if args.train_backend == "megatron" and config.model_profile.disable_megatron_sequence_parallel:
         args.use_sequence_parallel = False
+    if (
+        args.train_backend == "megatron"
+        and config.context_parallel_size > 1
+        and getattr(args, "cp_comm_type", None) is None
+    ):
+        args.cp_comm_type = "a2a"
