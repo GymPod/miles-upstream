@@ -168,11 +168,16 @@ jobs:
           DEV_VERSION: ${{ steps.cfg.outputs.dev_version }}
         run: |
           python -m venv /tmp/smoke
-          # TestPyPI doesn't host every transitive dep (torch etc.), so pin
-          # the simple index to PyPI for deps and use TestPyPI only for the
-          # one package we just published.
+          # Important: install ONLY our wheel, not its transitive deps.
+          # TestPyPI is a public sandbox riddled with name-squat / broken
+          # packages (e.g. FASTAPI-1.0 vs fastapi); pulling deps from it
+          # via --extra-index-url is unsafe regardless of our own wheel.
+          # The proof we want here is "the wheel we just uploaded is
+          # actually fetchable and installable" — `--no-deps` is enough.
           /tmp/smoke/bin/pip install \
-            --index-url https://pypi.org/simple/ \
-            --extra-index-url https://test.pypi.org/simple/ \
+            --index-url https://test.pypi.org/simple/ \
+            --no-deps \
             "${RENAME_TO}==${DEV_VERSION}"
           /tmp/smoke/bin/pip show "${RENAME_TO}"
+          # Confirm the install came from TestPyPI (not a stale local cache).
+          /tmp/smoke/bin/pip show -f "${RENAME_TO}" | head -20
