@@ -39,16 +39,20 @@ def _ensure_parent_module(dotted: str) -> ModuleType | None:
 
 
 def _ensure_module(dotted: str) -> ModuleType:
-    """Ensure *dotted* exists in sys.modules without replacing importable parents."""
+    """Ensure *dotted* exists in sys.modules; prefer the real importable
+    module so we never replace a real leaf with a starved stub."""
     if dotted in sys.modules:
         return sys.modules[dotted]
-    parent_name, _, child_name = dotted.rpartition(".")
-    parent = _ensure_parent_module(parent_name)
-    mod = ModuleType(dotted)
-    sys.modules[dotted] = mod
-    if parent is not None:
-        setattr(parent, child_name, mod)
-    return mod
+    try:
+        return importlib.import_module(dotted)
+    except ImportError:
+        parent_name, _, child_name = dotted.rpartition(".")
+        parent = _ensure_parent_module(parent_name)
+        mod = ModuleType(dotted)
+        sys.modules[dotted] = mod
+        if parent is not None:
+            setattr(parent, child_name, mod)
+        return mod
 
 
 # Stub modules whose top-level imports in main.py would fail.
