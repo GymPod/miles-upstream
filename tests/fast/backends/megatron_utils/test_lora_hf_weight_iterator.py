@@ -3,11 +3,6 @@
 Validates that the right iterator subclass is selected based on megatron_to_hf_mode.
 """
 
-from tests.ci.ci_register import register_cpu_ci
-
-register_cpu_ci(est_time=10, suite="stage-a-cpu", labels=[])
-
-
 import sys
 from argparse import Namespace
 from unittest.mock import MagicMock, patch

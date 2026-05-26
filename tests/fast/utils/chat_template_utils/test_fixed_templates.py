@@ -5,10 +5,6 @@ Rows live as ``SUPPORTED_TEMPLATES`` class attributes on each
 caller's ``allowed_append_roles`` and returns ``(template_path, extra_kwargs)``.
 """
 
-from tests.ci.ci_register import register_cpu_ci
-
-register_cpu_ci(est_time=10, suite="stage-a-cpu", labels=[])
-
 import os
 
 import pytest

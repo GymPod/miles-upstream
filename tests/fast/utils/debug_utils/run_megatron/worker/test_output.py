@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-from tests.ci.ci_register import register_cpu_ci
-
-register_cpu_ci(est_time=10, suite="stage-a-cpu", labels=[])
-
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +13,6 @@ from miles.utils.debug_utils.run_megatron.worker.output import (
     _compute_output_info,
     compute_and_save_output_info,
 )
-
 
 # ---------------------------------------------------------------------------
 # TestComputeLogprobEntries
@@ -124,7 +119,6 @@ class TestComputeLogprobEntries:
 # ---------------------------------------------------------------------------
 # TestComputeOutputInfo
 # ---------------------------------------------------------------------------
-
 
 _MOCK_DIST = "miles.utils.debug_utils.run_megatron.worker.output.dist"
 _MOCK_GET_PARALLEL_STATE = "miles.utils.debug_utils.run_megatron.worker.output.get_parallel_state"

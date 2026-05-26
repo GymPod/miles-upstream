@@ -1,7 +1,3 @@
-from tests.ci.ci_register import register_cpu_ci
-
-register_cpu_ci(est_time=10, suite="stage-a-cpu", labels=[])
-
 import torch
 
 from miles.backends.training_utils.loss_hub.math_utils import (

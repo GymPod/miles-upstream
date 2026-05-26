@@ -1,7 +1,3 @@
-from tests.ci.ci_register import register_cpu_ci
-
-register_cpu_ci(est_time=10, suite="stage-a-cpu", labels=[])
-
 import dataclasses
 import enum
 
@@ -12,7 +8,6 @@ from typer.testing import CliRunner
 from miles.utils.typer_utils import dataclass_cli
 
 runner = CliRunner()
-
 
 # ---------------------------------------------------------------------------
 # Test dataclasses
