@@ -357,7 +357,7 @@ class TestCollectTestsImplicitFallback:
         r = registries[0]
         assert r.backend == HWBackend.CPU
         assert r.suite == "stage-a-cpu"
-        assert r.est_time == 10.0
+        assert r.est_time == 1.0
         assert r.labels == []
         assert r.nightly is False
         assert r.disabled is None

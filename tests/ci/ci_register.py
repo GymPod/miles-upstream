@@ -274,7 +274,7 @@ def _make_implicit_cpu_registry(filename: str) -> CIRegistry:
     return CIRegistry(
         backend=HWBackend.CPU,
         filename=filename,
-        est_time=10.0,
+        est_time=1.0,
         suite="stage-a-cpu",
         labels=[],
         nightly=False,
@@ -291,7 +291,7 @@ def collect_tests(files: list[str], sanity_check: bool = True) -> list[CIRegistr
             # tests/fast/ is CPU-only by location; register_cuda_ci must
             # live under tests/fast-gpu/ instead.
             for r in registries:
-                if r.backend == HWBackend.CUDA:
+                if r.backend != HWBackend.CPU:
                     raise ValueError(
                         f"{file}: register_cuda_ci is forbidden in tests/fast/; "
                         f"move the file to tests/fast-gpu/ instead"
