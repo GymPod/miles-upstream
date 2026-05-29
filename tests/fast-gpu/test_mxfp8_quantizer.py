@@ -5,6 +5,7 @@ register_cuda_ci(est_time=60, suite="stage-b-2-gpu-h200", labels=[])
 
 import pytest
 import torch
+from sglang.srt.layers.quantization.fp8_utils import mxfp8_group_quantize
 from tools.convert_hf_to_mxfp8 import quantize_mxfp8 as tool_quantize_mxfp8
 from tools.convert_hf_to_mxfp8 import should_quantize as tool_should_quantize_mxfp8
 from transformer_engine.pytorch import MXFP8Quantizer
@@ -76,6 +77,12 @@ def _te_mxfp8_reference(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
         quantized._rowwise_data[:m].contiguous(),
         quantized._rowwise_scale_inv[:m, : k // MXFP8_GROUP_SIZE].contiguous(),
     )
+
+
+def _mxfp8_reference(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    if torch.cuda.get_device_capability(weight.device)[0] >= 10:
+        return _te_mxfp8_reference(weight)
+    return mxfp8_group_quantize(weight.contiguous())
 
 
 def test_mxfp8_quantize_params_respects_extra_high_precision_layers_megatron():
@@ -151,7 +158,7 @@ def test_mxfp8_quantize_matches_reference(quantize_fn, shape, dtype, init_data):
 
     weight = _make_weight(init_data, dtype, shape, device)
     qweight, scale = quantize_fn(weight)
-    qweight_ref, scale_ref = _te_mxfp8_reference(weight)
+    qweight_ref, scale_ref = _mxfp8_reference(weight)
 
     assert qweight.shape == weight.shape
     assert qweight.dtype == torch.float8_e4m3fn

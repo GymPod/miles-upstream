@@ -22,6 +22,9 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+import miles.backends as _miles_backends  # noqa: F401
+import miles.backends.megatron_utils as _megatron_utils_package  # noqa: F401
+
 
 def _ensure_module(dotted: str) -> ModuleType:
     """Ensure *dotted* exists in sys.modules, creating stubs for any missing segments."""
