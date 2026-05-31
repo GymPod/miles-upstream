@@ -3,9 +3,8 @@ import logging
 import time
 
 import ray
-import torch
 
-from miles.ray.rollout.debug_data import save_debug_rollout_data
+from miles.ray.rollout.debug_data import load_debug_rollout_data, save_debug_rollout_data
 from miles.ray.rollout.metrics import log_eval_rollout_data, log_rollout_data
 from miles.ray.rollout.rollout_server import RolloutServer, start_rollout_servers
 from miles.ray.rollout.router_manager import start_session_server
@@ -25,7 +24,6 @@ from miles.utils.logging_utils import configure_logger
 from miles.utils.metric_checker import MetricChecker
 from miles.utils.misc import load_function
 from miles.utils.tracking_utils import init_tracking
-from miles.utils.types import Sample
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -153,10 +151,16 @@ class RolloutManager:
         if self.args.ci_test and self.args.use_fault_tolerance and rollout_id >= 2:
             self._try_ci_fault_injection()
         data, metrics = self._get_rollout_data(rollout_id=rollout_id)
-        save_debug_rollout_data(self, data, rollout_id=rollout_id, evaluation=False)
+        save_debug_rollout_data(self.args, data, rollout_id=rollout_id, evaluation=False)
         log_rollout_data(rollout_id, self.args, data, metrics, time.time() - start_time)
-        data = convert_samples_to_train_data(self, data)
-        return split_train_data_by_dp(self, data, self.train_parallel_config["dp_size"])
+        data = convert_samples_to_train_data(
+            self.args,
+            data,
+            custom_convert_samples_to_train_data_func=self.custom_convert_samples_to_train_data_func,
+            custom_reward_post_process_func=self.custom_reward_post_process_func,
+            dynamic_global_batch_size=getattr(self, "_dynamic_global_batch_size", None),
+        )
+        return split_train_data_by_dp(self.args, data, self.train_parallel_config["dp_size"])
 
     def eval(self, rollout_id):
         if self.args.debug_train_only:
@@ -171,7 +175,7 @@ class RolloutManager:
                 self.eval_generate_rollout, self.args, rollout_id, self.data_source, evaluation=True
             )
         data = result.data
-        save_debug_rollout_data(self, data, rollout_id=rollout_id, evaluation=True)
+        save_debug_rollout_data(self.args, data, rollout_id=rollout_id, evaluation=True)
         metrics = log_eval_rollout_data(rollout_id, self.args, data, result.metrics)
         if self._metric_checker is not None:
             self._metric_checker.on_eval(metrics)
@@ -248,19 +252,7 @@ class RolloutManager:
 
     def _get_rollout_data(self, rollout_id):
         if self.args.load_debug_rollout_data:
-            # TODO extract to `load_debug_rollout_data`
-            data = torch.load(
-                self.args.load_debug_rollout_data.format(rollout_id=rollout_id),
-                weights_only=False,
-            )["samples"]
-            data = [Sample.from_dict(sample) for sample in data]
-            if (ratio := self.args.load_debug_rollout_data_subsample) is not None:
-                original_num_rows = len(data)
-                rough_subsample_num_rows = int(original_num_rows * ratio)
-                data = data[: rough_subsample_num_rows // 2] + data[-rough_subsample_num_rows // 2 :]
-                logger.info(
-                    f"Subsample loaded debug rollout data using {ratio=} and change num rows {original_num_rows} -> {len(data)}"
-                )
+            data = load_debug_rollout_data(self.args, rollout_id=rollout_id)
             metrics = None
         else:
             if self.use_experimental_refactor:

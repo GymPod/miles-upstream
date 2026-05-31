@@ -6,15 +6,22 @@ from miles.utils.seqlen_balancing import get_seqlen_balanced_partitions
 from miles.utils.types import Sample
 
 
-# TODO: remove `self`
-def convert_samples_to_train_data(self, samples: list[Sample] | list[list[Sample]]):
+def convert_samples_to_train_data(
+    args,
+    samples: list[Sample] | list[list[Sample]],
+    custom_convert_samples_to_train_data_func,
+    custom_reward_post_process_func,
+    dynamic_global_batch_size,
+):
     """
     Convert inference generated samples to training data.
     """
-    if self.custom_convert_samples_to_train_data_func is not None:
-        return self.custom_convert_samples_to_train_data_func(self.args, samples)
+    if (f := custom_convert_samples_to_train_data_func) is not None:
+        return f(args, samples)
 
-    raw_rewards, rewards = _post_process_rewards(self, samples)
+    raw_rewards, rewards = _post_process_rewards(
+        args, samples, custom_reward_post_process_func=custom_reward_post_process_func
+    )
 
     assert len(raw_rewards) == len(samples)
     assert len(rewards) == len(samples)
@@ -73,35 +80,32 @@ def convert_samples_to_train_data(self, samples: list[Sample] | list[list[Sample
     if "teacher_log_probs" in samples[0].__dict__:
         train_data["teacher_log_probs"] = [sample.teacher_log_probs for sample in samples]
 
+    # TODO this looks hacky, refactor it
     # Pass dynamic global_batch_size to training side
-    assert self.args.use_dynamic_global_batch_size == hasattr(self, "_dynamic_global_batch_size")
-    if hasattr(self, "_dynamic_global_batch_size"):
-        train_data["dynamic_global_batch_size"] = self._dynamic_global_batch_size
+    assert args.use_dynamic_global_batch_size == (dynamic_global_batch_size is not None)
+    if dynamic_global_batch_size is not None:
+        train_data["dynamic_global_batch_size"] = dynamic_global_batch_size
 
     return train_data
 
 
-# TODO: remove `self`
-def _post_process_rewards(self, samples: list[Sample] | list[list[Sample]]):
-    if self.custom_reward_post_process_func is not None:
-        return self.custom_reward_post_process_func(self.args, samples)
+def _post_process_rewards(args, samples: list[Sample] | list[list[Sample]], custom_reward_post_process_func):
+    if (f := custom_reward_post_process_func) is not None:
+        return f(args, samples)
 
-    raw_rewards = [sample.get_reward_value(self.args) for sample in samples]
-    if (
-        self.args.advantage_estimator in ["grpo", "gspo", "reinforce_plus_plus_baseline"]
-        and self.args.rewards_normalization
-    ):
+    raw_rewards = [sample.get_reward_value(args) for sample in samples]
+    if args.advantage_estimator in ["grpo", "gspo", "reinforce_plus_plus_baseline"] and args.rewards_normalization:
         # group norm
         rewards = torch.tensor(raw_rewards, dtype=torch.float)
-        if rewards.shape[-1] == self.args.n_samples_per_prompt * self.args.rollout_batch_size:
-            rewards = rewards.reshape(-1, self.args.n_samples_per_prompt)
+        if rewards.shape[-1] == args.n_samples_per_prompt * args.rollout_batch_size:
+            rewards = rewards.reshape(-1, args.n_samples_per_prompt)
         else:
             # when samples count are not equal in each group
             rewards = rewards.view(-1, rewards.shape[-1])
         mean = rewards.mean(dim=-1, keepdim=True)
         rewards = rewards - mean
 
-        if self.args.advantage_estimator in ["grpo", "gspo"] and self.args.grpo_std_normalization:
+        if args.advantage_estimator in ["grpo", "gspo"] and args.grpo_std_normalization:
             std = rewards.std(dim=-1, keepdim=True)
             rewards = rewards / (std + 1e-6)
 
@@ -110,8 +114,7 @@ def _post_process_rewards(self, samples: list[Sample] | list[list[Sample]]):
     return raw_rewards, raw_rewards
 
 
-# TODO: remove `self`
-def split_train_data_by_dp(self, data, dp_size):
+def split_train_data_by_dp(args, data, dp_size):
     """Split the train data by data parallel size."""
     rollout_data = {}
 
@@ -121,7 +124,7 @@ def split_train_data_by_dp(self, data, dp_size):
     total_lengths = [len(t) for t in data["tokens"]]
     data["total_lengths"] = total_lengths
 
-    if self.args.balance_data:
+    if args.balance_data:
         partitions = get_seqlen_balanced_partitions(total_lengths, dp_size, equal_size=True)
     else:
         partitions = [range(i, len(total_lengths), dp_size) for i in range(dp_size)]
