@@ -27,6 +27,7 @@ from miles.utils.health_monitor import RolloutHealthMonitor
 from miles.utils.http_utils import init_http_client
 from miles.utils.logging_utils import configure_logger
 from miles.utils.process_identity import RolloutManagerProcessIdentity
+from miles.utils.ray_utils import Box
 from miles.utils.metric_checker import MetricChecker
 from miles.utils.misc import load_function
 from miles.utils.tracking_utils import init_tracking
@@ -118,6 +119,8 @@ class RolloutManager:
             custom_convert_samples_to_train_data_func=self.custom_convert_samples_to_train_data_func,
             custom_reward_post_process_func=self.custom_reward_post_process_func,
         )
+        if self.args.delay_split_train_data_by_dp:
+            return Box(ray.put(data))
         return split_train_data_by_dp(self.args, data, self.train_parallel_config["dp_size"])
 
     async def eval(self, rollout_id):

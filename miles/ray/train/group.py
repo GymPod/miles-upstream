@@ -124,18 +124,20 @@ class RayTrainGroup:
 
         run_analysis_from_args(self.args)
 
+        rollout_data = ray.get(rollout_data_pack.inner)
+
         async def _fn(attempt: int):
             witness_info = self._allocate_witness_info(
                 rollout_id=rollout_id,
                 attempt=attempt,
-                sample_indices=rollout_data_pack["sample_indices"],
+                sample_indices=rollout_data["sample_indices"],
             )
 
             await self._refresh_cells()
             snapshot_alive_cells, results = await self._execute_all_alive_and_catch(
                 "train",
                 rollout_id=rollout_id,
-                rollout_data_ref=rollout_data_pack["data_ref"],
+                rollout_data_ref=rollout_data_pack,
                 witness_info=witness_info,
                 attempt=attempt,
             )
