@@ -150,12 +150,16 @@ def _build_full_grad_getter(
     """Build get_grad(param): all-gather distributed-optimizer grad shards into a
     fresh buffer (grad_data is read, not mutated) and return per-param views."""
     grad_map: dict[torch.nn.Parameter, torch.Tensor] = {}
+    # Bucket iteration copied from indep_dp._allreduce_grads_across_replicas,
+    # which cross-cell all-reduces these same bucket.grad_data buffers.
     bucket_groups = list(getattr(model_chunk, "bucket_groups", [])) + list(
         getattr(model_chunk, "expert_parallel_bucket_groups", [])
     )
     for bucket_group in bucket_groups:
         if not bucket_group.ddp_config.use_distributed_optimizer:
             continue
+        # Same group/size/rank Megatron's grad reduce-scatter uses
+        # (Megatron-LM param_and_grad_buffer.py _ParamAndGradBucketGroup.start_grad_sync).
         group = bucket_group.intra_distributed_optimizer_instance_group
         instance_size = bucket_group.intra_distributed_optimizer_instance_size
         instance_rank = bucket_group.intra_distributed_optimizer_instance_rank
@@ -163,12 +167,18 @@ def _build_full_grad_getter(
             grad_data = bucket.grad_data
             if instance_size > 1:
                 full = torch.empty_like(grad_data)
+                # shard slicing copied from Megatron shard_buffer(); local_shard is
+                # this rank's owned (reduce-scattered) slice.
                 shard_numel = grad_data.numel() // instance_size
                 local_shard = grad_data[instance_rank * shard_numel : (instance_rank + 1) * shard_numel]
+                # all-gather copied from Megatron start_param_sync (it does this on
+                # bucket.param_data); here on grad, into a fresh buffer (grad_data read-only).
                 dist.all_gather_into_tensor(full, local_shard.contiguous(), group=group)
             else:
                 full = grad_data
             flat = full.view(-1)
+            # per-param slice copied from Megatron's own bucket.param_data.view(-1)
+            # [start:end].view(shape), using the bucket-local bucket.param_to_index.
             for param, (start, end) in bucket.param_to_index.items():
                 grad_map[param] = flat[start:end].view(param.shape)
 
@@ -176,6 +186,7 @@ def _build_full_grad_getter(
         reduced = grad_map.get(param)
         if reduced is not None:
             return reduced
+        # fallback copied from sglang dumper's original grad read (.grad else main_grad).
         return param.grad if param.grad is not None else getattr(param, "main_grad", None)
 
     return get_grad
