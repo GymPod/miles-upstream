@@ -324,9 +324,7 @@ class _PGWorker:
         if prime_native and store_host is not None and store_port is not None:
             import torch.distributed as dist
 
-            native_store = TCPStore(
-                host_name=store_host, port=store_port, is_master=False, wait_for_workers=False
-            )
+            native_store = TCPStore(host_name=store_host, port=store_port, is_master=False, wait_for_workers=False)
             dist.init_process_group(
                 backend="nccl",
                 store=dist.PrefixStore("native_prime", native_store),
@@ -586,22 +584,26 @@ def _run_test(
     store_addr = f"localhost:{store.port}/test"
 
     print(f"\n{'='*70}")
-    print(f"  backend={backend}  failure={failure_mode.value}  timeout={timeout_s}s"
-          f"  wait={wait_style.value}  world_size={world_size}")
+    print(
+        f"  backend={backend}  failure={failure_mode.value}  timeout={timeout_s}s"
+        f"  wait={wait_style.value}  world_size={world_size}"
+    )
     print(f"{'='*70}\n")
 
     workers = [_PGWorker.remote() for _ in range(world_size)]
 
-    init_results = ray.get([
-        w.init.remote(
-            store_addr=store_addr,
-            rank=i,
-            world_size=world_size,
-            backend=backend,
-            timeout_s=timeout_s,
-        )
-        for i, w in enumerate(workers)
-    ])
+    init_results = ray.get(
+        [
+            w.init.remote(
+                store_addr=store_addr,
+                rank=i,
+                world_size=world_size,
+                backend=backend,
+                timeout_s=timeout_s,
+            )
+            for i, w in enumerate(workers)
+        ]
+    )
     for r in init_results:
         print(f"  init: {r}")
 
@@ -751,18 +753,25 @@ def run_inflight(
     store_addr = f"localhost:{store.port}/inflight"
 
     print(f"\n{'='*70}")
-    print(f"  IN-FLIGHT CRASH TEST: tensor_size={tensor_size}  die_after={die_after_s}s"
-          f"  timeout={timeout_s}s  wait={wait_style.value}")
+    print(
+        f"  IN-FLIGHT CRASH TEST: tensor_size={tensor_size}  die_after={die_after_s}s"
+        f"  timeout={timeout_s}s  wait={wait_style.value}"
+    )
     print(f"{'='*70}\n")
 
     workers = [_PGWorker.remote() for _ in range(2)]
-    init_results = ray.get([
-        w.init.remote(
-            store_addr=store_addr, rank=i, world_size=2,
-            backend="nccl", timeout_s=timeout_s,
-        )
-        for i, w in enumerate(workers)
-    ])
+    init_results = ray.get(
+        [
+            w.init.remote(
+                store_addr=store_addr,
+                rank=i,
+                world_size=2,
+                backend="nccl",
+                timeout_s=timeout_s,
+            )
+            for i, w in enumerate(workers)
+        ]
+    )
     for r in init_results:
         print(f"  init: {r}")
 
@@ -774,17 +783,19 @@ def run_inflight(
 
     # Step 2: start concurrent continuous allreduce on BOTH ranks
     # Rank 0 will die mid-flight; rank 1 keeps going and should detect the failure
-    print(f"\n--- Step 2: Both ranks start continuous allreduce ---")
+    print("\n--- Step 2: Both ranks start continuous allreduce ---")
     print(f"  Rank 0 will os._exit after {die_after_s}s")
     print(f"  Rank 1 runs for {die_after_s + timeout_s + 30}s (covers timeout + abort)")
     start = time.monotonic()
 
     survivor_duration = die_after_s + timeout_s + 30
     victim_ref = workers[0].run_allreduce_then_die.remote(
-        tensor_size=tensor_size, die_after_s=die_after_s,
+        tensor_size=tensor_size,
+        die_after_s=die_after_s,
     )
     survivor_ref = workers[1].run_continuous_allreduce.remote(
-        tensor_size=tensor_size, duration_s=survivor_duration,
+        tensor_size=tensor_size,
+        duration_s=survivor_duration,
     )
 
     # Wait for victim to confirm death
@@ -844,7 +855,6 @@ def run_p2p(
     @ray.remote(num_gpus=1)
     class _P2PWorker:
         def init(self, *, store_addr: str, rank: int, timeout_s: float) -> dict:
-            import torch
             from torchft.process_group import ProcessGroupGloo
 
             self._rank = rank
@@ -862,7 +872,12 @@ def run_p2p(
                 work.wait()
                 return {"rank": self._rank, "status": "sent", "elapsed_s": round(time.monotonic() - start, 2)}
             except Exception as e:
-                return {"rank": self._rank, "status": "send_error", "error": str(e), "elapsed_s": round(time.monotonic() - start, 2)}
+                return {
+                    "rank": self._rank,
+                    "status": "send_error",
+                    "error": str(e),
+                    "elapsed_s": round(time.monotonic() - start, 2),
+                }
 
         def recv_tensor(self, src_rank: int) -> dict:
             import torch
@@ -872,12 +887,24 @@ def run_p2p(
             try:
                 work = self._pg.recv([t], src_rank, tag=100)
                 work.wait()
-                return {"rank": self._rank, "status": "received", "value": t.tolist(), "elapsed_s": round(time.monotonic() - start, 2)}
+                return {
+                    "rank": self._rank,
+                    "status": "received",
+                    "value": t.tolist(),
+                    "elapsed_s": round(time.monotonic() - start, 2),
+                }
             except Exception as e:
-                return {"rank": self._rank, "status": "recv_error", "error": str(e), "elapsed_s": round(time.monotonic() - start, 2)}
+                return {
+                    "rank": self._rank,
+                    "status": "recv_error",
+                    "error": str(e),
+                    "elapsed_s": round(time.monotonic() - start, 2),
+                }
 
     workers = [_P2PWorker.remote() for _ in range(2)]
-    results = ray.get([w.init.remote(store_addr=store_addr, rank=i, timeout_s=timeout_s) for i, w in enumerate(workers)])
+    results = ray.get(
+        [w.init.remote(store_addr=store_addr, rank=i, timeout_s=timeout_s) for i, w in enumerate(workers)]
+    )
     for r in results:
         print(f"  {r}")
 
@@ -925,7 +952,9 @@ def run_p2p_after_reconfig(
             self._store_addr = store_addr
             self._timeout_s = timeout_s
             self._pg = ProcessGroupGloo(timeout=timedelta(seconds=timeout_s))
-            self._pg.configure(store_addr=f"{store_addr}/q0", replica_id=str(rank), rank=rank, world_size=2, quorum_id=0)
+            self._pg.configure(
+                store_addr=f"{store_addr}/q0", replica_id=str(rank), rank=rank, world_size=2, quorum_id=0
+            )
             return {"rank": rank, "status": "configured_q0"}
 
         def do_allreduce(self) -> dict:
@@ -944,7 +973,13 @@ def run_p2p_after_reconfig(
 
             self._pg.shutdown()
             self._pg = ProcessGroupGloo(timeout=timedelta(seconds=self._timeout_s))
-            self._pg.configure(store_addr=f"{self._store_addr}/q1", replica_id=str(self._rank), rank=self._rank, world_size=2, quorum_id=1)
+            self._pg.configure(
+                store_addr=f"{self._store_addr}/q1",
+                replica_id=str(self._rank),
+                rank=self._rank,
+                world_size=2,
+                quorum_id=1,
+            )
             return {"rank": self._rank, "status": "reconfigured_q1"}
 
         def send_tensor(self, dst_rank: int) -> dict:
@@ -957,7 +992,12 @@ def run_p2p_after_reconfig(
                 work.wait()
                 return {"rank": self._rank, "status": "sent", "elapsed_s": round(time.monotonic() - start, 2)}
             except Exception as e:
-                return {"rank": self._rank, "status": "send_error", "error": str(e), "elapsed_s": round(time.monotonic() - start, 2)}
+                return {
+                    "rank": self._rank,
+                    "status": "send_error",
+                    "error": str(e),
+                    "elapsed_s": round(time.monotonic() - start, 2),
+                }
 
         def recv_tensor(self, src_rank: int) -> dict:
             import torch
@@ -967,14 +1007,26 @@ def run_p2p_after_reconfig(
             try:
                 work = self._pg.recv([t], src_rank, tag=200)
                 work.wait()
-                return {"rank": self._rank, "status": "received", "value": t.tolist(), "elapsed_s": round(time.monotonic() - start, 2)}
+                return {
+                    "rank": self._rank,
+                    "status": "received",
+                    "value": t.tolist(),
+                    "elapsed_s": round(time.monotonic() - start, 2),
+                }
             except Exception as e:
-                return {"rank": self._rank, "status": "recv_error", "error": str(e), "elapsed_s": round(time.monotonic() - start, 2)}
+                return {
+                    "rank": self._rank,
+                    "status": "recv_error",
+                    "error": str(e),
+                    "elapsed_s": round(time.monotonic() - start, 2),
+                }
 
     workers = [_ReconfigP2PWorker.remote() for _ in range(2)]
 
     print("--- Step 1: Configure (quorum 0) ---")
-    results = ray.get([w.init.remote(store_addr=store_addr, rank=i, timeout_s=timeout_s) for i, w in enumerate(workers)])
+    results = ray.get(
+        [w.init.remote(store_addr=store_addr, rank=i, timeout_s=timeout_s) for i, w in enumerate(workers)]
+    )
     for r in results:
         print(f"  {r}")
 
@@ -1038,27 +1090,33 @@ def _run_recovery_once(
     print(f"\n{'='*70}\n  RECOVERY: {label}  timeout={timeout_s}s die_after={die_after_s}s\n{'='*70}\n")
 
     workers = [_PGWorker.remote() for _ in range(2)]
-    init = ray.get([
-        w.init_recovery.remote(
-            store_addr_q0=store_addr_q0,
-            store_addr_q1=store_addr_q1,
-            rank=i,
-            world_size=2,
-            timeout_s=timeout_s,
-            nonblocking_timeout_override=nonblocking_timeout_override,
-            prime_native=prime_native,
-            store_host="localhost",
-            store_port=store.port,
-            with_gloo=with_gloo,
-        )
-        for i, w in enumerate(workers)
-    ])
+    init = ray.get(
+        [
+            w.init_recovery.remote(
+                store_addr_q0=store_addr_q0,
+                store_addr_q1=store_addr_q1,
+                rank=i,
+                world_size=2,
+                timeout_s=timeout_s,
+                nonblocking_timeout_override=nonblocking_timeout_override,
+                prime_native=prime_native,
+                store_host="localhost",
+                store_port=store.port,
+                with_gloo=with_gloo,
+            )
+            for i, w in enumerate(workers)
+        ]
+    )
     for r in init:
         print(f"  init: {r}")
 
     victim, survivor = workers[0], workers[1]
-    verdict = {"strategy": strategy, "pre_detect": pre_detect, "nccl_version": init[0]["nccl_version"],
-               "use_abort": init[0]["use_abort"]}
+    verdict = {
+        "strategy": strategy,
+        "pre_detect": pre_detect,
+        "nccl_version": init[0]["nccl_version"],
+        "use_abort": init[0]["use_abort"],
+    }
 
     # Peer launches continuous allreduce then os._exit's mid-flight.
     victim_ref = victim.run_allreduce_then_die.remote(tensor_size=tensor_size, die_after_s=die_after_s)
@@ -1127,7 +1185,9 @@ def run_recovery(
     ] = "manager_idiomatic",
     pre_detect: Annotated[bool, typer.Option(help="Let userspace abort fire during the failed wait first")] = True,
     timeout_s: Annotated[float, typer.Option(help="torchft PG timeout (also the userspace abort deadline)")] = 20.0,
-    tensor_size: Annotated[int, typer.Option(help="allreduce size; larger keeps the collective in-flight longer")] = 100_000_000,
+    tensor_size: Annotated[
+        int, typer.Option(help="allreduce size; larger keeps the collective in-flight longer")
+    ] = 100_000_000,
     die_after_s: Annotated[float, typer.Option(help="peer os._exit's this long after starting")] = 2.0,
     teardown_budget_s: Annotated[float, typer.Option(help="ray.get timeout for teardown; exceeding = HANG")] = 90.0,
     nonblocking_timeout_override: Annotated[
