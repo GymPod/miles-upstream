@@ -24,6 +24,7 @@ def _build_args(**overrides) -> str:
         "tool_call_failure_mode": "rollback",
         "sglang_reasoning_parser": "qwen3",
         "sglang_tool_call_parser": "qwen25",
+        "sglang_expert_parallel_size": 1,
     }
     values.update(overrides)
     return namespace_to_train_args(argparse.Namespace(**values))
@@ -46,6 +47,18 @@ def test_namespace_to_train_args_keeps_ci_test_enabled_for_fsdp_debug_rollout():
 
     assert "--train-backend fsdp" in train_args
     assert "--ci-test" in train_args
+
+
+def test_namespace_to_train_args_omits_expert_parallel_for_single_expert():
+    train_args = _build_args()
+
+    assert "--sglang-expert-parallel-size" not in train_args
+
+
+def test_namespace_to_train_args_emits_expert_parallel_for_moe():
+    train_args = _build_args(sglang_expert_parallel_size=8)
+
+    assert "--sglang-expert-parallel-size 8" in train_args
 
 
 def _write_metrics(path, entries: list[dict]) -> None:

@@ -515,6 +515,7 @@ class TestParserBinding:
             (TITOTokenizerType.KIMI26, "kimi_k2", "kimi_k2_raw_id"),
             (TITOTokenizerType.MINIMAX_M25, "minimax-append-think", "minimax-m2"),
             (TITOTokenizerType.MINIMAX_M27, "minimax-append-think", "minimax-m2"),
+            (TITOTokenizerType.DEEPSEEKV32, "deepseek-v3", "deepseekv32"),
             (TITOTokenizerType.DEFAULT, None, None),
         ],
     )
