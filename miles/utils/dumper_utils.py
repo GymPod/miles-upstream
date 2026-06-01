@@ -98,10 +98,12 @@ class DumperMegatronUtil:
             return
 
         extracted_model = self._extract_model(model)
+        get_grad: Callable[[torch.nn.Parameter], torch.Tensor | None] | None = None
         if self.phase is DumperPhase.FWD_BWD and self.overrides.get("enable_model_grad"):
             _log_model_grad_coverage(extracted_model)
+            get_grad = _build_full_grad_getter(extracted_model)
 
-        dumper.dump_model(extracted_model)
+        dumper.dump_model(extracted_model, get_grad=get_grad)
         dumper.step()
         dumper.configure(enable=False)
 
@@ -140,6 +142,58 @@ class DumperMegatronUtil:
         _cleanup_dump_dir(Path(merged["dir"]) / merged["exp_name"])
         dumper.configure(**dataclasses.asdict(full_config))
         return True
+
+
+def _build_full_grad_getter(
+    model_chunk: torch.nn.Module,
+) -> Callable[[torch.nn.Parameter], torch.Tensor | None]:
+    """Return a ``get_grad(param)`` that yields the full DP-reduced gradient.
+
+    With the distributed optimizer, Megatron reduce-scatters gradients over the
+    dp_cp group, so each rank's ``main_grad`` holds the reduced gradient only on
+    its own 1/dp_cp shard (stale local partials elsewhere). That raw per-rank
+    buffer is not comparable across DP topologies (a non-FT baseline shards over
+    dp×cp while an indep-DP target shards over a cell's cp then sums across
+    cells).
+
+    We all-gather each bucket's grad shards into a FRESH buffer — Megatron's own
+    ``grad_data`` is only read, never mutated — and return per-param views into
+    it, so the dumped gradient is the full global gradient the optimizer steps
+    with (identical across topologies, since the post-step weights are
+    bit-identical). The all-gathers run here, before the per-param dump loop, on
+    all dp_cp ranks, so the collective is symmetric regardless of which rank
+    writes files.
+    """
+    grad_map: dict[torch.nn.Parameter, torch.Tensor] = {}
+    bucket_groups = list(getattr(model_chunk, "bucket_groups", [])) + list(
+        getattr(model_chunk, "expert_parallel_bucket_groups", [])
+    )
+    for bucket_group in bucket_groups:
+        if not bucket_group.ddp_config.use_distributed_optimizer:
+            continue
+        group = bucket_group.intra_distributed_optimizer_instance_group
+        instance_size = bucket_group.intra_distributed_optimizer_instance_size
+        instance_rank = bucket_group.intra_distributed_optimizer_instance_rank
+        for bucket in bucket_group.buckets:
+            grad_data = bucket.grad_data
+            if instance_size > 1:
+                full = torch.empty_like(grad_data)
+                shard_numel = grad_data.numel() // instance_size
+                local_shard = grad_data[instance_rank * shard_numel : (instance_rank + 1) * shard_numel]
+                dist.all_gather_into_tensor(full, local_shard.contiguous(), group=group)
+            else:
+                full = grad_data
+            flat = full.view(-1)
+            for param, (start, end) in bucket.param_to_index.items():
+                grad_map[param] = flat[start:end].view(param.shape)
+
+    def get_grad(param: torch.nn.Parameter) -> torch.Tensor | None:
+        reduced = grad_map.get(param)
+        if reduced is not None:
+            return reduced
+        return param.grad if param.grad is not None else getattr(param, "main_grad", None)
+
+    return get_grad
 
 
 def _log_model_grad_coverage(model: torch.nn.Module) -> None:
