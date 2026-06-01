@@ -1,5 +1,4 @@
 import logging
-import threading
 from collections.abc import Sequence
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -56,28 +55,6 @@ def create_indep_dp_group(
     return GroupInfo(rank=indep_dp_info.alive_rank, size=indep_dp_info.alive_size, group=nccl_pg, gloo_group=gloo_pg)
 
 
-def _shutdown_pg_off_critical_path(g, timeout_s: float = 20.0) -> None:
-    """Shut down an old indep_dp PG without letting a dead peer block recovery.
-
-    torchft ``ProcessGroup.shutdown`` drops the last ref and runs
-    ``~ProcessGroupNCCL``, whose ``abort()`` calls ``waitForFutureOrTimeout`` —
-    that blocks forever when a peer cell died with a collective still in flight
-    (NCCL cannot drain it over NVLink). Only ranks whose comm already hit the
-    torchft watchdog abort shut down instantly; the rest would hang here and
-    stall the surviving cell's reconfigure. Run shutdown on a daemon thread so a
-    stuck teardown is abandoned instead of blocking; the orphaned comm is
-    harmless because we immediately build a fresh quorum.
-    """
-    t = threading.Thread(target=g.shutdown, name="indep-dp-pg-shutdown", daemon=True)
-    t.start()
-    t.join(timeout_s)
-    if t.is_alive():
-        logger.warning(
-            "indep_dp old PG shutdown still blocked after %ss; abandoning it (peer cell likely dead)",
-            timeout_s,
-        )
-
-
 def reconfigure_indep_dp_group(
     parallel_state: ParallelState,
     store_addr: str | None,
@@ -85,11 +62,16 @@ def reconfigure_indep_dp_group(
     megatron_rank: int,
     megatron_world_size: int,
 ) -> None:
-    """Shutdown old indep_dp PGs and create new ones with a fresh quorum_id."""
+    """Tear down old indep_dp PGs and create new ones with a fresh quorum_id."""
     old = parallel_state.indep_dp
     for g in [old.group, old.gloo_group]:
         if g is not None:
-            _shutdown_pg_off_critical_path(g)
+            # Tear down via torchft's abort() (ncclCommAbort), the same path
+            # torchft's own configure() uses to reconfigure across quorums. NOT
+            # shutdown(): shutdown only drops the ref and runs the blocking
+            # ~ProcessGroupNCCL destructor (abort()+waitForFutureOrTimeout),
+            # which hangs forever when the peer cell died mid-collective.
+            g.abort(errored=False)
 
     parallel_state.indep_dp = create_indep_dp_group(
         store_addr=store_addr,
