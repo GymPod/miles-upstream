@@ -100,7 +100,12 @@ class DumperMegatronUtil:
         extracted_model = self._extract_model(model)
         if self.phase is DumperPhase.FWD_BWD and self.overrides.get("enable_model_grad"):
             _log_model_grad_coverage(extracted_model)
-
+            # With the distributed optimizer, grads are reduce-scattered over the
+            # dp_cp group, so each rank's main_grad holds the reduced gradient only
+            # on its own shard. Re-gather the shards so the dumped gradient is the
+            # full reduced gradient (the same global gradient the optimizer steps
+            # with) — making dumps comparable across different DP topologies.
+            _reconstruct_full_grads_inplace(extracted_model)
         dumper.dump_model(extracted_model)
         dumper.step()
         dumper.configure(enable=False)
@@ -140,6 +145,49 @@ class DumperMegatronUtil:
         _cleanup_dump_dir(Path(merged["dir"]) / merged["exp_name"])
         dumper.configure(**dataclasses.asdict(full_config))
         return True
+
+
+def _reconstruct_full_grads_inplace(model_chunk: torch.nn.Module) -> None:
+    """All-gather the distributed-optimizer grad shards back into the full buffer.
+
+    With ``use_distributed_optimizer=True`` Megatron reduce-scatters gradients
+    over the dp_cp group: each rank's ``grad_data`` (and the ``main_grad`` views
+    into it) holds the fully-reduced gradient only on its own 1/dp_cp shard, with
+    stale local partials elsewhere. The raw dump is therefore not comparable
+    across DP topologies (a non-FT baseline shards over dp4×cp2=8 while an
+    indep-DP target shards over a cell's 1×cp2=2 then sums across cells).
+
+    All-gathering the shards (mirroring Megatron's own ``start_param_sync`` but
+    for grads) materializes the complete reduced gradient on every rank — exactly
+    the global gradient the optimizer steps with, which is identical across the
+    two topologies (the post-step weights are bit-identical). The comparator then
+    checks the real, full gradient at full tolerance.
+
+    In-place is safe: ``all_gather_into_tensor`` writes each rank's own shard back
+    unchanged and only overwrites the (otherwise unused) non-owned regions; the
+    optimizer reads only its owned shard, and ``zero_grad_buffer`` wipes the
+    buffer after the step. All dp_cp ranks run the dumper, so the collective is
+    symmetric.
+    """
+    bucket_groups = list(getattr(model_chunk, "bucket_groups", [])) + list(
+        getattr(model_chunk, "expert_parallel_bucket_groups", [])
+    )
+    for bucket_group in bucket_groups:
+        if not bucket_group.ddp_config.use_distributed_optimizer:
+            continue
+        group = bucket_group.intra_distributed_optimizer_instance_group
+        instance_size = bucket_group.intra_distributed_optimizer_instance_size
+        instance_rank = bucket_group.intra_distributed_optimizer_instance_rank
+        if instance_size <= 1:
+            continue
+        for bucket in bucket_group.buckets:
+            local_shard = _shard_grad_buffer(bucket.grad_data, instance_size)[instance_rank]
+            dist.all_gather_into_tensor(bucket.grad_data, local_shard, group=group)
+
+
+def _shard_grad_buffer(buffer: torch.Tensor, world_size: int) -> list[torch.Tensor]:
+    shard_size = buffer.numel() // world_size
+    return [buffer[r * shard_size : (r + 1) * shard_size] for r in range(world_size)]
 
 
 def _log_model_grad_coverage(model: torch.nn.Module) -> None:
