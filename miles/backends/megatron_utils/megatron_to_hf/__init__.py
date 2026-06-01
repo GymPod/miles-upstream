@@ -35,7 +35,7 @@ def convert_to_hf(args, model_name, name, param, quantization_config=None):
     return quantize_params(args, name, converted_named_tensors, quantization_config)
 
 
-def get_atomic_update_groups(model_name, param_infos) -> list[AtomicUpdateGroup]:
+def get_atomic_update_groups(args, model_name) -> list[AtomicUpdateGroup]:
     return []
 
 

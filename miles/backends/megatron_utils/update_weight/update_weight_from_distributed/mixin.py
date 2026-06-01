@@ -9,8 +9,14 @@ from miles.backends.training_utils.parallel import get_parallel_state
 from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.timer import timer
 
-from ...megatron_to_hf import convert_to_hf
-from ..common import all_gather_param, collect_named_tensors_for_weight_transfer, post_process_weights
+from ...megatron_to_hf import convert_to_hf, get_atomic_update_groups
+from ..common import (
+    all_gather_param,
+    assert_named_value_update_units_are_homogeneous,
+    collect_named_tensors_for_weight_transfer,
+    get_named_value_update_units,
+    post_process_weights,
+)
 
 
 class DistBucketedWeightUpdateMixin:
@@ -45,19 +51,27 @@ class DistBucketedWeightUpdateMixin:
         buffer_size = 0
         converted_named_tensors: list[tuple[str, torch.Tensor]] = []
 
-        for name, param in collect_named_tensors_for_weight_transfer(self.args, self.model, is_expert=False):
-            param = all_gather_param(self.args, name, param)
+        for update_unit in self._get_weight_transfer_update_units(is_expert=False):
+            gathered_params = []
+            unit_size = 0
+            for name, param in update_unit:
+                param = all_gather_param(self.args, name, param)
+                gathered_params.append((name, param))
+                unit_size += param.numel() * param.element_size()
+
             if not self._is_source:
                 continue
 
-            param_size = param.numel() * param.element_size()
-            if buffer_size + param_size > self.args.update_weight_buffer_size:
+            if buffer_size + unit_size > self.args.update_weight_buffer_size and converted_named_tensors:
                 update_bucket_weight_func(converted_named_tensors, pbar)
                 converted_named_tensors = []
                 buffer_size = 0
 
-            converted_named_tensors += convert_to_hf(self.args, self.model_name, name, param, self.quantization_config)
-            buffer_size += param_size
+            for name, param in gathered_params:
+                converted_named_tensors += convert_to_hf(
+                    self.args, self.model_name, name, param, self.quantization_config
+                )
+            buffer_size += unit_size
 
         if converted_named_tensors:
             update_bucket_weight_func(converted_named_tensors, pbar)
@@ -74,21 +88,33 @@ class DistBucketedWeightUpdateMixin:
         buffer_size = 0
         named_tensors: list[tuple[str, torch.Tensor]] = []
 
-        for name, param in collect_named_tensors_for_weight_transfer(self.args, self.model, is_expert=True):
-            param = all_gather_param(self.args, name, param)
-            param_size = param.numel() * param.element_size()
+        for update_unit in self._get_weight_transfer_update_units(is_expert=True):
+            gathered_params = []
+            unit_size = 0
+            for name, param in update_unit:
+                param = all_gather_param(self.args, name, param)
+                gathered_params.append((name, param))
+                unit_size += param.numel() * param.element_size()
+
             if (
-                buffer_size + param_size
+                buffer_size + unit_size
             ) * get_parallel_state().ep.size > self.args.update_weight_buffer_size and named_tensors:
                 self._update_expert_bucket_weights(named_tensors, update_bucket_weight_func, pbar)
                 named_tensors = []
                 buffer_size = 0
 
-            named_tensors.append((name, param))
-            buffer_size += param_size
+            named_tensors.extend(gathered_params)
+            buffer_size += unit_size
 
         if named_tensors:
             self._update_expert_bucket_weights(named_tensors, update_bucket_weight_func, pbar)
+
+    def _get_weight_transfer_update_units(self, is_expert: bool) -> list[list[tuple[str, torch.Tensor]]]:
+        named_tensors = list(collect_named_tensors_for_weight_transfer(self.args, self.model, is_expert=None))
+        atomic_update_groups = get_atomic_update_groups(self.args, self.model_name)
+        update_units = get_named_value_update_units(named_tensors, atomic_update_groups)
+        assert_named_value_update_units_are_homogeneous(update_units)
+        return [unit for unit in update_units if (".experts." in unit[0][0]) == is_expert]
 
     def _update_expert_bucket_weights(
         self,

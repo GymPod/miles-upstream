@@ -12,14 +12,8 @@ from miles.utils.types import ParamInfo
 
 from ..megatron_to_hf import convert_to_hf, get_atomic_update_groups
 from ..sglang import monkey_patch_torch_reductions
-from .common import all_gather_params_async, named_params_and_buffers
+from .common import NamedUpdateUnit, all_gather_params_async, get_named_update_units, named_params_and_buffers
 from .hf_weight_iterator_base import HfWeightIteratorBase
-
-
-@dataclasses.dataclass(frozen=True)
-class _UpdateUnit:
-    params: tuple[ParamInfo, ...]
-    size: int
 
 
 class HfWeightIteratorDirect(HfWeightIteratorBase):
@@ -126,8 +120,10 @@ def _get_megatron_local_param_info_buckets(
     some rollout loaders must see related tensors in the same load_weights call.
     """
     param_infos = _get_megatron_local_param_infos(args, model)
-    update_units = _get_update_units(model_name, param_infos)
-    return _pack_update_units(args, update_units)
+    param_names = [info.name for info in param_infos]
+    atomic_update_groups = get_atomic_update_groups(args, model_name)
+    update_units = get_named_update_units(param_names, atomic_update_groups)
+    return _pack_update_units(args, param_infos, update_units)
 
 
 def _get_param_full_size(info: ParamInfo) -> int:
@@ -138,55 +134,21 @@ def _get_param_full_size(info: ParamInfo) -> int:
     return info.size * tp_size
 
 
-def _get_update_units(model_name: str, param_infos: list[ParamInfo]) -> list[_UpdateUnit]:
+def _pack_update_units(
+    args: Namespace, param_infos: list[ParamInfo], update_units: list[NamedUpdateUnit]
+) -> list[list[ParamInfo]]:
     by_name = {info.name: info for info in param_infos}
-    position = {info.name: i for i, info in enumerate(param_infos)}
-    grouped_names: set[str] = set()
-    group_keys: set[str] = set()
-    ordered_units: list[tuple[int, _UpdateUnit]] = []
-
-    for group in get_atomic_update_groups(model_name, param_infos):
-        key = group.key
-        names = group.names
-        if key in group_keys:
-            raise RuntimeError(f"Duplicate atomic update group: {key}")
-        if not names:
-            raise RuntimeError(f"Atomic update group {key} has no params")
-        group_keys.add(key)
-
-        params = []
-        for name in names:
-            if name in grouped_names:
-                raise RuntimeError(f"Param {name} appears in multiple atomic update groups")
-            if name not in by_name:
-                raise RuntimeError(f"Atomic update group {key} references unknown param {name}")
-            grouped_names.add(name)
-            params.append(by_name[name])
-
-        ordered_units.append(
-            (
-                min(position[name] for name in names),
-                _UpdateUnit(params=tuple(params), size=sum(_get_param_full_size(param) for param in params)),
-            )
-        )
-
-    for info in param_infos:
-        if info.name not in grouped_names:
-            ordered_units.append((position[info.name], _UpdateUnit(params=(info,), size=_get_param_full_size(info))))
-
-    return [unit for _position, unit in sorted(ordered_units, key=lambda item: item[0])]
-
-
-def _pack_update_units(args: Namespace, update_units: list[_UpdateUnit]) -> list[list[ParamInfo]]:
     param_info_buckets: list[list[ParamInfo]] = [[]]
     buffer_size = 0
 
     for unit in update_units:
-        if buffer_size + unit.size > args.update_weight_buffer_size and param_info_buckets[-1]:
+        params = [by_name[name] for name in unit.names]
+        unit_size = sum(_get_param_full_size(param) for param in params)
+        if buffer_size + unit_size > args.update_weight_buffer_size and param_info_buckets[-1]:
             param_info_buckets.append([])
             buffer_size = 0
-        param_info_buckets[-1].extend(unit.params)
-        buffer_size += unit.size
+        param_info_buckets[-1].extend(params)
+        buffer_size += unit_size
 
     return param_info_buckets
 
