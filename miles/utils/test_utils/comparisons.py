@@ -180,6 +180,15 @@ def compare_metrics(
     baseline_events = _read_metric_events(Path(baseline_dir))
     target_events = _read_metric_events(Path(target_dir))
 
+    # Only consider events that actually carry a compared (key_prefixes) metric.
+    # Rollout-side events (e.g. rollout/* logged by live generation) are never
+    # compared, but they would otherwise inflate the event count: a real-rollout
+    # baseline generates live (emitting them) while a replaying target does not,
+    # causing a spurious count mismatch. Debug/replay modes emit none, so this is
+    # a no-op for them.
+    baseline_events = _filter_events_with_compared_metric(baseline_events, key_prefixes)
+    target_events = _filter_events_with_compared_metric(target_events, key_prefixes)
+
     # FT retries (healing path) leave events from earlier failed attempts. Only
     # the highest-attempt events per rollout_id reflect the successful run.
     baseline_events = _keep_only_final_attempt(baseline_events)
@@ -201,6 +210,10 @@ def compare_metrics(
         f"  - {i}" for i in issues
     )
     print(f"MetricEvent comparison passed: {len(baseline_events)} steps compared")
+
+
+def _filter_events_with_compared_metric(events: list[MetricEvent], key_prefixes: list[str]) -> list[MetricEvent]:
+    return [e for e in events if any(k.startswith(p) for p in key_prefixes for k in e.metrics)]
 
 
 def _keep_only_final_attempt(events: list[MetricEvent]) -> list[MetricEvent]:

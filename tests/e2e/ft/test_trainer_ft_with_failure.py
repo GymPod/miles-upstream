@@ -93,13 +93,20 @@ def _compare(dump_dir: str, mode: FTTestMode) -> None:
     # loss) and exclude the grad-derived grad_norm metric / grad tensors. Debug
     # modes keep grads strict (near-zero floor).
     real_rollout = mode.has_real_rollout
+    # For real-rollout, baseline generates live while target replays baseline's
+    # data, so the generation-consistency diagnostics (train-vs-rollout logprob gap
+    # and its KL) differ by construction, and grad_norm is reduction-order-sensitive
+    # under recovery. None are baseline-vs-target correctness invariants; the
+    # correctness signal is the bitwise param dump (+ value) and train/loss (which
+    # passes via atol). Excluded only for real-rollout modes.
+    real_rollout_excluded = ["train/grad_norm", "train/train_rollout_logprob_abs_diff", "train/train_rollout_kl"]
     compare_metrics(
         baseline_dir=f"{dump_dir}/baseline/phase_b",
         target_dir=f"{dump_dir}/target/phase_b",
         rtol=5e-2,
         atol=1e-7,
         key_prefixes=["train/"],
-        exclude_keys=["train/grad_norm"] if real_rollout else None,
+        exclude_keys=real_rollout_excluded if real_rollout else None,
     )
     compare_dumps(
         baseline_dir=f"{dump_dir}/baseline/phase_b",

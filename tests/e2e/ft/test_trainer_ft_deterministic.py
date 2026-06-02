@@ -89,13 +89,18 @@ def _compare(dump_dir: str, mode: FTTestMode) -> None:
     real_rollout = mode.has_real_rollout
     rtol: float = 3e-2 if real_rollout else 1e-2
     atol: float = 2e-8 if real_rollout else 1e-8
+    # See test_trainer_ft_with_failure._compare: real-rollout generation-consistency
+    # diagnostics (train-vs-rollout logprob gap / KL) differ by real-gen-vs-replay,
+    # and grad_norm is reduction-order-sensitive under recovery — none are
+    # correctness invariants; params (bitwise) + value + loss are.
+    real_rollout_excluded = ["train/grad_norm", "train/train_rollout_logprob_abs_diff", "train/train_rollout_kl"]
     compare_metrics(
         baseline_dir=f"{dump_dir}/baseline/phase_b",
         target_dir=f"{dump_dir}/target/phase_b",
         rtol=rtol,
         atol=atol,
         key_prefixes=["train/"],
-        exclude_keys=["train/grad_norm"] if real_rollout else None,
+        exclude_keys=real_rollout_excluded if real_rollout else None,
     )
     compare_dumps(
         baseline_dir=f"{dump_dir}/baseline/phase_b",
