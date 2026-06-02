@@ -12,7 +12,6 @@ from miles.utils.timer import timer
 from ...megatron_to_hf import convert_to_hf, get_atomic_update_groups
 from ..common import (
     all_gather_param,
-    assert_named_value_update_units_are_homogeneous,
     collect_named_tensors_for_weight_transfer,
     get_named_value_update_units,
     post_process_weights,
@@ -119,7 +118,8 @@ class DistBucketedWeightUpdateMixin:
         named_tensors = list(collect_named_tensors_for_weight_transfer(self.args, self.model, is_expert=None))
         atomic_update_groups = get_atomic_update_groups(self.args, self.model_name)
         update_units = get_named_value_update_units(named_tensors, atomic_update_groups)
-        assert_named_value_update_units_are_homogeneous(update_units)
+        for unit in update_units:
+            assert len({".experts." in name for name, _tensor in unit}) == 1, [name for name, _tensor in unit]
         return [unit for unit in update_units if _is_expert_update_unit(unit) == is_expert]
 
     def _update_expert_bucket_weights(

@@ -229,5 +229,5 @@ def test_distributed_atomic_group_cannot_span_expert_and_non_expert(direct_modul
         lambda args, model_name: [AtomicUpdateGroup("mixed", (".a", ".experts.b"))],
     )
 
-    with pytest.raises(RuntimeError, match="spans expert and non-expert params"):
+    with pytest.raises(AssertionError, match="module.a"):
         updater._get_weight_transfer_update_units(is_expert=False)

@@ -93,13 +93,6 @@ def get_named_value_update_units(
     return [[(name, value_by_name[name]) for name in unit.names] for unit in update_units]
 
 
-def assert_named_value_update_units_are_homogeneous(update_units: Sequence[Sequence[tuple[str, object]]]) -> None:
-    for unit in update_units:
-        has_expert = [".experts." in name for name, _value in unit]
-        if any(has_expert) and not all(has_expert):
-            raise RuntimeError(f"Atomic update group spans expert and non-expert params: {[name for name, _ in unit]}")
-
-
 def _gather_with_stride(
     param_partitions: list[torch.Tensor], partition_dim: int, partition_stride: int
 ) -> torch.Tensor:
