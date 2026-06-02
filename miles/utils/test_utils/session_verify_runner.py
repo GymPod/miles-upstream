@@ -70,6 +70,7 @@ SESSION_VERIFY_INVARIANT_ARGS: dict[str, Any] = {
     "ci_test": True,
     "colocate": True,
     "train_backend": "fsdp",
+    "sglang_expert_parallel_size": 1,
 }
 
 

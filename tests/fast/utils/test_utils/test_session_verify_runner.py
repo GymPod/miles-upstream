@@ -24,7 +24,6 @@ def _build_args(**overrides) -> str:
         "tool_call_failure_mode": "rollback",
         "sglang_reasoning_parser": "qwen3",
         "sglang_tool_call_parser": "qwen25",
-        "sglang_expert_parallel_size": 1,
     }
     values.update(overrides)
     return namespace_to_train_args(argparse.Namespace(**values))
