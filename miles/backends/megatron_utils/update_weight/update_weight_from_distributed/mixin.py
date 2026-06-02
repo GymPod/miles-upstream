@@ -19,6 +19,12 @@ from ..common import (
 )
 
 
+def _is_expert_update_unit(update_unit: list[tuple[str, torch.Tensor]]) -> bool:
+    assert update_unit, "Update unit must contain at least one param"
+    name, _tensor = update_unit[0]
+    return ".experts." in name
+
+
 class DistBucketedWeightUpdateMixin:
     """Mixin providing bucketed TP/EP all-gather, HF format conversion, pre-process/post-process
         and the weight updating pipeline.
@@ -114,7 +120,7 @@ class DistBucketedWeightUpdateMixin:
         atomic_update_groups = get_atomic_update_groups(self.args, self.model_name)
         update_units = get_named_value_update_units(named_tensors, atomic_update_groups)
         assert_named_value_update_units_are_homogeneous(update_units)
-        return [unit for unit in update_units if (".experts." in unit[0][0]) == is_expert]
+        return [unit for unit in update_units if _is_expert_update_unit(unit) == is_expert]
 
     def _update_expert_bucket_weights(
         self,
