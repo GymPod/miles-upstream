@@ -198,18 +198,11 @@ class ServerGroup:
                     logger.info(f"Engine actor at index {i} is already terminated")
                 except Exception as e:
                     logger.warning(
-                        "Fail to gracefully terminate engine actor at index %s; " "force killing (e: %s)",
+                        "Fail to terminate engine actor at index %s; force killing (e: %s)",
                         i,
                         e,
                     )
-                    try:
-                        ray.kill(actor_handle)
-                    except Exception as kill_error:
-                        logger.warning(
-                            "Fail to kill engine actor at index %s (e: %s)",
-                            i,
-                            kill_error,
-                        )
+                    ray.kill(actor_handle)
             else:
                 logger.info(f"Engine at index {i} is already None")
             self.all_engines[i].mark_stopped()
