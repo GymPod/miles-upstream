@@ -59,8 +59,7 @@ def compare_dumps(
 
     report = _find_comparator_report(target_path)
     assert report is not None, (
-        f"Dump comparator failed (rc={result.returncode}) and no comparator_report.jsonl "
-        f"found under {target_path}"
+        f"Dump comparator failed (rc={result.returncode}) and no comparator_report.jsonl " f"found under {target_path}"
     )
 
     intolerable = _intolerable_dump_failures(
@@ -73,9 +72,7 @@ def compare_dumps(
         f"Dump comparator failed (rc={result.returncode}): "
         f"{len(intolerable)} tensor(s) exceed both rel_diff>{diff_threshold} and "
         f"abs_diff>{abs_diff_threshold} (near-zero floor). First offenders: "
-        + ", ".join(
-            f"{t['name']}(rel={t['rel_diff']}, abs={t['max_abs_diff']})" for t in intolerable[:10]
-        )
+        + ", ".join(f"{t['name']}(rel={t['rel_diff']}, abs={t['max_abs_diff']})" for t in intolerable[:10])
         + f". Full report: {report}"
     )
     print(
@@ -144,15 +141,15 @@ def _intolerable_dump_failures(
             continue
         max_abs = diff.get("max_abs_diff")
         if max_abs is None or math.isnan(max_abs) or max_abs > abs_diff_threshold:
-            intolerable.append(
-                {"name": name, "rel_diff": diff.get("rel_diff"), "max_abs_diff": max_abs}
-            )
+            intolerable.append({"name": name, "rel_diff": diff.get("rel_diff"), "max_abs_diff": max_abs})
 
     if errored:
         intolerable.append({"name": f"<{errored} errored tensors>", "rel_diff": None, "max_abs_diff": None})
     if not saw_failure_record and not intolerable:
         # rc!=0 but nothing recognizable to tolerate — preserve strictness.
-        intolerable.append({"name": "<comparator rc!=0 with no tolerable failure record>", "rel_diff": None, "max_abs_diff": None})
+        intolerable.append(
+            {"name": "<comparator rc!=0 with no tolerable failure record>", "rel_diff": None, "max_abs_diff": None}
+        )
     return intolerable
 
 
@@ -182,7 +179,9 @@ def compare_metrics(
     if not issues:
         for step_idx, (b_event, t_event) in enumerate(zip(baseline_events, target_events, strict=True)):
             _print_step_comparison_table(step_idx, b_event, t_event, key_prefixes, exclude_keys=exclude_keys)
-            issues += _check_step_metrics(step_idx, b_event, t_event, key_prefixes, rtol, atol=atol, exclude_keys=exclude_keys)
+            issues += _check_step_metrics(
+                step_idx, b_event, t_event, key_prefixes, rtol, atol=atol, exclude_keys=exclude_keys
+            )
 
     issues += _check_required_keys_exist(baseline_events)
 
@@ -202,6 +201,7 @@ def _keep_only_final_attempt(events: list[MetricEvent]) -> list[MetricEvent]:
     attempt=None — they are not part of the FT retry stream, so we treat them
     as a single attempt (normalized to 0).
     """
+
     def _attempt(e: MetricEvent) -> int:
         return e.attempt if e.attempt is not None else 0
 
@@ -249,7 +249,9 @@ def _check_step_metrics(
             issues.append(f"Step {step_idx}: metric '{key}' present in baseline but missing in target")
             continue
 
-        issues += _check_single_metric(step_idx, key, baseline_event.metrics[key], target_event.metrics[key], rtol, atol=atol)
+        issues += _check_single_metric(
+            step_idx, key, baseline_event.metrics[key], target_event.metrics[key], rtol, atol=atol
+        )
     return issues
 
 
@@ -310,13 +312,15 @@ def _print_step_comparison_table(
         abs_diff = abs(b_val - t_val)
         denom = max(abs(b_val), abs(t_val), 1e-12)
         rel_diff = abs_diff / denom
-        rows.append({
-            "metric": key,
-            "baseline": f"{b_val:.6e}",
-            "target": f"{t_val:.6e}",
-            "abs_diff": f"{abs_diff:.2e}",
-            "rel_diff": f"{rel_diff:.4%}{excluded}",
-        })
+        rows.append(
+            {
+                "metric": key,
+                "baseline": f"{b_val:.6e}",
+                "target": f"{t_val:.6e}",
+                "abs_diff": f"{abs_diff:.2e}",
+                "rel_diff": f"{rel_diff:.4%}{excluded}",
+            }
+        )
 
     if not rows:
         return
