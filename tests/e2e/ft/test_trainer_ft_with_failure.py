@@ -20,18 +20,6 @@ from miles.utils.test_utils.comparisons import compare_dumps, compare_metrics
 NUM_PHASE_A_STEPS: int = 1
 NUM_PHASE_B_STEPS: int = 4
 
-# Absolute-diff floor for the grad dump comparison. The fault+recovery target
-# rebuilds the cross-cell collective (quorum 0 -> 1 -> 2), so its reduction order
-# differs from the no-fault baseline. At this test scale most of the 128 MoE
-# experts are starved (~0 tokens) -> near-zero gradients where the comparator's
-# relative (cosine) metric is degenerate: abs diffs ~1e-5 for experts (and the
-# failing set varies run to run, confirming FP noise not a bug), up to ~3.9e-4
-# for a near-zero k_layernorm grad. Real trafficked grads (>=~1e-2) never fail the
-# relative check, so this floor only ever applies to near-zero tensors; 1e-3 sits
-# in the clear gap below real grads and is <0.2% of grad_norm (~0.8). Weights
-# match. NOT a blanket relaxation — normal-magnitude tensors stay strict on rel.
-_NEAR_ZERO_GRAD_ATOL: float = 1e-3
-
 # rollout_id in phase_b starts from NUM_PHASE_A_STEPS (ckpt resume offset)
 _WITH_FAILURE_ACTIONS: list[dict] = [
     {
@@ -48,18 +36,7 @@ _WITH_FAILURE_ACTIONS: list[dict] = [
 
 def _build_phase_args(mode: FTTestMode, dump_dir: str, *, is_target: bool, enable_dumper: bool = True) -> str:
     is_phase_a: bool = dump_dir.endswith("phase_a")
-    # For real-rollout modes the target replays the baseline's generated rollout
-    # data (see get_common_train_args): live generation is chaotic under the FP
-    # noise of recovery, so regenerating on both sides makes the comparison
-    # ill-posed. Baseline still generates live; target trains on identical data.
-    replay_rollout_from = dump_dir.replace("/target/", "/baseline/") if (is_target and mode.has_real_rollout) else None
-    base = get_common_train_args(
-        mode,
-        dump_dir=dump_dir,
-        num_steps=NUM_PHASE_B_STEPS,
-        enable_dumper=enable_dumper,
-        replay_rollout_from=replay_rollout_from,
-    )
+    base = get_common_train_args(mode, dump_dir=dump_dir, num_steps=NUM_PHASE_B_STEPS, enable_dumper=enable_dumper)
 
     if is_target:
         base += get_ft_args(mode)
@@ -85,34 +62,16 @@ def _build_target_args(mode: FTTestMode, dump_dir: str, enable_dumper: bool = Tr
 
 
 def _compare(dump_dir: str, mode: FTTestMode) -> None:
-    # Real-rollout modes: experts are trafficked, so the dumped grads carry
-    # real-magnitude reduction/split-order differences from the recovery topology
-    # change, while the resulting weights are bitwise-identical to normal DP
-    # (verified: param dumps 0 failures). Grad-level comparison is ill-posed under
-    # recovery on real data, so trust the strict bitwise param match (+ value +
-    # loss) and exclude the grad-derived grad_norm metric / grad tensors. Debug
-    # modes keep grads strict (near-zero floor).
-    real_rollout = mode.has_real_rollout
-    # For real-rollout, baseline generates live while target replays baseline's
-    # data, so the generation-consistency diagnostics (train-vs-rollout logprob gap
-    # and its KL) differ by construction, and grad_norm is reduction-order-sensitive
-    # under recovery. None are baseline-vs-target correctness invariants; the
-    # correctness signal is the bitwise param dump (+ value) and train/loss (which
-    # passes via atol). Excluded only for real-rollout modes.
-    real_rollout_excluded = ["train/grad_norm", "train/train_rollout_logprob_abs_diff", "train/train_rollout_kl"]
     compare_metrics(
         baseline_dir=f"{dump_dir}/baseline/phase_b",
         target_dir=f"{dump_dir}/target/phase_b",
         rtol=5e-2,
         atol=1e-7,
         key_prefixes=["train/"],
-        exclude_keys=real_rollout_excluded if real_rollout else None,
     )
     compare_dumps(
         baseline_dir=f"{dump_dir}/baseline/phase_b",
         target_dir=f"{dump_dir}/target/phase_b",
-        abs_diff_threshold=_NEAR_ZERO_GRAD_ATOL,
-        allow_failed_grads=real_rollout,
     )
     print("With-failure comparison test PASSED")
 

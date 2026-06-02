@@ -32,30 +32,10 @@ _DETERMINISTIC_ACTIONS: list[dict] = [
     {"at_rollout": NUM_PHASE_A_STEPS + 1, "action": "start_cell_at_end", "cell_index": -1},
 ]
 
-# 2-cell healing is bitwise (floor never triggers: 0 failures). With >=4 cells the
-# healing reduction spans a different number of cells than the no-fault baseline,
-# so near-zero (starved low-traffic) MoE expert grads (abs ~1e-5) and an occasional
-# near-zero k_layernorm grad (abs ~3.9e-4, sign-flips at ~1e-4 magnitude) cannot
-# reduce bit-identically even under --deterministic-mode. Real trafficked grads
-# (>=~1e-2) never fail the relative check, so the floor only ever applies to
-# near-zero tensors; 1e-3 sits in the gap below real grads and is <0.2% of
-# grad_norm. Normal-magnitude tensors stay strictly bitwise on the relative check.
-_NEAR_ZERO_GRAD_ATOL: float = 1e-3
-
 
 def _build_phase_args(mode: FTTestMode, dump_dir: str, *, is_target: bool, enable_dumper: bool = True) -> str:
     is_phase_a: bool = dump_dir.endswith("phase_a")
-    # Real-rollout target replays baseline's generated data: live generation is
-    # chaotic under the FP noise of healing, so regenerating on both sides makes
-    # the comparison ill-posed. Baseline still generates live.
-    replay_rollout_from = dump_dir.replace("/target/", "/baseline/") if (is_target and mode.has_real_rollout) else None
-    base = get_common_train_args(
-        mode,
-        dump_dir=dump_dir,
-        num_steps=NUM_PHASE_B_STEPS,
-        enable_dumper=enable_dumper,
-        replay_rollout_from=replay_rollout_from,
-    )
+    base = get_common_train_args(mode, dump_dir=dump_dir, num_steps=NUM_PHASE_B_STEPS, enable_dumper=enable_dumper)
     base += "--deterministic-mode " + _DETERMINISTIC_ENV_VARS
 
     if is_target:
@@ -82,31 +62,18 @@ def _build_target_args(mode: FTTestMode, dump_dir: str, enable_dumper: bool = Tr
 
 
 def _compare(dump_dir: str, mode: FTTestMode) -> None:
-    # See test_trainer_ft_with_failure._compare: real-rollout grads carry
-    # real-magnitude reduction/split-order noise under recovery while weights are
-    # bitwise-identical, so trust the strict param match (+ value) and exclude
-    # grad-derived comparisons there. Debug modes stay bitwise-strict on grads.
-    real_rollout = mode.has_real_rollout
-    rtol: float = 3e-2 if real_rollout else 1e-2
-    atol: float = 2e-8 if real_rollout else 1e-8
-    # See test_trainer_ft_with_failure._compare: real-rollout generation-consistency
-    # diagnostics (train-vs-rollout logprob gap / KL) differ by real-gen-vs-replay,
-    # and grad_norm is reduction-order-sensitive under recovery — none are
-    # correctness invariants; params (bitwise) + value + loss are.
-    real_rollout_excluded = ["train/grad_norm", "train/train_rollout_logprob_abs_diff", "train/train_rollout_kl"]
+    rtol: float = 3e-2 if mode.has_real_rollout else 1e-2
+    atol: float = 2e-8 if mode.has_real_rollout else 1e-8
     compare_metrics(
         baseline_dir=f"{dump_dir}/baseline/phase_b",
         target_dir=f"{dump_dir}/target/phase_b",
         rtol=rtol,
         atol=atol,
         key_prefixes=["train/"],
-        exclude_keys=real_rollout_excluded if real_rollout else None,
     )
     compare_dumps(
         baseline_dir=f"{dump_dir}/baseline/phase_b",
         target_dir=f"{dump_dir}/target/phase_b",
-        abs_diff_threshold=_NEAR_ZERO_GRAD_ATOL,
-        allow_failed_grads=real_rollout,
     )
     print("Deterministic healing comparison test PASSED")
 

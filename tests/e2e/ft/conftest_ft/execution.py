@@ -48,12 +48,7 @@ def prepare(mode: FTTestMode) -> None:
 
 
 def get_common_train_args(
-    mode: FTTestMode,
-    *,
-    dump_dir: str,
-    num_steps: int | None = None,
-    enable_dumper: bool = True,
-    replay_rollout_from: str | None = None,
+    mode: FTTestMode, *, dump_dir: str, num_steps: int | None = None, enable_dumper: bool = True
 ) -> str:
     ckpt_args = (
         f"--hf-checkpoint {_MODEL_DIR}/{mode.model_name} " f"--ref-load {_MODEL_DIR}/{mode.model_name}_torch_dist "
@@ -71,21 +66,7 @@ def get_common_train_args(
     )
 
     rollout_args: str
-    if mode.has_real_rollout and replay_rollout_from is not None:
-        # Real-rollout comparison is ill-posed when both sides generate live: the
-        # tiny unavoidable FP noise of FT recovery perturbs the weights, which
-        # changes which tokens get sampled, so the two live generations decorrelate
-        # (chaotic) and ~half the grad tensors diverge. To compare the training /
-        # recovery path on equal footing, the target replays the rollout data the
-        # baseline just generated (baseline still exercises the real rollout path).
-        rollout_args = (
-            f"--prompt-data {_DATA_DIR}/gsm8k/train.parquet "
-            f"--load-debug-rollout-data {replay_rollout_from}/rollout_data/{{rollout_id}}.pt "
-            "--debug-train-only "
-            "--rollout-batch-size 32 "
-            "--n-samples-per-prompt 8 "
-        )
-    elif not mode.has_real_rollout:
+    if not mode.has_real_rollout:
         rollout_args = (
             f"--prompt-data {_DATA_DIR}/gsm8k/train.parquet "
             f"--load-debug-rollout-data {_DATA_DIR}/miles-test-rollout-Qwen3-30B-A3B-5layer/{{rollout_id}}.pt "
