@@ -7,7 +7,6 @@ route to LoRA-specific code paths depending on configuration — without GPU.
 from argparse import Namespace
 from unittest.mock import MagicMock, patch
 
-
 # ---------------------------------------------------------------------------
 # _ensure_model_list
 # ---------------------------------------------------------------------------
@@ -58,7 +57,6 @@ class TestShouldDisableForwardPreHook:
 # setup_model_and_optimizer — LoRA branch routing
 # ---------------------------------------------------------------------------
 
-
 _MODEL_MODULE = "miles.backends.megatron_utils.model"
 
 
@@ -71,6 +69,7 @@ class TestSetupModelAndOptimizerLoraBranch:
             lora_adapter_path=None,
             megatron_to_hf_mode=mode,
             moe_use_upcycling=False,
+            debug_disable_optimizer=False,
             load="/some/path",
             pretrained_checkpoint=None,
             # optimizer fields

@@ -13,8 +13,14 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import kill_process_tree
 from urllib3.exceptions import NewConnectionError
 
-from miles.backends.megatron_utils.lora_utils import LORA_ADAPTER_NAME, convert_target_modules_to_hf, is_lora_enabled
+from miles.backends.megatron_utils.lora_utils import (
+    LORA_ADAPTER_NAME,
+    convert_target_modules_to_hf,
+    is_lora_enabled,
+    lora_base_cpu_backup_enabled,
+)
 from miles.ray.ray_actor import RayActor
+from miles.utils.env_report import collect_and_print_node_env_report
 from miles.utils.http_utils import get_host_info
 
 logger = logging.getLogger(__name__)
@@ -34,7 +40,7 @@ def get_base_gpu_id(args, rank):
 
 
 def _to_local_gpu_id(physical_gpu_id: int) -> int:
-    cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES") or os.environ.get("HIP_VISIBLE_DEVICES")
     if not cvd:
         return physical_gpu_id  # no remapping
     # CUDA_VISIBLE_DEVICES can be like "4,5,6,7"
@@ -133,7 +139,15 @@ class SGLangEngine(RayActor):
         disaggregation_bootstrap_port=None,
         router_ip=None,
         router_port=None,
+        engine_info_bootstrap_port=None,
     ):
+        if env_report := self.args.env_report:
+            collect_and_print_node_env_report(
+                role="rollout",
+                rank=self.rank,
+                partial_env_report=env_report,
+            )
+
         self.router_ip = router_ip if router_ip is not None else self.args.sglang_router_ip
         self.router_port = router_port if router_port is not None else self.args.sglang_router_port
 
@@ -163,6 +177,7 @@ class SGLangEngine(RayActor):
             self.worker_type,
             disaggregation_bootstrap_port,
             base_gpu_id=self.base_gpu_id,
+            engine_info_bootstrap_port=engine_info_bootstrap_port,
             sglang_overrides=self.sglang_overrides,
             num_gpus_per_engine=self.num_gpus_per_engine,
         )
@@ -294,20 +309,47 @@ class SGLangEngine(RayActor):
             payload,
         )
 
+    def get_remote_instance_transfer_engine_info(self, rank: int):
+        # TODO: will be changed to `remote_instance_transfer_engine_info` when the sglang side is ready.
+        response = requests.get(
+            f"http://{self.server_host}:{self.server_port}/get_remote_instance_transfer_engine_info",
+            params={"rank": rank},
+            timeout=5.0,
+        )
+        response.raise_for_status()
+        return response.json()["remote_instance_transfer_engine_info"]
+
+    def get_parallelism_info(self, rank: int):
+        response = requests.get(
+            f"http://{self.server_host}:{self.server_port}/parallelism_config",
+            params={"rank": rank},
+            timeout=5.0,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def get_server_info(self):
+        response = requests.get(
+            f"http://{self.server_host}:{self.server_port}/server_info",
+            timeout=5.0,
+        )
+        response.raise_for_status()
+        return response.json()
+
     def load_lora_adapter_from_tensors(
         self,
         lora_name: str,
-        serialized_tensors: str,
         config_dict: dict,
+        serialized_named_tensors: list,
         load_format: str | None = None,
         pinned: bool = False,
         added_tokens_config: dict | None = None,
     ):
-        """Load a LoRA adapter from serialized tensor data."""
+        """Load a LoRA adapter. ``serialized_named_tensors[tp_rank]`` is bytes for TP rank N."""
         payload = {
             "lora_name": lora_name,
-            "serialized_tensors": serialized_tensors,
             "config_dict": config_dict,
+            "serialized_named_tensors": serialized_named_tensors,
             "pinned": pinned,
         }
         if load_format is not None:
@@ -464,8 +506,11 @@ class SGLangEngine(RayActor):
             payload,
         )
 
-    def pause_generation(self):
-        response = requests.post(f"http://{self.server_host}:{self.server_port}/pause_generation", json={})
+    def pause_generation(self, mode: str = "retract"):
+        response = requests.post(
+            f"http://{self.server_host}:{self.server_port}/pause_generation",
+            json={"mode": mode},
+        )
         response.raise_for_status()
         return response
 
@@ -478,6 +523,7 @@ class SGLangEngine(RayActor):
         self,
         restore_weights_before_load: bool = False,
         post_process_quantization: bool = False,
+        post_load_weights: bool = False,
     ):
         """
         Update model weights from tensor data. The HTTP server will only post meta data, and the real weights will be copied directly from GPUs.
@@ -490,7 +536,14 @@ class SGLangEngine(RayActor):
             {
                 "restore_weights_before_load": restore_weights_before_load,
                 "post_process_quantization": post_process_quantization,
+                "post_load_weights": post_load_weights,
             },
+        )
+
+    def update_weight_version(self, weight_version: str):
+        return self._make_request(
+            "update_weight_version",
+            {"new_version": weight_version},
         )
 
     def start_profile(
@@ -549,6 +602,7 @@ def _compute_server_args(
     worker_type: str = "regular",
     disaggregation_bootstrap_port: int | None = None,
     base_gpu_id: int | None = None,
+    engine_info_bootstrap_port: int | None = None,
     sglang_overrides: dict | None = None,
     num_gpus_per_engine: int | None = None,
 ):
@@ -581,6 +635,8 @@ def _compute_server_args(
         "skip_server_warmup": True,
         # always enable draft weights cpu backup so that we run training without mtp weights.
         "enable_draft_weights_cpu_backup": True,
+        # always serve /metrics so Prometheus scrapers can read engine stats.
+        "enable_metrics": True,
     }
 
     if sglang_overrides:
@@ -588,7 +644,7 @@ def _compute_server_args(
 
     if worker_type == "prefill":
         kwargs["disaggregation_mode"] = "prefill"
-        kwargs["load_balance_method"] = "round_robin"
+        kwargs.setdefault("load_balance_method", "round_robin")
         assert (
             disaggregation_bootstrap_port is not None
         ), "disaggregation_bootstrap_port must be set for prefill worker"
@@ -599,12 +655,15 @@ def _compute_server_args(
 
     if args.use_rollout_routing_replay:
         kwargs["enable_return_routed_experts"] = True
+    if args.use_rollout_indexer_replay:
+        kwargs["enable_return_indexer_topk"] = True
     if args.fp16:
         kwargs["dtype"] = "float16"
+    if engine_info_bootstrap_port is not None:
+        kwargs["engine_info_bootstrap_port"] = engine_info_bootstrap_port
     external_engine_need_check_fields = [k for k in kwargs.keys() if k not in _EXTERNAL_ENGINE_SKIP_CHECK_FIELDS]
 
     if is_lora_enabled(args):
-        kwargs["enable_weights_cpu_backup"] = args.offload_rollout
         kwargs["enable_lora"] = True
         kwargs["max_loras_per_batch"] = 1
         kwargs["max_lora_rank"] = max(getattr(args, "lora_rank", 0), 1)
@@ -614,6 +673,18 @@ def _compute_server_args(
             kwargs["lora_paths"] = {LORA_ADAPTER_NAME: args.lora_adapter_path}
         else:
             logger.info("No pre-trained LoRA adapter_path provided, will use random initial weights")
+
+        if lora_base_cpu_backup_enabled(args):
+            # Host-RAM mirror of the base weights so they survive
+            # torch_memory_saver.pause() across rollout/training swaps without
+            # needing to be re-shipped from the trainer. The trainer mirrors
+            # this by skipping the base weight sync entirely (see
+            # UpdateWeightFromTensor.update_weights).
+            kwargs["enable_weights_cpu_backup"] = True
+            logger.info(
+                "LoRA + colocate: enabling SGLang enable_weights_cpu_backup=True; "
+                "the trainer will skip per-step base weight sync."
+            )
 
     unused_keys = set(kwargs.keys())
     for attr in dataclasses.fields(ServerArgs):
@@ -640,5 +711,6 @@ _EXTERNAL_ENGINE_SKIP_CHECK_FIELDS = [
     "dist_init_addr",
     "skip_server_warmup",
     "enable_draft_weights_cpu_backup",
+    "enable_metrics",
     "mem_fraction_static",
 ]

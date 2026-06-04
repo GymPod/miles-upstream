@@ -97,6 +97,19 @@ def get_model_provider_func(
         provider.expert_model_parallel_size = args.expert_model_parallel_size
         provider.expert_tensor_parallel_size = args.expert_tensor_parallel_size
         provider.sequence_parallel = args.sequence_parallel
+        provider.context_parallel_size = args.context_parallel_size
+        provider.attention_softmax_in_fp32 = args.attention_softmax_in_fp32
+        provider.variable_seq_lengths = args.variable_seq_lengths
+        if hasattr(args, "moe_token_dispatcher_type"):
+            provider.moe_token_dispatcher_type = args.moe_token_dispatcher_type
+        if getattr(args, "decoder_first_pipeline_num_layers", None) is not None:
+            provider.num_layers_in_first_pipeline_stage = args.decoder_first_pipeline_num_layers
+        if getattr(args, "decoder_last_pipeline_num_layers", None) is not None:
+            provider.num_layers_in_last_pipeline_stage = args.decoder_last_pipeline_num_layers
+        if getattr(args, "moe_router_bias_update_rate", None) is not None:
+            provider.moe_router_bias_update_rate = args.moe_router_bias_update_rate
+        if getattr(args, "moe_aux_loss_coeff", None) is not None:
+            provider.moe_aux_loss_coeff = args.moe_aux_loss_coeff
         provider.finalize()
 
         def wrapped_bridge_provider(
@@ -107,6 +120,11 @@ def get_model_provider_func(
             pg_collection=None,
         ) -> GPTModel:
             assert config is None, "miles builds the config from args, so it expects config to be None"
+            # PP>1 paths in megatron.bridge providers (e.g. mamba_provider) read
+            # self._pg_collection.pp during provide(); without forwarding the
+            # caller's pg_collection here, those code paths hit AttributeError.
+            if pg_collection is not None:
+                provider._pg_collection = pg_collection
             return provider.provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
 
         return wrapped_bridge_provider
@@ -167,6 +185,11 @@ def get_model_provider_func(
                         qk_layernorm=args.qk_layernorm,
                         multi_latent_attention=args.multi_latent_attention,
                         moe_use_legacy_grouped_gemm=args.moe_use_legacy_grouped_gemm,
+                        normalization=args.normalization,
+                        use_kitchen=config.use_kitchen,
+                        use_true_on_policy_backend=config.true_on_policy_contract is not None,
+                        use_kitchen_attention=config.use_kitchen_attention,
+                        kitchen_attention_backend=config.kitchen_attention_backend,
                     )
 
         build_model_context = nullcontext

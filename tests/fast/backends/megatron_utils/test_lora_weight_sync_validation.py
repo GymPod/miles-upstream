@@ -18,7 +18,6 @@ from miles.backends.megatron_utils.lora_utils import is_lora_weight_name
 
 _UW_MODULE = "miles.backends.megatron_utils.update_weight.update_weight_from_tensor"
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -56,6 +55,7 @@ def _make_args(**overrides):
         update_weight_buffer_size=1 << 30,
         actor_num_nodes=1,
         actor_num_gpus_per_node=1,
+        pause_generation_mode="retract",
     )
     defaults.update(overrides)
     return Namespace(**defaults)
@@ -140,7 +140,7 @@ class TestSendHfParamsEmptyLoraDetection:
         updater.use_distribute = False
 
         with pytest.raises(RuntimeError, match="no LoRA weights"):
-            updater._send_hf_params(SAMPLE_BASE_ONLY_WEIGHTS)
+            updater._send_lora_params(SAMPLE_BASE_ONLY_WEIGHTS)
 
     @patch(f"{_UW_MODULE}._send_to_colocated_engine", return_value=([], []))
     @patch(f"{_UW_MODULE}.dist")
@@ -167,7 +167,7 @@ class TestSendHfParamsEmptyLoraDetection:
         updater._ipc_gather_group = MagicMock()
         updater.use_distribute = False
 
-        refs, _ = updater._send_hf_params(SAMPLE_LORA_WEIGHTS)
+        refs, _ = updater._send_lora_params(SAMPLE_LORA_WEIGHTS)
         # Should not raise; mock_send was called with the LoRA tensors
         assert mock_send.called
 
@@ -210,11 +210,14 @@ class TestUpdateWeightsZeroChunks:
         with pytest.raises(RuntimeError, match="zero chunks"):
             updater.update_weights()
 
+    @patch("miles.backends.megatron_utils.update_weight.common.ray")
     @patch(f"{_UW_MODULE}.get_gloo_group", return_value=MagicMock())
     @patch(f"{_UW_MODULE}.ray")
     @patch(f"{_UW_MODULE}.dist")
     @patch(f"{_UW_MODULE}.HfWeightIteratorBase")
-    def test_no_raise_for_base_model_zero_chunks(self, mock_iter_base, mock_dist, mock_ray, mock_gloo):
+    def test_no_raise_for_base_model_zero_chunks(
+        self, mock_iter_base, mock_dist, mock_ray, mock_gloo, mock_common_ray
+    ):
         """Base model weight sync with zero chunks is valid (e.g. empty model state)."""
         from miles.backends.megatron_utils.update_weight.update_weight_from_tensor import UpdateWeightFromTensor
 
@@ -273,33 +276,40 @@ class TestFlattenedTensorBucketRoundTrip:
             assert orig_t.dtype == rec_t.dtype
             assert torch.equal(orig_t, rec_t), f"Tensor {orig_name} values differ after round-trip"
 
-    @pytest.mark.xfail(
-        reason="SGLang FlattenedTensorBucket.reconstruct_tensors() fails with mixed dtypes "
-        "due to PyTorch view() alignment requirements (storage_offset not divisible by "
-        "element size). In practice LoRA weights are typically uniform dtype so this is safe.",
-        raises=RuntimeError,
-        strict=False,
-    )
     def test_roundtrip_mixed_dtypes(self):
-        FlattenedTensorBucket = self._get_bucket_class()
+        """FIXME(sglang upstream contract): SGLang exposes
+        ``FlattenedTensorBucket.supports_multi_dtypes = True`` but
+        ``reconstruct_tensors()`` actually raises ``RuntimeError`` on mixed
+        dtypes, because PyTorch ``view()`` requires ``storage_offset`` to be
+        divisible by the target element size and concatenated flat buffers do
+        not align across heterogeneous element sizes.
 
-        if not getattr(FlattenedTensorBucket, "supports_multi_dtypes", False):
-            pytest.skip("FlattenedTensorBucket does not support multi-dtypes")
+        This is a latent production landmine: ``_send_to_colocated_engine`` in
+        ``miles/backends/megatron_utils/update_weight/update_weight_from_tensor.py``
+        reads the flag and packs mixed dtypes into a single bucket. In practice
+        LoRA weights are uniform dtype, but FP8 / INT4 mixed-precision base
+        weight sync would crash on sglang's receiver.
+
+        Fix path (either side):
+          - miles side: stop trusting ``supports_multi_dtypes`` in
+            ``_send_to_colocated_engine`` and always group by dtype (matches
+            the FSDP path's existing implementation in
+            ``experimental/fsdp_utils/update_weight_utils.py``).
+          - sglang side: actually align ``storage_offset`` in reconstruction.
+
+        Until one side is fixed, this test asserts the current observed
+        failure so we notice when either side changes.
+        """
+        FlattenedTensorBucket = self._get_bucket_class()
 
         tensors = [
             ("a_bf16", torch.randn(3, 3, dtype=torch.bfloat16)),
             ("b_fp32", torch.randn(2, 2, dtype=torch.float32)),
             ("c_fp16", torch.randn(5, dtype=torch.float16)),
         ]
-
         bucket = FlattenedTensorBucket(named_tensors=tensors)
-        reconstructed = bucket.reconstruct_tensors()
-
-        assert len(reconstructed) == len(tensors)
-        for (orig_name, orig_t), (rec_name, rec_t) in zip(tensors, reconstructed, strict=True):
-            assert orig_name == rec_name
-            assert orig_t.dtype == rec_t.dtype
-            assert torch.equal(orig_t, rec_t), f"Tensor {orig_name} values differ after round-trip"
+        with pytest.raises(RuntimeError, match=r"storage_offset"):
+            bucket.reconstruct_tensors()
 
     def test_roundtrip_from_flattened_data(self):
         """Simulate the receiver side: reconstruct from flattened_tensor + metadata."""

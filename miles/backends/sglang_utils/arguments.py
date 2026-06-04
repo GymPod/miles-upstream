@@ -20,6 +20,12 @@ def add_sglang_router_arguments(parser):
         help="Port of the SGLang router",
     )
     parser.add_argument(
+        "--sglang-router-policy",
+        type=str,
+        default=None,
+        help="Routing policy for the SGLang router (e.g., 'consistent_hashing', 'round_robin')",
+    )
+    parser.add_argument(
         "--sglang-router-request-timeout-secs",
         type=int,
         default=14400,
@@ -55,6 +61,7 @@ def add_sglang_arguments(parser):
         "nccl_port",
         "skip_server_warmup",
         "enable_return_routed_experts",
+        "enable_return_indexer_topk",
     ]
 
     def new_add_argument_wrapper(*name_or_flags, **kwargs):
@@ -131,9 +138,25 @@ def validate_args(args):
     args.sglang_dp_size = args.sglang_data_parallel_size
     args.sglang_pp_size = args.sglang_pipeline_parallel_size
     args.sglang_ep_size = args.sglang_expert_parallel_size
+    if hasattr(args, "sglang_attention_context_parallel_size"):
+        args.sglang_attn_cp_size = args.sglang_attention_context_parallel_size
+
+    if args.true_on_policy_mode:
+        args.sglang_enable_deterministic_inference = True
+
+    if getattr(args, "recompute_logprobs_via_prefill", False):
+        args.sglang_enable_prefill_only_deterministic_inference = True
+        args.sglang_enable_deterministic_inference = True
 
     if args.sglang_dp_size > 1:
         assert args.sglang_enable_dp_attention
+
+    if args.sglang_router_policy:
+        from miles.utils.environ import enable_experimental_rollout_refactor
+
+        assert (
+            not enable_experimental_rollout_refactor()
+        ), "--sglang-router-policy is not supported with MILES_EXPERIMENTAL_ROLLOUT_REFACTOR=1"
 
     if getattr(args, "sglang_router_ip", None):
         args.sglang_router_ip = _wrap_ipv6(args.sglang_router_ip)

@@ -2,8 +2,12 @@ import json
 import os
 from pathlib import Path
 
+from tests.ci.ci_register import register_cuda_ci
+
 import miles.utils.external_utils.command_utils as U
 
+# FIXME: not critical, but better fix later.
+register_cuda_ci(est_time=1800, suite="stage-c-8-gpu-h200", labels=["megatron"], disabled="Disabled due to outdated.")
 
 USE_FP8_ROLLOUT = U.get_bool_env_var("MILES_TEST_USE_FP8_ROLLOUT", "false")
 
@@ -44,7 +48,7 @@ def _process_glm_checkpoint():
 
 def prepare():
     U.exec_command(f"mkdir -p {MODEL_DIR} {DATA_DIR}")
-    U.exec_command(f"huggingface-cli download {MODEL_ORG}/{MODEL_NAME} --local-dir {MODEL_DIR}/{MODEL_NAME}")
+    U.exec_command(f"hf download {MODEL_ORG}/{MODEL_NAME} --local-dir {MODEL_DIR}/{MODEL_NAME}")
     U.hf_download_dataset("zhuzilin/dapo-math-17k", data_dir=DATA_DIR)
 
     _process_glm_checkpoint()
@@ -174,7 +178,7 @@ def execute():
         # ------------
         f"--update-weight-buffer-size {2 * 1024 ** 3} "
         "--actor-num-nodes 1 "
-        "--actor-num-gpus-per-node 8 "
+        f"--actor-num-gpus-per-node {NUM_GPUS} "
         "--num-gpus-per-node 8 "
         "--colocate "
         "--dump-details /root/shared_data/dump_details "

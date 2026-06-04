@@ -13,19 +13,30 @@ from miles.utils.types import RolloutBatch
 from ...utils.data import process_rollout_data
 from ...utils.ray_utils import Box
 from .cp_utils import slice_log_prob_with_cp, slice_with_cp
-from .parallel import ParallelState
+from .mm_data import expand_multimodal_rollout_data_in_place
+from .parallel import get_parallel_state
 
 logger = logging.getLogger(__name__)
 
 
-def get_rollout_data(args: Namespace, rollout_data_ref: Box, parallel_state: ParallelState) -> RolloutBatch:
+def _rollout_logprob_dtype(args: Namespace) -> torch.dtype:
+    if getattr(args, "true_on_policy_mode", False):
+        if getattr(args, "bf16", False):
+            return torch.bfloat16
+        if getattr(args, "fp16", False):
+            return torch.float16
+    return torch.float32
+
+
+def get_rollout_data(args: Namespace, rollout_data_ref: Box) -> RolloutBatch:
+    parallel_state = get_parallel_state()
     # Fetch data through ray on CPU, not sure if this will be performance bottleneck.
     # Both first pp stage and the last pp stage will receive the data.
     rollout_data = process_rollout_data(
         args,
         rollout_data_ref,
-        parallel_state.dp_rank,
-        parallel_state.dp_size,
+        parallel_state.intra_dp.rank,
+        parallel_state.intra_dp.size,
     )
     # move tokens to GPU in advance
     rollout_data["tokens"] = [
@@ -50,24 +61,24 @@ def get_rollout_data(args: Namespace, rollout_data_ref: Box, parallel_state: Par
         max_seq_len = max(rollout_data["total_lengths"])
 
         # pad to reduce memory fragmentation and maybe make the computation faster
-        pad_size = parallel_state.tp_size * args.data_pad_size_multiplier
+        pad_size = parallel_state.tp.size * args.data_pad_size_multiplier
         max_seq_len = (max_seq_len + pad_size - 1) // pad_size * pad_size
 
         rollout_data["max_seq_lens"] = [max_seq_len] * len(rollout_data["tokens"])
 
     if "rollout_log_probs" in rollout_data:
+        rollout_logprob_dtype = _rollout_logprob_dtype(args)
         rollout_data["rollout_log_probs"] = [
             torch.tensor(
                 slice_log_prob_with_cp(
                     log_prob,
                     total_length,
                     response_length,
-                    parallel_state,
                     args.qkv_format,
                     rollout_data["max_seq_lens"][i] if args.qkv_format == "bshd" else None,
                 ),
                 device=torch.cuda.current_device(),
-                dtype=torch.float32,
+                dtype=rollout_logprob_dtype,
             )
             for i, (log_prob, total_length, response_length) in enumerate(
                 zip(
@@ -80,13 +91,14 @@ def get_rollout_data(args: Namespace, rollout_data_ref: Box, parallel_state: Par
         ]
     if "rollout_routed_experts" in rollout_data:
         rollout_data["rollout_routed_experts"] = [torch.from_numpy(r) for r in rollout_data["rollout_routed_experts"]]
+    if "rollout_indexer_topk" in rollout_data:
+        rollout_data["rollout_indexer_topk"] = [torch.from_numpy(r) for r in rollout_data["rollout_indexer_topk"]]
     return rollout_data
 
 
 def get_batch(
     data_iterator: "DataIterator",
     keys: Sequence[str],
-    parallel_state: ParallelState,
     pad_multiplier: int = 128,
     qkv_format: str = "thd",
     get_position_ids: bool = False,
@@ -113,30 +125,43 @@ def get_batch(
     Plus any other requested keys forwarded from the iterator.
     """
 
+    parallel_state = get_parallel_state()
+
     assert "tokens" in keys
     batch = data_iterator.get_next(keys)
 
     if "dynamic_global_batch_size" in data_iterator.rollout_data:
         batch["dynamic_global_batch_size"] = data_iterator.rollout_data["dynamic_global_batch_size"]
 
+    # No-op safety net if batches reach get_batch without rollout-level preprocessing.
+    expand_multimodal_rollout_data_in_place(batch, qkv_format=qkv_format)
+
     tokens = batch["tokens"]
     # use 0 as the pad token id should be fine?
     pad_token_id = 0
-    pad_size = parallel_state.tp_size * pad_multiplier
+    pad_size = parallel_state.tp.size * pad_multiplier
 
     # for cp, we need all tokens to calculate logprob
     batch["unconcat_tokens"] = tokens
 
-    cp_size = parallel_state.cp_size
+    cp_size = parallel_state.cp.size
 
     if qkv_format == "bshd":
         max_seqlen = batch["max_seq_lens"][0]
         assert max([t.size(0) for t in tokens]) <= max_seqlen
-        tokens = [slice_with_cp(t, pad_token_id, parallel_state, qkv_format, max_seqlen) for t in tokens]
+        if allgather_cp:
+            assert max_seqlen % cp_size == 0, f"max_seqlen {max_seqlen} not divisible by cp_size {cp_size}"
+            local_len = max_seqlen // cp_size
+            start = parallel_state.cp.rank * local_len
+            tokens = [
+                F.pad(t, (0, max_seqlen - t.size(0)), value=pad_token_id)[start : start + local_len] for t in tokens
+            ]
+        else:
+            tokens = [slice_with_cp(t, pad_token_id, qkv_format, max_seqlen) for t in tokens]
         tokens = torch.stack(tokens)
 
     elif qkv_format == "thd":
-        cp_rank = parallel_state.cp_rank
+        cp_rank = parallel_state.cp.rank
 
         if allgather_cp:
             # DSA mode: concatenate all sequences first, then slice once with CP.
@@ -158,7 +183,7 @@ def get_batch(
             cu_seqlens = torch.tensor(cu_seqlens_list, dtype=torch.int, device=torch.cuda.current_device())
             tokens = tokens.chunk(cp_size, dim=0)[cp_rank]
         else:
-            tokens = [slice_with_cp(t, pad_token_id, parallel_state, qkv_format) for t in tokens]
+            tokens = [slice_with_cp(t, pad_token_id, qkv_format) for t in tokens]
 
             cu_seqlens = [0]
             for t in tokens:
@@ -195,10 +220,10 @@ def get_batch(
             position_ids_list.append(pos_ids)
 
         if qkv_format == "bshd":
-            position_ids = [slice_with_cp(p, 0, parallel_state, qkv_format, max_seqlen) for p in position_ids_list]
+            position_ids = [slice_with_cp(p, 0, qkv_format, max_seqlen) for p in position_ids_list]
             position_ids = torch.stack(position_ids)
         elif qkv_format == "thd":
-            position_ids = [slice_with_cp(p, 0, parallel_state, qkv_format) for p in position_ids_list]
+            position_ids = [slice_with_cp(p, 0, qkv_format) for p in position_ids_list]
             position_ids = torch.cat(position_ids)
             if pad != 0:
                 position_ids = F.pad(position_ids, (0, pad), value=0)
@@ -220,10 +245,16 @@ def get_batch(
         if allgather_cp:
             loss_masks.append(loss_mask)
             continue
-        loss_mask = slice_with_cp(loss_mask, 0, parallel_state, qkv_format, max_seqlen)
+        loss_mask = slice_with_cp(loss_mask, 0, qkv_format, max_seqlen)
         loss_masks.append(loss_mask)
 
     if qkv_format == "bshd":
+        if allgather_cp:
+            local_len = max_seqlen // cp_size
+            start = parallel_state.cp.rank * local_len
+            loss_masks = [
+                F.pad(lm, (0, max_seqlen - lm.size(0)), value=0)[start : start + local_len] for lm in loss_masks
+            ]
         loss_masks = torch.stack(loss_masks)
     elif qkv_format == "thd" and allgather_cp:
         # DSA: concatenate first (same as tokens), pad globally (same pad as above), then slice once.
@@ -325,7 +356,6 @@ class DataIterator:
 def get_data_iterator(
     args: Namespace,
     model: torch.nn.Module | Sequence[torch.nn.Module],
-    parallel_state: ParallelState,
     rollout_data: RolloutBatch,
 ) -> tuple[list[DataIterator], list[int]]:
     """
@@ -342,14 +372,18 @@ def get_data_iterator(
     - `data_iterators`: list of `DataIterator`, one per VPP stage (size 1 if VPP disabled)
     - `num_microbatches`: list[int], one per local step in the rollout (length = steps)
     """
-    dp_size = parallel_state.dp_size
-    dp_group = parallel_state.dp_group
+    expand_multimodal_rollout_data_in_place(rollout_data, qkv_format=args.qkv_format)
+
+    parallel_state = get_parallel_state()
+    dp_size = parallel_state.intra_dp.size
+    dp_group = parallel_state.intra_dp.group
     vpp_size = parallel_state.vpp_size
     microbatch_group_size_per_vp_stage = parallel_state.microbatch_group_size_per_vp_stage
 
-    cp_size = parallel_state.cp_size
+    cp_size = parallel_state.cp.size
 
     num_local_samples = len(rollout_data["total_lengths"])
+    assert args.use_dynamic_global_batch_size == ("dynamic_global_batch_size" in rollout_data)
     global_batch_size = rollout_data.get("dynamic_global_batch_size", args.global_batch_size)
     num_local_gbs = global_batch_size // dp_size
     num_steps_per_rollout = num_local_samples // num_local_gbs

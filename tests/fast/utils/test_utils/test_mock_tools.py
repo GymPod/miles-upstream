@@ -50,9 +50,9 @@ class TestApplyChatTemplateWithTools:
         ],
     )
     def test_apply_chat_template(self, tools, expected):
-        from transformers import AutoTokenizer
+        from miles.utils.processing_utils import load_tokenizer
 
-        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B", trust_remote_code=True)
+        tokenizer = load_tokenizer("Qwen/Qwen3-0.6B", trust_remote_code=True)
         messages = [{"role": "user", "content": "What's the weather in Paris?"}]
 
         prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, tools=tools)

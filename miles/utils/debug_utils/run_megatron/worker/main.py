@@ -29,6 +29,7 @@ from miles.backends.megatron_utils.arguments import set_default_megatron_args
 from miles.backends.megatron_utils.checkpoint import load_checkpoint
 from miles.backends.megatron_utils.initialize import init
 from miles.backends.megatron_utils.model_provider import get_model_provider_func
+from miles.backends.training_utils.parallel import get_parallel_state
 from miles.utils.debug_utils.run_megatron.worker.batch import loss_func, prepare_batch
 from miles.utils.debug_utils.run_megatron.worker.output import compute_and_save_output_info
 from miles.utils.debug_utils.run_megatron.worker.replay import (
@@ -74,13 +75,15 @@ def main() -> None:
         batch: dict[str, torch.Tensor] = prepare_batch(
             token_ids=token_ids,
             batch_size=args.micro_batch_size,
-            cp_rank=mpu.get_context_parallel_rank(),
-            cp_size=mpu.get_context_parallel_world_size(),
+            cp_rank=get_parallel_state().cp.rank,
+            cp_size=get_parallel_state().cp.size,
             allgather_cp=script.allgather_cp,
         )
 
         if rank == 0 and seq_idx == 0:
-            print(f"[worker] input_ids shape={batch['input_ids'].shape}, num_sequences={len(all_token_ids)}", flush=True)
+            print(
+                f"[worker] input_ids shape={batch['input_ids'].shape}, num_sequences={len(all_token_ids)}", flush=True
+            )
 
         captured_logits: torch.Tensor | None = _run_forward_backward(
             args=args,
@@ -101,6 +104,7 @@ def main() -> None:
             else:
                 # Multi-sequence: accumulate entries, save once at end
                 from miles.utils.debug_utils.run_megatron.worker.output import _compute_logprob_entries
+
                 entries = _compute_logprob_entries(
                     logits=captured_logits,
                     labels=batch["labels"],
@@ -123,14 +127,15 @@ def main() -> None:
     # Save accumulated logprobs for multi-sequence mode
     if all_logprob_entries and script.logprob_output is not None and is_last_pp_stage:
         import torch.distributed as _dist
+
         _rank = _dist.get_rank() if _dist.is_initialized() else 0
         script.logprob_output.mkdir(parents=True, exist_ok=True)
         output_path = script.logprob_output / f"rank_{_rank}.json"
         payload = {
             "rank": _rank,
-            "tp_size": mpu.get_tensor_model_parallel_world_size() if dist.is_initialized() else 1,
-            "cp_size": mpu.get_context_parallel_world_size() if dist.is_initialized() else 1,
-            "pp_size": mpu.get_pipeline_model_parallel_world_size() if dist.is_initialized() else 1,
+            "tp_size": get_parallel_state().tp.size if dist.is_initialized() else 1,
+            "cp_size": get_parallel_state().cp.size if dist.is_initialized() else 1,
+            "pp_size": get_parallel_state().pp.size if dist.is_initialized() else 1,
             "logprob_entries": all_logprob_entries,
         }
         output_path.write_text(json.dumps(payload, indent=2))

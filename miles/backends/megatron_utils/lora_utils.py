@@ -9,7 +9,8 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-from megatron.core import mpu
+
+from miles.backends.training_utils.parallel import get_parallel_state
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,19 @@ _MEGATRON_TO_HF_MODULES = {
 
 _HF_MODULE_NAMES = {"q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"}
 
+# DeepSeek / Kimi MLA (HF names on checkpoint; Megatron uses linear_* from Megatron-Bridge mappings).
+_MLA_HF_TO_MEGATRON = {
+    "q_a_proj": "linear_q_down_proj",
+    "kv_a_proj_with_mqa": "linear_kv_down_proj",
+    "q_b_proj": "linear_q_up_proj",
+    "kv_b_proj": "linear_kv_up_proj",
+}
+_MEGATRON_MLA_TO_HF = {v: k for k, v in _MLA_HF_TO_MEGATRON.items()}
+
+# SGLang default get_hidden_dim (lora/utils.py) handles fused_qkv_a_proj_with_mqa via q_a / kv_a mapping,
+# but not separate q_b_proj / kv_b_proj yet — omit from rollout adapter config to avoid init crashes.
+_SGLANG_UNSUPPORTED_HF_TARGETS = frozenset({"q_b_proj", "kv_b_proj"})
+
 
 # ---------------------------------------------------------------------------
 # Core helpers
@@ -80,6 +94,11 @@ _HF_MODULE_NAMES = {"q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_pro
 def is_lora_enabled(args: Namespace) -> bool:
     """Check if LoRA is enabled based on arguments."""
     return getattr(args, "lora_rank", 0) > 0 or getattr(args, "lora_adapter_path", None) is not None
+
+
+def lora_base_cpu_backup_enabled(args: Namespace) -> bool:
+    """LoRA + --colocate + --lora-base-cpu-backup all set."""
+    return is_lora_enabled(args) and getattr(args, "colocate", False) and getattr(args, "lora_base_cpu_backup", False)
 
 
 def is_lora_model(model: Sequence[torch.nn.Module]) -> bool:
@@ -101,6 +120,40 @@ def is_lora_weight_name(name: str) -> bool:
 def _is_adapter_param_name(name: str) -> bool:
     """Check if a parameter name belongs to a LoRA adapter (Megatron internal naming)."""
     return "lora_" in name or (".adapter." in name and ("linear_in" in name or "linear_out" in name))
+
+
+_param_grad_buffer_patched = False
+
+
+def patch_param_grad_buffer_for_colocate_mode_lora() -> None:
+    """Patch _ParamAndGradBuffer to use disable_param_buffers_cpu_backup=True.
+
+    In colocate mode with offload_train, torch_memory_saver.pause(tag="default")
+    offloads default-region GPU memory.  During LoRA training, base weights are
+    frozen (requires_grad=False) so DDP only creates buffers for adapter params.
+
+    This patch ensures those buffers are allocated in the "param_buffer" region
+    (enable_cpu_backup=False), making them invisible to pause(tag="default") —
+    eliminating the need for resume()/pause() around update_weights.
+
+    The patch is idempotent and only takes effect once.
+    """
+    global _param_grad_buffer_patched
+    if _param_grad_buffer_patched:
+        return
+    _param_grad_buffer_patched = True
+
+    from megatron.core.distributed.param_and_grad_buffer import _ParamAndGradBuffer
+
+    _original_init = _ParamAndGradBuffer.__init__
+
+    def _patched_init(self, *args, **kwargs):
+        kwargs["disable_param_buffers_cpu_backup"] = True
+        kwargs["disable_grad_buffers_cpu_backup"] = True
+        _original_init(self, *args, **kwargs)
+
+    _ParamAndGradBuffer.__init__ = _patched_init
+    logger.info("Patched _ParamAndGradBuffer.__init__ for LoRA colocate mode (disable cpu backup)")
 
 
 # ---------------------------------------------------------------------------
@@ -146,14 +199,20 @@ def convert_target_modules_to_megatron(
         if hf_modules[0] in ("all", "all-linear", "all_linear"):
             return list(all_modules)
 
-    # Check if already in Megatron format
-    if all(m not in _HF_MODULE_NAMES for m in hf_modules if "*" not in m):
-        return hf_modules
+    if isinstance(hf_modules, tuple):
+        hf_modules = list(hf_modules)
+
+    # Check if already in Megatron format (standard / canonical / Kimi MLA linear_*).
+    if all(m not in _HF_MODULE_NAMES and m not in _MLA_HF_TO_MEGATRON for m in hf_modules if "*" not in m):
+        return list(hf_modules)
 
     # Convert HF names to Megatron names (dedup while preserving order)
     megatron_modules: list[str] = []
     for module in hf_modules:
-        megatron_name = hf_to_megatron.get(module, module)
+        if module in _MLA_HF_TO_MEGATRON:
+            megatron_name = _MLA_HF_TO_MEGATRON[module]
+        else:
+            megatron_name = hf_to_megatron.get(module, module)
         if megatron_name not in megatron_modules:
             megatron_modules.append(megatron_name)
 
@@ -169,14 +228,45 @@ def convert_target_modules_to_hf(megatron_modules: list[str]) -> list[str]:
     Megatron canonical:  linear_q, linear_k, linear_v, linear_proj,
                          linear_fc1_up, linear_fc1_gate, linear_fc2
     HF:                  q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj
+    Kimi MLA Megatron:   linear_q_down_proj -> q_a_proj, linear_kv_down_proj -> kv_a_proj_with_mqa, ...
+
+    Wildcards (``*.layers.2.mlp.experts.linear_fc1``) get the last dotted
+    segment mapped to an HF leaf name; SGLang uses the result to choose
+    adapter-buffer types, not to scope by layer.
     """
+    if isinstance(megatron_modules, tuple):
+        megatron_modules = list(megatron_modules)
     hf_modules: list[str] = []
     for module in megatron_modules:
-        if module in _MEGATRON_TO_HF_MODULES:
-            hf_modules.extend(_MEGATRON_TO_HF_MODULES[module])
+        lookup_key = module.rsplit(".", 1)[-1] if "*" in module else module
+        if lookup_key in _MEGATRON_MLA_TO_HF:
+            hf_modules.append(_MEGATRON_MLA_TO_HF[lookup_key])
+        elif lookup_key in _MEGATRON_TO_HF_MODULES:
+            hf_modules.extend(_MEGATRON_TO_HF_MODULES[lookup_key])
         else:
             hf_modules.append(module)
-    return hf_modules
+    seen: set[str] = set()
+    unique: list[str] = []
+    for m in hf_modules:
+        if m not in seen:
+            seen.add(m)
+            unique.append(m)
+    return unique
+
+
+def target_modules_hf_for_sglang_rollout(args: Namespace) -> list[str]:
+    """HF target_modules for SGLang LoRA init/sync, with MLA q_b/kv_b dropped (unsupported)."""
+    raw = list(args.target_modules) if args.target_modules else []
+    hf = convert_target_modules_to_hf(raw)
+    out = [m for m in hf if m not in _SGLANG_UNSUPPORTED_HF_TARGETS]
+    dropped = set(hf) - set(out)
+    if dropped:
+        logger.warning(
+            "target_modules_hf_for_sglang_rollout: omitting %s for SGLang (unsupported by default "
+            "get_hidden_dim); Megatron should not train LoRA on these if rollout sync is required.",
+            sorted(dropped),
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +306,7 @@ def create_lora_instance(args: Namespace):
     target_modules = convert_target_modules_to_megatron(args.target_modules, lora_type=lora_cls)
     exclude_modules = parse_exclude_modules(args, lora_type=lora_cls)
 
-    lora = lora_cls(
+    lora_kwargs = dict(
         target_modules=target_modules,
         exclude_modules=exclude_modules,
         dim=args.lora_rank,
@@ -225,6 +315,12 @@ def create_lora_instance(args: Namespace):
         lora_A_init_method=getattr(args, "lora_A_init_method", "xavier"),
         lora_B_init_method=getattr(args, "lora_B_init_method", "zero"),
     )
+    # Opt-in to SGLang PR #21466's shared-outer grouped-expert LoRA. Only the
+    # standard ``LoRA`` class supports the flag today.
+    if lora_cls is LoRA and getattr(args, "experts_shared_outer_loras", False):
+        lora_kwargs["experts_shared_outer_loras"] = True
+
+    lora = lora_cls(**lora_kwargs)
 
     logger.info(
         f"Created {lora_cls.__name__}: rank={args.lora_rank}, alpha={args.lora_alpha}, "
@@ -272,9 +368,9 @@ def save_lora_checkpoint(
     from miles.utils import megatron_bridge_utils
 
     save_path = Path(save_dir)
-    is_dp_rank_0 = mpu.get_data_parallel_rank() == 0
-    tp_rank = mpu.get_tensor_model_parallel_rank()
-    pp_rank = mpu.get_pipeline_model_parallel_rank()
+    is_dp_rank_0 = get_parallel_state().intra_dp.rank == 0
+    tp_rank = get_parallel_state().tp.rank
+    pp_rank = get_parallel_state().pp.rank
 
     # Create directory on dp_rank=0, then synchronize
     if is_dp_rank_0:
@@ -384,8 +480,8 @@ def load_lora_adapter(
         logger.warning(f"LoRA adapter path does not exist: {adapter_dir}")
         return False, None
 
-    tp_rank = mpu.get_tensor_model_parallel_rank()
-    pp_rank = mpu.get_pipeline_model_parallel_rank()
+    tp_rank = get_parallel_state().tp.rank
+    pp_rank = get_parallel_state().pp.rank
 
     # ---- Try Megatron-native format first (fast, no conversion needed) ----
     native_path = adapter_dir / f"adapter_megatron_tp{tp_rank}_pp{pp_rank}.pt"
@@ -455,7 +551,7 @@ def _load_training_state(
 def build_lora_sync_config(args: Namespace) -> dict[str, Any]:
     """Build LoRA config dict for syncing weights to SGLang engines."""
     target_modules_hf = (
-        convert_target_modules_to_hf(list(args.target_modules))
+        target_modules_hf_for_sglang_rollout(args)
         if args.target_modules
         else ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     )

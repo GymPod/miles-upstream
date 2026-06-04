@@ -9,6 +9,7 @@ from tqdm import tqdm
 
 from miles.rollout.base_types import RolloutFnTrainOutput
 from miles.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
+from miles.rollout.generate_utils.prefill_logprobs import recompute_samples_rollout_logprobs_via_prefill
 from miles.rollout.inference_rollout.inference_rollout_common import GenerateState, generate_and_rm_group
 from miles.utils import dumper_utils
 from miles.utils.http_utils import get, post
@@ -98,9 +99,15 @@ async def generate_rollout_async(
             pendings.update(submit_generate_tasks(state, samples))
 
         # wait for the generation to finish
+        logger.debug(f"[rollout] Waiting on {len(pendings)} pending tasks, data={len(data)}/{target_data_size}")
         done, pendings = await asyncio.wait(pendings, return_when=asyncio.FIRST_COMPLETED)
+        logger.debug(f"[rollout] asyncio.wait returned: {len(done)} done, {len(pendings)} pending")
         for task in done:
-            group: list[Sample] = task.result()
+            try:
+                group: list[Sample] = task.result()
+            except Exception as e:
+                logger.error(f"[rollout] Task raised exception: {e!r}", exc_info=True)
+                continue
 
             if do_print:
                 sample = group[0][0] if isinstance(group[0], list) else group[0]
@@ -145,5 +152,12 @@ async def generate_rollout_async(
     # There can be circumstances where users want to process all samples including filtered ones.
     if f := load_function(args.rollout_all_samples_process_path):
         f(args, all_samples, data_source)
+
+    await recompute_samples_rollout_logprobs_via_prefill(
+        args,
+        [sample for group in data for sample in group],
+        url=f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate",
+        sampling_params=state.sampling_params,
+    )
 
     return RolloutFnTrainOutput(samples=data, metrics=metric_gatherer.collect()), aborted_samples

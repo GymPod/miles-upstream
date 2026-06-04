@@ -3,6 +3,7 @@ import logging
 import os
 import random
 from datetime import timedelta
+from typing import TYPE_CHECKING
 
 import ray
 import torch
@@ -11,15 +12,20 @@ import torch.distributed as dist
 import miles.utils.eval_config
 from miles.ray.ray_actor import RayActor
 from miles.utils.distributed_utils import init_gloo_group
+from miles.utils.env_report import collect_and_print_node_env_report
 from miles.utils.logging_utils import configure_logger
 from miles.utils.memory_utils import clear_memory, print_memory
+
+if TYPE_CHECKING:
+    from miles.ray.rollout.rollout_manager import EnginesAndLock
+
 
 logger = logging.getLogger(__name__)
 
 
 def get_local_gpu_id():
-    cvd = os.environ.get("CUDA_VISIBLE_DEVICES", None)
-    if cvd is None:
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES") or os.environ.get("HIP_VISIBLE_DEVICES")
+    if not cvd:
         return ray.get_gpu_ids()[0]
     else:
         return cvd.split(",").index(str(ray.get_gpu_ids()[0]))
@@ -51,6 +57,13 @@ class TrainRayActor(RayActor):
         self.args = args
         self.role = role
         self.with_ref = with_ref
+
+        if env_report := args.env_report:
+            collect_and_print_node_env_report(
+                role=role,
+                rank=self._rank,
+                partial_env_report=env_report,
+            )
 
         torch.serialization.add_safe_globals([miles.utils.eval_config.EvalDatasetConfig])
 
@@ -117,7 +130,7 @@ class TrainRayActor(RayActor):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def update_weights(self):
+    def update_weights(self, info: "EnginesAndLock") -> None:
         raise NotImplementedError
 
     @abc.abstractmethod
