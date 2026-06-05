@@ -25,10 +25,7 @@ NUM_PHASE_B_STEPS: int = 4
 # max_abs ~1e-5..4e-4, set varies run-to-run -> FP noise; weights bit-identical). So
 # expert grads also tolerate max_abs <= 1e-3 (well below real grads ~1e-2); a real
 # expert diff still fails, and everything else stays strict via the catch-all
-# (required: an unmatched tensor is a fail-closed error). 0.0085 is the comparator's
-# default relative (cosine) threshold.
-# TODO: confirm the grad regex against a real comparator report (dump names:
-# grad__param__<megatron_param_name>).
+# (required: an unmatched tensor is a fail-closed error).
 _DIFF_THRESHOLDS: list[tuple[str, str]] = [
     (r"grad__.*\.mlp\.experts\..*", "rel <= 0.0085 or max_abs <= 1e-3"),
     (".*", "rel <= 0.0085"),
