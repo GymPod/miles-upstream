@@ -85,8 +85,9 @@ def _student_score_url(args: Namespace) -> str:
     return f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
 
 
-async def _post_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
-    async with aiohttp.ClientSession() as session:
+async def _post_json(url: str, payload: dict[str, Any], timeout_secs: int | float | None = None) -> dict[str, Any]:
+    timeout = aiohttp.ClientTimeout(total=timeout_secs)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(url, json=payload) as resp:
             resp.raise_for_status()
             return await resp.json()
@@ -296,8 +297,11 @@ def _compute_topk_reverse_kl(
 
 async def reward_func(args: Namespace, sample: Sample, **kwargs: Any) -> dict[str, Any]:
     top_k = _get_opd_top_k(args)
+    # Optional per-request timeout so a hung teacher/student scoring call cannot stall
+    # the whole rollout (no-op when unset).
+    request_timeout = getattr(args, "sglang_router_request_timeout_secs", None)
     if top_k == 0:
-        return await _post_json(args.rm_url, _score_payload(sample.tokens))
+        return await _post_json(args.rm_url, _score_payload(sample.tokens), timeout_secs=request_timeout)
 
     strategy = _get_top_k_strategy(args)
     # Per-position scoring requires a patched teacher/student server that understands
@@ -321,7 +325,7 @@ async def reward_func(args: Namespace, sample: Sample, **kwargs: Any) -> dict[st
         teacher_payload = _score_payload(sample.tokens, top_k=teacher_top_k, token_ids=teacher_token_ids)
     else:
         teacher_payload = _score_payload(sample.tokens, top_k=teacher_top_k)
-    teacher_response = await _post_json(args.rm_url, teacher_payload)
+    teacher_response = await _post_json(args.rm_url, teacher_payload, timeout_secs=request_timeout)
 
     reward_payload = {"teacher": teacher_response}
     if strategy in STUDENT_ON_TEACHER_STRATEGIES:
@@ -332,7 +336,9 @@ async def reward_func(args: Namespace, sample: Sample, **kwargs: Any) -> dict[st
             )
         else:
             student_payload = _score_payload(sample.tokens, token_ids=_unique_ids(teacher_top))
-        reward_payload["student_on_teacher"] = await _post_json(_student_score_url(args), student_payload)
+        reward_payload["student_on_teacher"] = await _post_json(
+            _student_score_url(args), student_payload, timeout_secs=request_timeout
+        )
 
     return reward_payload
 
