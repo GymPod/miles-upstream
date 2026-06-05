@@ -99,18 +99,21 @@ def _run_fault_injection_loop(
             logger.info("Failed to inject fault into %s", cell_name, exc_info=True)
 
 
-def _run_soak(
-    mode: str,
-    *,
-    seed: int = 42,
-    num_steps: int = 30,
-    crash_probability: float = 0.1,
+@app.command(name="run")
+def run_ci(
+    mode: Annotated[str, typer.Option(help="Test mode variant")],
+    seed: Annotated[int, typer.Option(help="Random seed for fault injection")] = 42,
+    num_steps: Annotated[int, typer.Option(help="Number of train() calls")] = 30,
+    crash_probability: Annotated[float, typer.Option(help="Per-step crash probability per cell")] = 0.1,
 ) -> None:
     """Random failure soak test.
 
     Starts a background thread that injects faults at random intervals via the
     control server HTTP API. The mini FT controller auto-recovers; the test passes
     if training completes without hanging.
+
+    Doubles as the per-mode CI entry point: a CI file calls ``run_ci(mode)`` (defaults);
+    manual runs use the ``run`` CLI subcommand with optional --seed/--num-steps/etc.
     """
     ft_mode: FTTestMode = resolve_mode(mode)
     dump_dir: str = resolve_dump_dir(f"{TEST_NAME}_{mode}")
@@ -144,22 +147,6 @@ def _run_soak(
         injector_thread.join(timeout=5)
 
     print(f"Random failure soak test PASSED (seed={seed}, steps={num_steps})")
-
-
-def run_ci(mode: str) -> None:
-    """Entry point for the per-mode CI file (default soak knobs)."""
-    _run_soak(mode)
-
-
-@app.command()
-def run(
-    mode: Annotated[str, typer.Option(help="Test mode variant")],
-    seed: Annotated[int, typer.Option(help="Random seed for fault injection")] = 42,
-    num_steps: Annotated[int, typer.Option(help="Number of train() calls")] = 30,
-    crash_probability: Annotated[float, typer.Option(help="Per-step crash probability per cell")] = 0.1,
-) -> None:
-    """Random failure soak test (manual any-mode entry)."""
-    _run_soak(mode, seed=seed, num_steps=num_steps, crash_probability=crash_probability)
 
 
 if __name__ == "__main__":
