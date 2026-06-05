@@ -69,47 +69,39 @@ def test_reduceop_equality_vs_containment_footgun():
 
 
 @pytest.mark.parametrize(
-    "world_size,numel,dtype",
+    "parts,dtype,expected",
     [
-        (1, 8, torch.float32),
-        (2, 8, torch.float32),
-        (3, 8, torch.float32),
-        (4, 8, torch.float32),
-        (5, 8, torch.float32),
-        (8, 64, torch.float32),
-        (16, 1, torch.float32),
-        (6, 8, torch.float32),
-        (7, 8, torch.float32),
-        (4, 8, torch.bfloat16),
-        (3, 8, torch.bfloat16),
-        (4, 8, torch.float16),
-        (4, 8, torch.int64),
-        (3, 8, torch.int32),
-        (2, 1024, torch.float32),
+        # Single rank / order-free sanity.
+        ([3.5], torch.float64, 3.5),
+        ([1.0, 1e-5], torch.float64, 1.0 + 1e-5),
+        ([1, 2, 3, 4], torch.int64, 10),
+        # One 2**-53 is absorbed by 1.0 (ties-to-even), but 2**-53 + 2**-53 = ulp(1.0)
+        # is not -- so the pairwise tree and a sequential fold give different bits.
+        # 4 ranks must be the tree (a+b)+(c+d), not sequential (which gives 1.0):
+        ([0.5, 0.5, 2**-53, 2**-53], torch.float64, (0.5 + 0.5) + (2**-53 + 2**-53)),
+        # 3 ranks (non-power-of-two) must be the ascending fold ((a+b)+c), which
+        # absorbs both halves (a wrong pairing would give 1.0 + 2**-52):
+        ([1.0, 2**-53, 2**-53], torch.float64, (1.0 + 2**-53) + 2**-53),
+        # 5 ranks: ascending fold absorbs every half:
+        ([1.0, 2**-53, 2**-53, 2**-53, 2**-53], torch.float64, 1.0),
+        # 8 ranks: the full three-level tree cancels exactly to 0.0 (sequential
+        # would leave -2**-52):
+        (
+            [0.5, 0.5, 2**-53, 2**-53, -0.5, -0.5, -(2**-53), -(2**-53)],
+            torch.float64,
+            ((0.5 + 0.5) + (2**-53 + 2**-53)) + ((-0.5 + -0.5) + (-(2**-53) + -(2**-53))),
+        ),
+        # Same construction at float32 precision (ulp(1.0) = 2**-23):
+        ([0.5, 0.5, 2**-24, 2**-24], torch.float32, (0.5 + 0.5) + (2**-24 + 2**-24)),
     ],
 )
-def test_fold_gathered_sum(world_size: int, numel: int, dtype: torch.dtype):
-    """_fold_gathered_sum matches the reference order bitwise: pairwise tree for power-of-two, ascending otherwise."""
-    if dtype.is_floating_point:
-        parts = [
-            torch.randn(numel, generator=torch.Generator().manual_seed(_SEED + i)).to(dtype) for i in range(world_size)
-        ]
-    else:
-        parts = [
-            torch.randint(-1000, 1000, (numel,), generator=torch.Generator().manual_seed(_SEED + i), dtype=dtype)
-            for i in range(world_size)
-        ]
+def test_fold_gathered_sum(parts: list[float], dtype: torch.dtype, expected: float):
+    """The fold's exact bracketing is pinned by hand-computed literals where any other order changes the bits."""
+    tensors = [torch.tensor([value], dtype=dtype) for value in parts]
 
-    if world_size & (world_size - 1) == 0:
-        expected = _pairwise_tree_fold([p.clone() for p in parts])
-    else:
-        expected = parts[0].clone()
-        for part in parts[1:]:
-            expected = expected + part
+    actual = _fold_gathered_sum(tensors)
 
-    actual = _fold_gathered_sum([p.clone() for p in parts])
-
-    assert torch.equal(actual, expected)
+    assert actual.item() == expected
 
 
 def test_reduce_op_of_extracts_reduceop_from_options_object():
