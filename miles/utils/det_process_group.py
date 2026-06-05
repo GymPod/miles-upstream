@@ -55,48 +55,6 @@ def _create_det_nccl_backend(dist_backend_opts: object, pg_options: object) -> "
     return DetProcessGroup(inner)
 
 
-def _reduce_op_of(opts: object) -> object:
-    """Extract the ReduceOp from an options object (or pass a bare ReduceOp through)."""
-    return opts.reduceOp if hasattr(opts, "reduceOp") else opts
-
-
-def _is_deterministic_op(reduce_op: object) -> bool:
-    """Whether the op is order-sensitive and folded deterministically (SUM/AVG).
-
-    Compared with explicit ``==``: ``ReduceOp.__eq__`` handles the RedOpType enum,
-    but tuple containment (``in``) does not, so ``op in (SUM, AVG)`` is always False.
-    """
-    return reduce_op == dist.ReduceOp.SUM or reduce_op == dist.ReduceOp.AVG
-
-
-def det_all_reduce(
-    tensor: torch.Tensor, *, world_size: int, gather_fn: Callable[[torch.Tensor, torch.Tensor], None]
-) -> None:
-    """SUM ``tensor`` across ranks in-place with the fixed fold; the all-gather is injected.
-
-    ``gather_fn(output, input)`` follows the ``_allgather_base`` calling convention: fill
-    the flat ``output`` (``world_size * input.numel()``) with every rank's ``input``.
-    Pure data movement -- the local fold defines the (shared) summation order.
-    """
-    if not tensor.is_contiguous():
-        work = tensor.contiguous()
-        det_all_reduce(work, world_size=world_size, gather_fn=gather_fn)
-        tensor.copy_(work)
-        return
-
-    flat = tensor.view(-1)
-    flat.copy_(_det_full_sum(flat, world_size=world_size, gather_fn=gather_fn))
-
-
-def _det_full_sum(
-    flat: torch.Tensor, *, world_size: int, gather_fn: Callable[[torch.Tensor, torch.Tensor], None]
-) -> torch.Tensor:
-    """Gather every rank's copy of ``flat`` and return the fixed-order sum."""
-    gathered_flat = torch.empty(world_size * flat.numel(), dtype=flat.dtype, device=flat.device)
-    gather_fn(gathered_flat, flat)
-    return _fold_gathered_sum(list(gathered_flat.view(world_size, -1).unbind(dim=0)))
-
-
 class DetProcessGroup(BaseProcessGroup):
     """Wrapper process group whose SUM/AVG reductions use a fixed-order fold."""
 
@@ -235,6 +193,48 @@ class DetProcessGroup(BaseProcessGroup):
 
     def getBackendName(self) -> str:
         return "det_nccl"
+
+
+def det_all_reduce(
+    tensor: torch.Tensor, *, world_size: int, gather_fn: Callable[[torch.Tensor, torch.Tensor], None]
+) -> None:
+    """SUM ``tensor`` across ranks in-place with the fixed fold; the all-gather is injected.
+
+    ``gather_fn(output, input)`` follows the ``_allgather_base`` calling convention: fill
+    the flat ``output`` (``world_size * input.numel()``) with every rank's ``input``.
+    Pure data movement -- the local fold defines the (shared) summation order.
+    """
+    if not tensor.is_contiguous():
+        work = tensor.contiguous()
+        det_all_reduce(work, world_size=world_size, gather_fn=gather_fn)
+        tensor.copy_(work)
+        return
+
+    flat = tensor.view(-1)
+    flat.copy_(_det_full_sum(flat, world_size=world_size, gather_fn=gather_fn))
+
+
+def _det_full_sum(
+    flat: torch.Tensor, *, world_size: int, gather_fn: Callable[[torch.Tensor, torch.Tensor], None]
+) -> torch.Tensor:
+    """Gather every rank's copy of ``flat`` and return the fixed-order sum."""
+    gathered_flat = torch.empty(world_size * flat.numel(), dtype=flat.dtype, device=flat.device)
+    gather_fn(gathered_flat, flat)
+    return _fold_gathered_sum(list(gathered_flat.view(world_size, -1).unbind(dim=0)))
+
+
+def _reduce_op_of(opts: object) -> object:
+    """Extract the ReduceOp from an options object (or pass a bare ReduceOp through)."""
+    return opts.reduceOp if hasattr(opts, "reduceOp") else opts
+
+
+def _is_deterministic_op(reduce_op: object) -> bool:
+    """Whether the op is order-sensitive and folded deterministically (SUM/AVG).
+
+    Compared with explicit ``==``: ``ReduceOp.__eq__`` handles the RedOpType enum,
+    but tuple containment (``in``) does not, so ``op in (SUM, AVG)`` is always False.
+    """
+    return reduce_op == dist.ReduceOp.SUM or reduce_op == dist.ReduceOp.AVG
 
 
 class _CompletedWork(Work):
