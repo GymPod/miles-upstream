@@ -116,7 +116,11 @@ class DetProcessGroup(BaseProcessGroup):
             return self._inner.allreduce(tensors, opts)
 
         for tensor in tensors:
-            det_all_reduce(tensor, world_size=self.size(), gather_fn=lambda output, input: self._inner._allgather_base(output, input, AllgatherOptions()).wait())
+            det_all_reduce(
+                tensor,
+                world_size=self.size(),
+                gather_fn=lambda output, input: self._inner._allgather_base(output, input, AllgatherOptions()).wait(),
+            )
             if reduce_op == dist.ReduceOp.AVG:
                 tensor.div_(self.size())
         return _CompletedWork()
@@ -130,7 +134,11 @@ class DetProcessGroup(BaseProcessGroup):
             return self._inner._reduce_scatter_base(output, input, opts)
 
         flat = input.contiguous().view(-1)
-        folded = _det_full_sum(flat, world_size=self.size(), gather_fn=lambda output, input: self._inner._allgather_base(output, input, AllgatherOptions()).wait())
+        folded = _det_full_sum(
+            flat,
+            world_size=self.size(),
+            gather_fn=lambda output, input: self._inner._allgather_base(output, input, AllgatherOptions()).wait(),
+        )
         shard_numel = output.numel()
         shard = folded[self.rank() * shard_numel : (self.rank() + 1) * shard_numel]
         output.copy_(shard.view(output.shape))
@@ -150,7 +158,11 @@ class DetProcessGroup(BaseProcessGroup):
             # the same fixed order and keep this rank's one.
             for slot, slot_input in enumerate(inputs):
                 folded = _det_full_sum(
-                    slot_input.contiguous().view(-1), world_size=self.size(), gather_fn=lambda output, input: self._inner._allgather_base(output, input, AllgatherOptions()).wait()
+                    slot_input.contiguous().view(-1),
+                    world_size=self.size(),
+                    gather_fn=lambda output, input: self._inner._allgather_base(
+                        output, input, AllgatherOptions()
+                    ).wait(),
                 )
                 if slot == self.rank():
                     output.copy_(folded.view(output.shape))
