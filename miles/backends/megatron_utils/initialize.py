@@ -129,8 +129,6 @@ def init(
         torch.use_deterministic_algorithms(True, warn_only=False)
 
     if args.debug_deterministic_collective:
-        # The det_nccl backend is registered and selected in the Ray train actor,
-        # before torch.distributed is initialized.
         assert not args.overlap_grad_reduce, "deterministic collectives require synchronous grad sync"
 
     if args.tp_comm_overlap:
