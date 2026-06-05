@@ -91,7 +91,6 @@ def _compare(dump_dir: str, mode: FTTestMode) -> None:
         diff_thresholds=[(".*", "rel <= 0")],
         allow_skipped_pattern=INPUT_TENSORS_SKIP_PATTERN,
         allow_failed_pattern=INPUT_TENSORS_ALLOW_FAILED_PATTERN,
-        grouping_skip_keys=["rank"],
     )
     print("Deterministic healing comparison test PASSED")
 

@@ -52,7 +52,7 @@ def _compare(dump_dir: str, mode: FTTestMode) -> None:
         diff_thresholds=[(".*", "rel <= 0.0085")],
         allow_skipped_pattern=INPUT_TENSORS_SKIP_PATTERN,
         allow_failed_pattern=INPUT_TENSORS_ALLOW_FAILED_PATTERN,
-        grouping_skip_keys=["rank", "dp", "edp"],
+        extra_args=["--grouping-skip-keys", "rank", "dp", "edp"],
     )
     print("No-failure comparison test PASSED")
 

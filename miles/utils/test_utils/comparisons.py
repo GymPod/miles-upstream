@@ -25,7 +25,7 @@ def compare_dumps(
     diff_thresholds: list[tuple[str, str]],
     allow_skipped_pattern: str,
     allow_failed_pattern: str,
-    grouping_skip_keys: list[str],
+    extra_args: list[str] | None = None,
 ) -> None:
     baseline_path = Path(baseline_dir) / "dumps"
     target_path = Path(target_dir) / "dumps"
@@ -39,7 +39,7 @@ def compare_dumps(
         diff_thresholds=diff_thresholds,
         allow_skipped_pattern=allow_skipped_pattern,
         allow_failed_pattern=allow_failed_pattern,
-        grouping_skip_keys=grouping_skip_keys,
+        extra_args=extra_args,
     )
 
     assert result.returncode == 0, (
@@ -244,7 +244,7 @@ def _run_comparator(
     diff_thresholds: list[tuple[str, str]],
     allow_skipped_pattern: str,
     allow_failed_pattern: str,
-    grouping_skip_keys: list[str],
+    extra_args: list[str] | None,
 ) -> subprocess.CompletedProcess[str]:
     cmd: list[str] = [
         sys.executable,
@@ -256,17 +256,21 @@ def _run_comparator(
         str(target_path),
         "--output-format",
         "json",
-        # Metadata keys to ignore when grouping bundles. Callers pass this explicitly;
-        # 'rank' is typically needed because under FT (target) vs non-FT (baseline) the
-        # same logical (pp,cp,ep,tp) coordinate maps to a different absolute rank ID, so
-        # without skipping it the comparator gets baseline_load_failed for every tensor.
+        # Skip 'rank' when grouping bundles: under FT (target) and non-FT (baseline)
+        # the same logical (pp_rank, cp_rank, ep_rank, tp_rank) coordinate maps to a
+        # different absolute rank ID (e.g. baseline rank=4 vs target cell0 rank=2 for
+        # PP=1, CP=0). Without skipping 'rank' the comparator gets `baseline_load_failed`
+        # for every tensor and fails with rc=1. (Grouping is a comparator-matching
+        # detail, not a per-test pass/fail threshold; callers add extras via extra_args.)
         "--grouping-skip-keys",
-        *grouping_skip_keys,
+        "rank",
         "--allow-skipped-pattern",
         allow_skipped_pattern,
         "--allow-failed-pattern",
         allow_failed_pattern,
     ]
+    if extra_args:
+        cmd.extend(extra_args)
     # Keep --diff-threshold strictly last: its nargs="*" greedily consumes every
     # following token, so no flag with a bare value may come after it.
     cmd.append("--diff-threshold")
