@@ -136,7 +136,7 @@ class DetProcessGroup(BaseProcessGroup):
         world_size = self.size()
         gathered_flat = torch.empty(world_size * flat.numel(), dtype=flat.dtype, device=flat.device)
         self._inner._allgather_base(gathered_flat, flat, AllgatherOptions()).wait()
-        return _fold_gathered_sum(list(gathered_flat.view(world_size, -1).unbind(dim=0)))
+        return fold_gathered_sum(list(gathered_flat.view(world_size, -1).unbind(dim=0)))
 
     # ------------------------------------------------------------------ #
     # Plain delegation
@@ -217,9 +217,10 @@ class _CompletedWork(Work):
         return future
 
 
-def _fold_gathered_sum(gathered: list[torch.Tensor]) -> torch.Tensor:
+def fold_gathered_sum(gathered: list[torch.Tensor]) -> torch.Tensor:
     """Sum a per-rank gathered list in a fixed order (pairwise tree for power-of-two).
 
+    Shared with indep_dp's cross-cell reduction so both sides use one bracketing.
     May reuse (mutate) the gathered buffers as accumulators.
     """
     world_size = len(gathered)
