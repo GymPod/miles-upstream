@@ -114,9 +114,10 @@ topology, but a SUM reduced over one topology (e.g. normal DP) is not bitwise-eq
 to the same SUM reduced over a different topology (e.g. fault-tolerant `indep_dp`),
 because floating-point addition is not associative and the two paths bracket the
 operands differently. The debug/test-only flag `--debug-deterministic-collective`
-replaces every order-sensitive SUM collective with an all-gather plus a fixed-tree
-local fold, so the arithmetic order is identical regardless of topology and the two
-sides become bitwise-comparable. It is slow and exists only for tests such as the FT
+runs the training world on the `det_nccl` torch.distributed backend
+(`miles.utils.det_process_group`), which replaces every order-sensitive SUM collective
+with an all-gather plus a fixed-tree local fold, so the arithmetic order is identical
+regardless of topology and the two sides become bitwise-comparable. It is slow and exists only for tests such as the FT
 `scenario_deterministic` comparison; never enable it in production.
 
 ## Troubleshooting
