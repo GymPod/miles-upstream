@@ -6,6 +6,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed.distributed_c10d import _object_to_tensor, _tensor_to_object
 
+from miles.utils.det_process_group import det_all_reduce
+
 
 @dataclass(frozen=True)
 class GroupInfo:
@@ -218,6 +220,26 @@ class MultiPGUtil:
         is a pure copy, all ranks receive a bitwise-identical result regardless of
         floating-point non-determinism in the reduce path.
         """
+        if dist.is_initialized() and dist.get_backend() == "det_nccl":
+            # Deterministic mode: fold per level with the shared fixed tree. The
+            # inner-pair x outer-tree composition equals the flat tree over all
+            # ranks, so the multi-group result is bitwise-equal to a single flat
+            # group's fold, and identical on every rank (no broadcast needed).
+            assert op == dist.ReduceOp.SUM, f"det multi-group reduce supports SUM only, got {op}"
+            for group in groups_inner_to_outer:
+                util = GeneralPGUtil.create(group)
+                world_size = util.get_size(group)
+                if world_size == 1:
+                    continue
+                det_all_reduce(
+                    tensor,
+                    world_size=world_size,
+                    gather_fn=lambda output, input, util=util, group=group, world_size=world_size: util.all_gather(
+                        list(output.view(world_size, -1).unbind(dim=0)), input, group
+                    ),
+                )
+            return
+
         for group in groups_inner_to_outer:
             GeneralPGUtil.create(group).reduce(tensor, group, op)
 

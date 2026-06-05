@@ -149,7 +149,12 @@ class DetProcessGroup(BaseProcessGroup):
         return self._inner.broadcast(tensor_list, opts)
 
     def reduce(self, tensors: list[torch.Tensor], opts: object) -> Work:
-        return self._inner.reduce(tensors, opts)
+        reduce_op = _reduce_op_of(opts)
+        if reduce_op == dist.ReduceOp.MAX or reduce_op == dist.ReduceOp.MIN:
+            return self._inner.reduce(tensors, opts)
+        # SUM/AVG reduce is order-sensitive too; fold on every rank (the root gets
+        # the required result, non-root buffers are unspecified by the contract).
+        return self.allreduce(tensors, opts)
 
     def reduce_scatter_tensor_coalesced(
         self, output_tensors: list[torch.Tensor], input_tensors: list[torch.Tensor], opts: object
