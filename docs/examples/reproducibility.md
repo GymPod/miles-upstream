@@ -117,8 +117,9 @@ operands differently. The debug/test-only flag `--debug-deterministic-collective
 runs the training world on the `det_nccl` torch.distributed backend
 (`miles.utils.det_process_group`), which replaces every order-sensitive SUM collective
 with an all-gather plus a fixed-tree local fold, so the arithmetic order is identical
-regardless of topology and the two sides become bitwise-comparable. It is slow and exists only for tests such as the FT
-`scenario_deterministic` comparison; never enable it in production.
+regardless of topology and the two sides become bitwise-comparable. It is slow and
+exists only for tests such as the FT `scenario_deterministic` comparison; never
+enable it in production.
 
 ## Troubleshooting
 

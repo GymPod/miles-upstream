@@ -1,8 +1,8 @@
 """Process group with bitwise-deterministic SUM reductions.
 
 ``DetProcessGroup`` wraps an inner c10d NCCL group. Every collective delegates to
-the inner group except the
-SUM/AVG reductions — ``allreduce`` and ``reduce_scatter`` — which are computed as
+the inner group except the SUM/AVG reductions — ``allreduce`` and ``reduce_scatter``
+— which are computed as
 all-gather (pure data movement, no arithmetic) plus a fixed local fold: a pairwise
 tree for power-of-two world sizes, an ascending-rank fold otherwise. The summation
 order is therefore independent of the NCCL version, topology, communicator
