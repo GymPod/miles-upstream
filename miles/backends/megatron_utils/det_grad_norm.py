@@ -40,7 +40,31 @@ def deterministic_grad_norm(model: Sequence["DDP"]) -> float:
                 dist.all_gather_into_tensor(
                     gathered, bucket.grad_data[rank * shard_numel : (rank + 1) * shard_numel], group=group
                 )
+                # TEMP DEBUG PROBE
+                slot_sqs = [
+                    float(gathered[i * shard_numel : (i + 1) * shard_numel].float().pow(2).sum().item())
+                    for i in range(world_size)
+                ]
+                own_sq = float(
+                    bucket.grad_data[rank * shard_numel : (rank + 1) * shard_numel].float().pow(2).sum().item()
+                )
+                import logging as _logging
+
+                _logging.getLogger(__name__).info(
+                    "DETNORM-PROBE bucket=%d numel=%d world=%d rank=%d own_sq=%.6e slot_sqs=%s group_type=%s",
+                    bucket.bucket_id,
+                    bucket.grad_data.numel(),
+                    world_size,
+                    rank,
+                    own_sq,
+                    [f"{x:.3e}" for x in slot_sqs],
+                    type(group).__name__,
+                )
                 for param in bucket.params_list:
+                    if getattr(param, "_is_witness_param", False):
+                        # FT witness params carry verification data, not gradients;
+                        # Megatron's grad norm excludes them the same way.
+                        continue
                     if not (param_is_not_shared(param) and param_is_not_tensor_parallel_duplicate(param)):
                         continue
                     start, end = bucket.param_to_index[param]
