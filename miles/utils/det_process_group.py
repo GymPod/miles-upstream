@@ -69,21 +69,32 @@ def _is_deterministic_op(reduce_op: object) -> bool:
     return reduce_op == dist.ReduceOp.SUM or reduce_op == dist.ReduceOp.AVG
 
 
-def det_all_reduce(tensor: torch.Tensor, *, gather_fn: Callable[[torch.Tensor], list[torch.Tensor]]) -> None:
+def det_all_reduce(
+    tensor: torch.Tensor, *, world_size: int, gather_fn: Callable[[torch.Tensor, torch.Tensor], None]
+) -> None:
     """SUM ``tensor`` across ranks in-place with the fixed fold; the all-gather is injected.
 
-    ``gather_fn(flat)`` must return every rank's copy of the contiguous 1-D ``flat``
-    (pure data movement) -- DetProcessGroup gathers via its inner c10d group, indep_dp
-    via the torchft process group. The fold then defines the (shared) summation order.
+    ``gather_fn(output, input)`` follows the ``_allgather_base`` calling convention: fill
+    the flat ``output`` (``world_size * input.numel()``) with every rank's ``input``.
+    Pure data movement -- the local fold defines the (shared) summation order.
     """
     if not tensor.is_contiguous():
         work = tensor.contiguous()
-        det_all_reduce(work, gather_fn=gather_fn)
+        det_all_reduce(work, world_size=world_size, gather_fn=gather_fn)
         tensor.copy_(work)
         return
 
     flat = tensor.view(-1)
-    flat.copy_(_fold_gathered_sum(gather_fn(flat)))
+    flat.copy_(_det_full_sum(flat, world_size=world_size, gather_fn=gather_fn))
+
+
+def _det_full_sum(
+    flat: torch.Tensor, *, world_size: int, gather_fn: Callable[[torch.Tensor, torch.Tensor], None]
+) -> torch.Tensor:
+    """Gather every rank's copy of ``flat`` and return the fixed-order sum."""
+    gathered_flat = torch.empty(world_size * flat.numel(), dtype=flat.dtype, device=flat.device)
+    gather_fn(gathered_flat, flat)
+    return _fold_gathered_sum(list(gathered_flat.view(world_size, -1).unbind(dim=0)))
 
 
 class DetProcessGroup(BaseProcessGroup):
@@ -105,7 +116,7 @@ class DetProcessGroup(BaseProcessGroup):
             return self._inner.allreduce(tensors, opts)
 
         for tensor in tensors:
-            det_all_reduce(tensor, gather_fn=self._gather)
+            det_all_reduce(tensor, world_size=self.size(), gather_fn=self._allgather_into)
             if reduce_op == dist.ReduceOp.AVG:
                 tensor.div_(self.size())
         return _CompletedWork()
@@ -119,7 +130,7 @@ class DetProcessGroup(BaseProcessGroup):
             return self._inner._reduce_scatter_base(output, input, opts)
 
         flat = input.contiguous().view(-1)
-        folded = _fold_gathered_sum(self._gather(flat))
+        folded = _det_full_sum(flat, world_size=self.size(), gather_fn=self._allgather_into)
         shard_numel = output.numel()
         shard = folded[self.rank() * shard_numel : (self.rank() + 1) * shard_numel]
         output.copy_(shard.view(output.shape))
@@ -138,19 +149,17 @@ class DetProcessGroup(BaseProcessGroup):
             # output on rank r = fold over ranks q of inputs_q[r]; fold every slot in
             # the same fixed order and keep this rank's one.
             for slot, slot_input in enumerate(inputs):
-                folded = _fold_gathered_sum(self._gather(slot_input.contiguous().view(-1)))
+                folded = _det_full_sum(
+                    slot_input.contiguous().view(-1), world_size=self.size(), gather_fn=self._allgather_into
+                )
                 if slot == self.rank():
                     output.copy_(folded.view(output.shape))
                     if reduce_op == dist.ReduceOp.AVG:
                         output.div_(self.size())
         return _CompletedWork()
 
-    def _gather(self, flat: torch.Tensor) -> list[torch.Tensor]:
-        """Gather every rank's copy of a contiguous 1-D tensor (flat base gather)."""
-        world_size = self.size()
-        gathered_flat = torch.empty(world_size * flat.numel(), dtype=flat.dtype, device=flat.device)
-        self._inner._allgather_base(gathered_flat, flat, AllgatherOptions()).wait()
-        return list(gathered_flat.view(world_size, -1).unbind(dim=0))
+    def _allgather_into(self, output: torch.Tensor, input: torch.Tensor) -> None:
+        self._inner._allgather_base(output, input, AllgatherOptions()).wait()
 
     # ------------------------------------------------------------------ #
     # Plain delegation

@@ -122,9 +122,7 @@ def _deterministic_sum_inplace_across_replicas(
     if world_size == 1:
         return
 
-    def _gather(flat: torch.Tensor) -> list[torch.Tensor]:
-        gathered = [torch.empty_like(flat) for _ in range(world_size)]
-        util.all_gather(gathered, flat, pg)
-        return gathered
+    def _allgather_into(output: torch.Tensor, input: torch.Tensor) -> None:
+        util.all_gather(list(output.view(world_size, -1).unbind(dim=0)), input, pg)
 
-    det_all_reduce(tensor, gather_fn=_gather)
+    det_all_reduce(tensor, world_size=world_size, gather_fn=_allgather_into)
