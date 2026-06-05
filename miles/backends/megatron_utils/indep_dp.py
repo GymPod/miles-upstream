@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
-from megatron.core.distributed.deterministic_collectives import _fold_gathered_sum
+from megatron.core.distributed.deterministic_collectives import deterministic_sum_inplace_with_gather
 
 from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.indep_dp import IndepDPInfo
@@ -116,23 +116,12 @@ def _deterministic_sum_inplace_across_replicas(
     tensor: torch.Tensor,
     util: GeneralPGUtil,
     pg: dist.ProcessGroup,
-    *,
-    chunk_numel: int = 64 * 1024 * 1024,
 ) -> None:
-    """Cross-cell SUM in-place via all-gather plus the Megatron-side fixed local fold."""
-    assert tensor.is_contiguous(), "deterministic cross-replica sum requires a contiguous tensor"
+    """Cross-cell SUM in-place sharing the Megatron-side fixed fold (one bracketing)."""
 
-    world_size = util.get_size(pg)
-    if world_size == 1:
-        return
-
-    flat = tensor.view(-1)
-    total_numel = flat.numel()
-
-    for start in range(0, total_numel, chunk_numel):
-        end = min(start + chunk_numel, total_numel)
-        chunk = flat[start:end].contiguous()
-        gathered_list = [torch.empty_like(chunk) for _ in range(world_size)]
+    def _all_gather(gathered_list: list[torch.Tensor], chunk: torch.Tensor) -> None:
         util.all_gather(gathered_list, chunk, pg)
-        reduced = _fold_gathered_sum(gathered_list)
-        flat[start:end].copy_(reduced)
+
+    deterministic_sum_inplace_with_gather(
+        tensor, world_size=util.get_size(pg), all_gather_fn=_all_gather
+    )
