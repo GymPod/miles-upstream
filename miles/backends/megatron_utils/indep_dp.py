@@ -4,7 +4,6 @@ from collections.abc import Sequence
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
-import torch
 import torch.distributed as dist
 
 from miles.utils.distributed_utils import get_gloo_group
@@ -101,40 +100,6 @@ def reconfigure_indep_dp_group(
     logger.info(f"Reconfigured indep_dp PG with quorum_id={indep_dp_info.quorum_id}")
 
 
-def _exact_sum_across_replicas(
-    util: GeneralPGUtil,
-    grad_data: torch.Tensor,
-    pg: dist.ProcessGroup,
-    *,
-    chunk_numel: int = 64 * 1024 * 1024,
-) -> None:
-    """Sum grad_data across alive cells in ascending alive_rank order (bitwise-stable).
-
-    NCCL all_reduce does not guarantee a bitwise-identical reduction order across
-    comm instances, so a recovered cross-cell collective (rebuilt with a new
-    quorum_id) can sign-flip near-zero cancellation residuals versus the no-fault
-    baseline. Under --deterministic-mode we instead all_gather every cell's
-    contribution and sum them in a fixed rank order that is identical in the
-    baseline and the recovered run, making the reduction itself bitwise-stable.
-
-    Chunked so peak extra memory is ``chunk_numel * world`` rather than
-    ``world * full_grad`` (an unchunked all_gather OOMs on large expert buckets).
-    Goes through ``util.all_gather`` -> ``_check_wait``, so a dead peer raises
-    here exactly like the all_reduce path and is handled by the caller's consensus.
-    """
-    world = util.get_size(pg)
-    flat = grad_data.view(-1)
-    total = flat.numel()
-    for start in range(0, total, chunk_numel):
-        chunk = flat[start : start + chunk_numel]
-        gathered = [torch.empty_like(chunk) for _ in range(world)]
-        util.all_gather(gathered, chunk, pg)
-        acc = gathered[0].clone()
-        for other in gathered[1:]:
-            acc += other
-        chunk.copy_(acc)
-
-
 def _allreduce_grads_across_replicas(args, model: Sequence["DDP"], parallel_state: ParallelState) -> bool:
     assert not args.calculate_per_token_loss, "calculate_per_token_loss is not supported with indep_dp yet"
     assert parallel_state.intra_dp.size == 1, (
@@ -144,7 +109,6 @@ def _allreduce_grads_across_replicas(args, model: Sequence["DDP"], parallel_stat
 
     pg = parallel_state.indep_dp.group
     util = GeneralPGUtil.create(pg)
-    deterministic = bool(args.deterministic_mode)
 
     allreduce_success = True
     try:
@@ -152,10 +116,7 @@ def _allreduce_grads_across_replicas(args, model: Sequence["DDP"], parallel_stat
             # mimic: DistributedDataParallel.start_grad_sync
             for bucket_group in model_chunk.bucket_groups + model_chunk.expert_parallel_bucket_groups:
                 for bucket in bucket_group.buckets:
-                    if deterministic:
-                        _exact_sum_across_replicas(util, bucket.grad_data, pg)
-                    else:
-                        util.all_reduce(bucket.grad_data, pg, op=dist.ReduceOp.SUM)
+                    util.all_reduce(bucket.grad_data, pg, op=dist.ReduceOp.SUM)
     except Exception:
         allreduce_success = False
         logger.exception("Gradient allreduce across replicas failed")
