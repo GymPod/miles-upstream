@@ -41,9 +41,7 @@ def compare_dumps(
     assert baseline_path.exists(), f"Baseline dump dir does not exist: {baseline_path}"
     assert target_path.exists(), f"Target dump dir does not exist: {target_path}"
 
-    thresholds = (
-        diff_thresholds if diff_thresholds is not None else [(".*", _DEFAULT_DUMP_PREDICATE)]
-    )
+    thresholds = diff_thresholds if diff_thresholds is not None else [(".*", _DEFAULT_DUMP_PREDICATE)]
     result = _run_comparator(
         baseline_path=baseline_path,
         target_path=target_path,
