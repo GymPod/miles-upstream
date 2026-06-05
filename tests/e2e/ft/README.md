@@ -45,53 +45,42 @@ an existing one and change `run_ci(...)`'s mode). To add a brand-new label, edit
 
 ### Manually
 
-Set `PYTHONPATH` to the repo root (CI sets it automatically). Run a single mode via its
-entry file, or any mode (incl. the authorized-skip ones) via the scenario's typer app —
-which has `run` / `baseline` / `target` / `compare` subcommands.
+Set `PYTHONPATH` to the repo root (CI sets it automatically). Two ways:
 
-```bash
-# One mode, exactly as CI runs it
-PYTHONPATH=. python tests/e2e/ft/test_trainer_ft_no_failure_dp2_cp2_tp2_ep2.py
+1. One mode, exactly as CI runs it — invoke the entry file:
 
-# Any mode via the scenario app:
-#   run     — full pipeline: prepare + baseline + target + compare
-#   baseline / target — run one side independently (debugging)
-#   compare — re-run comparison on existing dumps (no GPU needed)
-PYTHONPATH=. python tests/e2e/ft/conftest_ft/scenario_no_failure.py run --mode dp4_cp2
-PYTHONPATH=. python tests/e2e/ft/conftest_ft/scenario_no_failure.py compare --mode dp4_cp2 --dump-dir /tmp/ft
+   ```bash
+   PYTHONPATH=. python tests/e2e/ft/test_trainer_ft_no_failure_dp2_cp2_tp2_ep2.py
+   ```
 
-# with_failure / deterministic have phases (phase_a saves ckpt; phase_b resumes + injects)
-PYTHONPATH=. python tests/e2e/ft/conftest_ft/scenario_with_failure.py run --mode dp2_cp2_tp2_ep2
+2. Any mode (incl. the authorized-skip ones) — invoke the scenario's typer app with a
+   subcommand:
 
-# random soak (manual knobs)
-PYTHONPATH=. python tests/e2e/ft/conftest_ft/scenario_ft_random.py run --mode dp2_cp2_tp2_ep2 --seed 42 --num-steps 50
-```
+   | subcommand | does |
+   |---|---|
+   | `run` | full pipeline: prepare + baseline + target + compare |
+   | `baseline` / `target` | run one side only (debugging) |
+   | `compare` | re-run comparison on existing dumps (no GPU) |
+
+   ```bash
+   PYTHONPATH=. python tests/e2e/ft/conftest_ft/scenario_<name>.py run --mode <mode>
+   ```
+
+   `scenario_ft_random` is non-comparison: only `run`, with `--seed` / `--num-steps` /
+   `--crash-probability`. Each scenario's modes, phases, and knobs are in Mode Variants and
+   Test Definitions.
 
 Dumps are written under `/node_public/dumps/<test_name>/` (see `conftest_ft/app.py`
 `resolve_dump_dir`).
 
-## Comparison criterion (per-tensor predicates)
+## Comparison criterion
 
-Tensor dumps are compared by `compare_dumps(diff_thresholds=[(name_regex, predicate), ...])`,
-which forwards `--diff-threshold` to the sglang comparator. A tensor uses the **first
-fullmatching** regex's predicate — a boolean expression over `rel` / `max_abs` / `mean_abs`
-(`< <= > >=`, `and`/`or`, parentheses), e.g. `"rel <= 0.0085 or max_abs <= 1e-3"`. A tensor
-matching **no** pattern is a fail-closed error, so every list ends with a `.*` catch-all.
-This keeps any near-zero tolerance scoped to the specific tensors that need it, so a real
-bug on any other tensor is never hidden. Metrics use `compare_metrics(rtol, atol, ...)`.
-
-Per scenario:
-
-- **no_failure**: dump `rel <= 0.0085` for all; metrics `rtol=1e-2, atol=1e-8`. Roughly
-  equal, **not** bitwise — baseline (normal DP) and target (indep_dp) have different world
-  sizes / reduction orders.
-- **with_failure**: dump `rel <= 0.0085` for all, **plus** MoE expert grads
-  (`grad__...mlp.experts.*`) additionally tolerate `max_abs <= 1e-3` (starved near-zero
-  experts whose tiny reduction-order residual is FP noise; weights stay bit-identical);
-  metrics `rtol=5e-2, atol=1e-7`.
-- **deterministic**: dump `rel <= 0` (**bitwise**) and metrics `rtol=0, atol=0` (exact). The
-  whole run is forced deterministic so healing must reproduce the no-fault baseline
-  bit-for-bit; any divergence is a real state-copy bug, not tolerated.
+Dumps use per-tensor boolean predicates over `rel`/`max_abs`/`mean_abs`
+(`compare_dumps(diff_thresholds=[(name_regex, predicate), ...])`): the deterministic
+scenario requires bitwise equality (`rel <= 0`); every other scenario allows a small
+relative diff (`rel <= 0.0085`, with_failure also flooring near-zero MoE-expert grads at
+`max_abs <= 1e-3`). Unmatched tensors are a fail-closed error, so end each list with a `.*`
+catch-all. Exact per-scenario thresholds are in Test Definitions below.
 
 ## Debug Rollout Data
 
