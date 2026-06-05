@@ -162,9 +162,8 @@ class _ReduceWorker:
         self._results["c10d_newgroup"] = x
 
     def run_torchft_q0(self) -> None:
-        from torchft.process_group import ProcessGroupNCCL
-
         import torch.distributed as dist
+        from torchft.process_group import ProcessGroupNCCL
 
         self._torchft_pg = ProcessGroupNCCL(timeout=timedelta(seconds=self._timeout_s))
         self._torchft_pg.configure(
@@ -182,9 +181,8 @@ class _ReduceWorker:
 
     def run_torchft_q1_rebuilt(self) -> None:
         """Shutdown the q0 PG and build a fresh one (the FT recovery rebuild analog)."""
-        from torchft.process_group import ProcessGroupNCCL
-
         import torch.distributed as dist
+        from torchft.process_group import ProcessGroupNCCL
 
         self._torchft_pg.shutdown()
         self._torchft_pg = ProcessGroupNCCL(timeout=timedelta(seconds=self._timeout_s))
@@ -300,7 +298,11 @@ def _run_experiment(*, world_size: int, numel: int, seed: int, timeout_s: float,
     pairwise = ray.get(workers[0].pairwise_mismatch.remote())
     for pair, stats in pairwise.items():
         equal = stats["mismatch_elems"] == 0
-        mark = "BITWISE-EQUAL" if equal else f"DIFF ({stats['mismatch_elems']} elems, max_abs={stats['max_abs_diff']:.3e})"
+        mark = (
+            "BITWISE-EQUAL"
+            if equal
+            else f"DIFF ({stats['mismatch_elems']} elems, max_abs={stats['max_abs_diff']:.3e})"
+        )
         print(f"  {pair:<42} {mark}")
 
     nccl_paths = ["c10d_default", "c10d_newgroup", "torchft_q0", "torchft_q1"]
