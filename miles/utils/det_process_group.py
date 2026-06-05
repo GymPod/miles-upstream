@@ -69,7 +69,7 @@ def _is_deterministic_op(reduce_op: object) -> bool:
     return reduce_op == dist.ReduceOp.SUM or reduce_op == dist.ReduceOp.AVG
 
 
-def det_sum_inplace(tensor: torch.Tensor, *, gather_fn: Callable[[torch.Tensor], list[torch.Tensor]]) -> None:
+def det_all_reduce(tensor: torch.Tensor, *, gather_fn: Callable[[torch.Tensor], list[torch.Tensor]]) -> None:
     """SUM ``tensor`` across ranks in-place with the fixed fold; the all-gather is injected.
 
     ``gather_fn(flat)`` must return every rank's copy of the contiguous 1-D ``flat``
@@ -78,12 +78,12 @@ def det_sum_inplace(tensor: torch.Tensor, *, gather_fn: Callable[[torch.Tensor],
     """
     if not tensor.is_contiguous():
         work = tensor.contiguous()
-        det_sum_inplace(work, gather_fn=gather_fn)
+        det_all_reduce(work, gather_fn=gather_fn)
         tensor.copy_(work)
         return
 
     flat = tensor.view(-1)
-    flat.copy_(fold_gathered_sum(gather_fn(flat)))
+    flat.copy_(_fold_gathered_sum(gather_fn(flat)))
 
 
 class DetProcessGroup(BaseProcessGroup):
@@ -105,7 +105,7 @@ class DetProcessGroup(BaseProcessGroup):
             return self._inner.allreduce(tensors, opts)
 
         for tensor in tensors:
-            det_sum_inplace(tensor, gather_fn=self._gather)
+            det_all_reduce(tensor, gather_fn=self._gather)
             if reduce_op == dist.ReduceOp.AVG:
                 tensor.div_(self.size())
         return _CompletedWork()
@@ -119,7 +119,7 @@ class DetProcessGroup(BaseProcessGroup):
             return self._inner._reduce_scatter_base(output, input, opts)
 
         flat = input.contiguous().view(-1)
-        folded = fold_gathered_sum(self._gather(flat))
+        folded = _fold_gathered_sum(self._gather(flat))
         shard_numel = output.numel()
         shard = folded[self.rank() * shard_numel : (self.rank() + 1) * shard_numel]
         output.copy_(shard.view(output.shape))
@@ -138,7 +138,7 @@ class DetProcessGroup(BaseProcessGroup):
             # output on rank r = fold over ranks q of inputs_q[r]; fold every slot in
             # the same fixed order and keep this rank's one.
             for slot, slot_input in enumerate(inputs):
-                folded = fold_gathered_sum(self._gather(slot_input.contiguous().view(-1)))
+                folded = _fold_gathered_sum(self._gather(slot_input.contiguous().view(-1)))
                 if slot == self.rank():
                     output.copy_(folded.view(output.shape))
                     if reduce_op == dist.ReduceOp.AVG:
@@ -231,10 +231,9 @@ class _CompletedWork(Work):
         return future
 
 
-def fold_gathered_sum(gathered: list[torch.Tensor]) -> torch.Tensor:
+def _fold_gathered_sum(gathered: list[torch.Tensor]) -> torch.Tensor:
     """Sum a per-rank gathered list in a fixed order (pairwise tree for power-of-two).
 
-    Shared with indep_dp's cross-cell reduction so both sides use one bracketing.
     May reuse (mutate) the gathered buffers as accumulators.
     """
     world_size = len(gathered)

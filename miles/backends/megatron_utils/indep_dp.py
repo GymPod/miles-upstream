@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
-from miles.utils.det_process_group import det_sum_inplace
+from miles.utils.det_process_group import det_all_reduce
 
 from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.indep_dp import IndepDPInfo
@@ -127,4 +127,4 @@ def _deterministic_sum_inplace_across_replicas(
         util.all_gather(gathered, flat, pg)
         return gathered
 
-    det_sum_inplace(tensor, gather_fn=_gather)
+    det_all_reduce(tensor, gather_fn=_gather)
