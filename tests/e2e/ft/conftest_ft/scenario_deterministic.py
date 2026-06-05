@@ -34,6 +34,7 @@ def _build_phase_args(mode: FTTestMode, dump_dir: str, *, is_target: bool, enabl
     is_phase_a: bool = dump_dir.endswith("phase_a")
     base = get_common_train_args(mode, dump_dir=dump_dir, num_steps=NUM_PHASE_B_STEPS, enable_dumper=enable_dumper)
     base += "--deterministic-mode " + _DETERMINISTIC_ENV_VARS
+    base += "--debug-deterministic-collective "
 
     if is_target:
         base += get_ft_args(mode)

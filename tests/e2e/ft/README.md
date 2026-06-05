@@ -82,7 +82,9 @@ Dumps are written under `/node_public/dumps/<test_name>/` (see `conftest_ft/app.
 
 Dumps use per-tensor boolean predicates over `rel`/`max_abs`/`mean_abs`
 (`compare_dumps(diff_thresholds=[(name_regex, predicate), ...])`): the deterministic
-scenario requires bitwise equality (`rel <= 0`); every other scenario allows a small
+scenario requires bitwise equality (`rel <= 0`), which relies on both
+`--deterministic-mode` (kernel determinism) and `--debug-deterministic-collective`
+(fixed-tree SUM collectives); every other scenario allows a small
 relative diff (`rel <= 0.0085`, with_failure also flooring near-zero MoE-expert grads at
 `max_abs <= 1e-3`). Unmatched tensors are a fail-closed error, so end each list with a `.*`
 catch-all. Exact per-scenario thresholds are in Test Definitions below.
@@ -184,9 +186,12 @@ Phase B — target timeline:
   3. Rollout 3: healing at start (recv_ckpt from cell_0), then normal execution
 
 Both baseline and target use --deterministic-mode + env vars (NCCL_ALGO=Ring,
-NVTE_ALLOW_NONDETERMINISTIC_ALGO=0, CUBLAS_WORKSPACE_CONFIG=:4096:8) so the run is fully
-deterministic and healing must reproduce the no-fault baseline bit-for-bit. A state-copy
-bug is easy to make and an approximate check would miss it, hence zero tolerance.
+NVTE_ALLOW_NONDETERMINISTIC_ALGO=0, CUBLAS_WORKSPACE_CONFIG=:4096:8) for kernel
+determinism, plus --debug-deterministic-collective so every order-sensitive SUM
+collective uses a fixed-tree fold and the different reduction topologies of normal DP
+(baseline) and indep_dp (target) become bitwise-comparable. Together they make the run
+fully deterministic, so healing must reproduce the no-fault baseline bit-for-bit. A
+state-copy bug is easy to make and an approximate check would miss it, hence zero tolerance.
 
 Bitwise verification: --use-fault-tolerance --ft-components train auto-enables
 --save-local-weight-checksum and --enable-event-analyzer. The event_analyzer
