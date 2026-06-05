@@ -78,9 +78,14 @@ def test_reduceop_equality_vs_containment_footgun():
         (5, 8, torch.float32),
         (8, 64, torch.float32),
         (16, 1, torch.float32),
+        (6, 8, torch.float32),
+        (7, 8, torch.float32),
         (4, 8, torch.bfloat16),
         (3, 8, torch.bfloat16),
+        (4, 8, torch.float16),
         (4, 8, torch.int64),
+        (3, 8, torch.int32),
+        (2, 1024, torch.float32),
     ],
 )
 def test_fold_gathered_sum(world_size: int, numel: int, dtype: torch.dtype):
