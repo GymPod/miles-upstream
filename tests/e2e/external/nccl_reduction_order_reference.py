@@ -156,10 +156,22 @@ class _ReduceWorker:
         """A second, freshly created c10d communicator over the same ranks."""
         import torch.distributed as dist
 
-        group = dist.new_group(ranks=list(range(self._world_size)), backend="nccl")
+        self._newgroup = dist.new_group(ranks=list(range(self._world_size)), backend="nccl")
         x = self._input.clone()
-        dist.all_reduce(x, op=dist.ReduceOp.SUM, group=group)
+        dist.all_reduce(x, op=dist.ReduceOp.SUM, group=self._newgroup)
         self._results["c10d_newgroup"] = x
+
+    def run_c10d_newgroup_reduce_scatter(self) -> None:
+        """reduce_scatter on the second communicator: is rs ALSO comm-instance-invariant?"""
+        import torch
+        import torch.distributed as dist
+
+        x = self._input.clone()
+        shard = torch.empty(x.numel() // self._world_size, device=self._device, dtype=x.dtype)
+        dist.reduce_scatter_tensor(shard, x, op=dist.ReduceOp.SUM, group=self._newgroup)
+        full = torch.empty_like(x)
+        dist.all_gather_into_tensor(full, shard, group=self._newgroup)
+        self._results["c10d_newgroup_rs"] = full
 
     def run_torchft_q0(self) -> None:
         import torch.distributed as dist
@@ -277,6 +289,7 @@ def _run_experiment(*, world_size: int, numel: int, seed: int, timeout_s: float,
     for method in (
         "run_c10d_default",
         "run_c10d_newgroup",
+        "run_c10d_newgroup_reduce_scatter",
         "run_torchft_q0",
         "run_torchft_q1_rebuilt",
         "run_c10d_reduce_scatter",
@@ -308,8 +321,10 @@ def _run_experiment(*, world_size: int, numel: int, seed: int, timeout_s: float,
     nccl_paths = ["c10d_default", "c10d_newgroup", "torchft_q0", "torchft_q1"]
     cross_comm_equal = all(pairwise[f"{a} vs {b}"]["mismatch_elems"] == 0 for a, b in zip(nccl_paths, nccl_paths[1:]))
     rs_equal = pairwise["c10d_default vs c10d_reduce_scatter"]["mismatch_elems"] == 0
+    rs_cross_comm_equal = pairwise["c10d_newgroup_rs vs c10d_reduce_scatter"]["mismatch_elems"] == 0
     print(f"\n  VERDICT: allreduce comm-instance-invariant (c10d/newgroup/torchft/rebuilt) = {cross_comm_equal}")
     print(f"  VERDICT: reduce_scatter+gather matches allreduce                          = {rs_equal}")
+    print(f"  VERDICT: reduce_scatter comm-instance-invariant (default vs newgroup)     = {rs_cross_comm_equal}")
 
     for w in workers:
         try:
