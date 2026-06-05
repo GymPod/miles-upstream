@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
-from megatron.core.distributed.deterministic_collectives import deterministic_sum_inplace_with_gather
+from miles.utils.det_process_group import fold_gathered_sum
 
 from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.indep_dp import IndepDPInfo
@@ -117,9 +117,14 @@ def _deterministic_sum_inplace_across_replicas(
     util: GeneralPGUtil,
     pg: dist.ProcessGroup,
 ) -> None:
-    """Cross-cell SUM in-place sharing the Megatron-side fixed fold (one bracketing)."""
+    """Cross-cell SUM in-place: all-gather plus the same fixed fold as DetProcessGroup."""
+    assert tensor.is_contiguous(), "deterministic cross-replica sum requires a contiguous tensor"
 
-    def _all_gather(gathered_list: list[torch.Tensor], chunk: torch.Tensor) -> None:
-        util.all_gather(gathered_list, chunk, pg)
+    world_size = util.get_size(pg)
+    if world_size == 1:
+        return
 
-    deterministic_sum_inplace_with_gather(tensor, world_size=util.get_size(pg), all_gather_fn=_all_gather)
+    flat = tensor.view(-1)
+    gathered = [torch.empty_like(flat) for _ in range(world_size)]
+    util.all_gather(gathered, flat, pg)
+    flat.copy_(fold_gathered_sum(gathered))
