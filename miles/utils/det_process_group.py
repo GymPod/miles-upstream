@@ -27,6 +27,11 @@ logger = logging.getLogger(__name__)
 _BACKEND_NAME = "det_nccl"
 _backend_registered = False
 
+# Cap on the gather buffer so the fold never allocates world_size x the full tensor
+# (a 30B MoE grad buffer x 8 ranks is >100 GiB). Chunking is bitwise-neutral: each
+# output element is still folded over the same per-rank operands in the same order.
+_GATHER_BUFFER_CAP_BYTES = 1 << 30
+
 
 def register_det_nccl_backend() -> None:
     """Register the ``det_nccl`` torch.distributed backend (DetProcessGroup over NCCL).
@@ -95,14 +100,16 @@ class DetProcessGroup(BaseProcessGroup):
             return self._inner._reduce_scatter_base(output, input, opts)
 
         flat = input.contiguous().view(-1)
-        folded = _det_full_sum(
+        out_flat = output.view(-1) if output.is_contiguous() else torch.empty_like(output).view(-1)
+        _det_chunked_fold(
             flat,
+            out_flat,
+            out_offset=self.rank() * output.numel(),
             world_size=self.size(),
             gather_fn=lambda output, input: self._inner._allgather_base(output, input, AllgatherOptions()).wait(),
         )
-        shard_numel = output.numel()
-        shard = folded[self.rank() * shard_numel : (self.rank() + 1) * shard_numel]
-        output.copy_(shard.view(output.shape))
+        if not output.is_contiguous():
+            output.copy_(out_flat.view(output.shape))
         if reduce_op == dist.ReduceOp.AVG:
             output.div_(self.size())
         return _CompletedWork()
@@ -194,16 +201,41 @@ def det_all_reduce(
         return
 
     flat = tensor.view(-1)
-    flat.copy_(_det_full_sum(flat, world_size=world_size, gather_fn=gather_fn))
+    _det_chunked_fold(flat, flat, out_offset=0, world_size=world_size, gather_fn=gather_fn)
 
 
-def _det_full_sum(
-    flat: torch.Tensor, *, world_size: int, gather_fn: Callable[[torch.Tensor, torch.Tensor], None]
-) -> torch.Tensor:
-    """Gather every rank's copy of ``flat`` and return the fixed-order sum."""
-    gathered_flat = torch.empty(world_size * flat.numel(), dtype=flat.dtype, device=flat.device)
-    gather_fn(gathered_flat, flat)
-    return _fold_gathered_sum(list(gathered_flat.view(world_size, -1).unbind(dim=0)))
+def _det_chunked_fold(
+    flat_input: torch.Tensor,
+    out_flat: torch.Tensor,
+    *,
+    out_offset: int,
+    world_size: int,
+    gather_fn: Callable[[torch.Tensor, torch.Tensor], None],
+) -> None:
+    """Fold ``flat_input`` across ranks chunk by chunk; write the summed elements
+    covering ``[out_offset, out_offset + out_flat.numel())`` into ``out_flat``.
+
+    All ranks gather the same input range per chunk (a collective requirement), and
+    each keeps only the part overlapping its output window -- allreduce passes the
+    full window, reduce-scatter its shard. Chunk boundaries cannot change bits:
+    every output element is folded over the same operands in the same order.
+    ``out_flat`` may alias ``flat_input`` (allreduce, Megatron's aliased shards):
+    writes land only in the already-gathered chunk, never ahead of a read.
+    """
+    total = flat_input.numel()
+    chunk_numel = max(1, min(total, _GATHER_BUFFER_CAP_BYTES // (world_size * flat_input.element_size())))
+    gather_buf = torch.empty(world_size * chunk_numel, dtype=flat_input.dtype, device=flat_input.device)
+    out_end = out_offset + out_flat.numel()
+
+    for start in range(0, total, chunk_numel):
+        count = min(chunk_numel, total - start)
+        lo = max(start, out_offset)
+        hi = min(start + count, out_end)
+        buf = gather_buf[: world_size * count]
+        gather_fn(buf, flat_input[start : start + count])
+        if lo < hi:
+            folded = _fold_gathered_sum(list(buf.view(world_size, count).unbind(dim=0)))
+            out_flat[lo - out_offset : hi - out_offset].copy_(folded[lo - start : hi - start])
 
 
 def _reduce_op_of(opts: object) -> object:

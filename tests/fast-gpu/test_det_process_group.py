@@ -130,6 +130,57 @@ def test_det_all_reduce_equals_manual_pairwise_tree_fold():
     assert torch.equal(tensor, expected)
 
 
+def _sequential_chunk_gather_fn(per_rank: list[torch.Tensor]) -> Callable[[torch.Tensor, torch.Tensor], None]:
+    """Chunk-aware fake gather: serves ascending chunk requests from fixed per-rank tensors."""
+    position = {"offset": 0}
+
+    def gather_fn(output: torch.Tensor, input: torch.Tensor) -> None:
+        count = input.numel()
+        start = position["offset"]
+        rows = output.view(len(per_rank), count)
+        for row, src in zip(rows, per_rank, strict=True):
+            row.copy_(src.reshape(-1)[start : start + count])
+        position["offset"] = start + count
+
+    return gather_fn
+
+
+def test_det_all_reduce_multi_chunk_matches_single_chunk(monkeypatch: pytest.MonkeyPatch):
+    """A tiny gather-buffer cap (forcing many chunks) gives bitwise-identical results to one chunk."""
+    import miles.utils.det_process_group as dpg
+
+    gen = torch.Generator().manual_seed(_SEED + 21)
+    per_rank = [torch.randn(50, generator=gen, dtype=torch.float32) for _ in range(_WORLD_SIZE)]
+    expected = _pairwise_tree_fold(per_rank)
+
+    monkeypatch.setattr(dpg, "_GATHER_BUFFER_CAP_BYTES", _WORLD_SIZE * 7 * 4)
+    tensor = per_rank[0].clone()
+    det_all_reduce(tensor, world_size=_WORLD_SIZE, gather_fn=_sequential_chunk_gather_fn(per_rank))
+
+    assert torch.equal(tensor, expected)
+
+
+def test_det_chunked_fold_shard_window_spans_chunks(monkeypatch: pytest.MonkeyPatch):
+    """A shard output window crossing chunk boundaries equals the same slice of the full fold."""
+    import miles.utils.det_process_group as dpg
+
+    gen = torch.Generator().manual_seed(_SEED + 22)
+    per_rank = [torch.randn(48, generator=gen, dtype=torch.float32) for _ in range(_WORLD_SIZE)]
+    expected_full = _pairwise_tree_fold(per_rank)
+
+    monkeypatch.setattr(dpg, "_GATHER_BUFFER_CAP_BYTES", _WORLD_SIZE * 7 * 4)
+    out = torch.empty(12, dtype=torch.float32)
+    dpg._det_chunked_fold(
+        per_rank[0].clone(),
+        out,
+        out_offset=12,
+        world_size=_WORLD_SIZE,
+        gather_fn=_sequential_chunk_gather_fn(per_rank),
+    )
+
+    assert torch.equal(out, expected_full[12:24])
+
+
 def test_det_all_reduce_row_view_gather_matches_flat_gather_bitwise():
     """indep_dp row-view gather (view(world,-1).unbind) is bitwise-identical to flat-buffer fill."""
     gen = torch.Generator().manual_seed(_SEED + 7)
