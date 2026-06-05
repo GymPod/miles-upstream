@@ -16,9 +16,9 @@ import logging
 
 import torch
 import torch.distributed as dist
-from torch.distributed.distributed_c10d import AllgatherOptions
 from torch.distributed import ProcessGroup as BaseProcessGroup
 from torch.distributed import Work
+from torch.distributed.distributed_c10d import AllgatherOptions
 
 logger = logging.getLogger(__name__)
 
