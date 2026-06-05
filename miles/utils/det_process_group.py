@@ -150,9 +150,12 @@ class DetProcessGroup(BaseProcessGroup):
     def allgather_into_tensor_coalesced(
         self, output_tensors: list[torch.Tensor], input_tensors: list[torch.Tensor], opts: object = None
     ) -> Work:
-        # The coalescing manager's flush calls this without an opts argument.
+        # Called by the coalescing manager's flush (without an opts argument). The
+        # inner NCCL backend object has no coalesced allgather; gather pair by pair.
         effective_opts = opts if opts is not None else AllgatherOptions()
-        return self._inner.allgather_into_tensor_coalesced(output_tensors, input_tensors, effective_opts)
+        for output, input in zip(output_tensors, input_tensors, strict=True):
+            self._inner._allgather_base(output, input, effective_opts).wait()
+        return _CompletedWork()
 
     def _allgather_base(self, output: torch.Tensor, input: torch.Tensor, opts: object) -> Work:
         return self._inner._allgather_base(output, input, opts)
