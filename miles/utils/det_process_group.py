@@ -23,6 +23,41 @@ logger = logging.getLogger(__name__)
 
 _DETERMINISTIC_OPS = (dist.ReduceOp.SUM, dist.ReduceOp.AVG)
 
+_BACKEND_NAME = "det_nccl"
+_backend_registered = False
+
+
+def register_det_nccl_backend() -> None:
+    """Register the ``det_nccl`` torch.distributed backend (DetProcessGroup over NCCL).
+
+    After registration, groups created with ``backend="det_nccl"`` (via
+    ``init_process_group`` or ``new_group``) run SUM/AVG reductions through the
+    deterministic fold. Idempotent.
+    """
+    global _backend_registered
+    if _backend_registered:
+        return
+    dist.Backend.register_backend(_BACKEND_NAME, _create_det_nccl_backend, extended_api=True, devices=["cuda"])
+    _backend_registered = True
+    logger.info("Registered torch.distributed backend %s", _BACKEND_NAME)
+
+
+def _create_det_nccl_backend(dist_backend_opts: object, pg_options: object) -> "DetProcessGroup":
+    from torch.distributed import ProcessGroupNCCL
+
+    inner = ProcessGroupNCCL(
+        dist_backend_opts.store,
+        dist_backend_opts.group_rank,
+        dist_backend_opts.group_size,
+        ProcessGroupNCCL.Options(),
+    )
+    return DetProcessGroup(inner)
+
+
+def _reduce_op_of(opts: object) -> object:
+    """Extract the ReduceOp from an options object (or pass a bare ReduceOp through)."""
+    return opts.reduceOp if hasattr(opts, "reduceOp") else opts
+
 
 class DetProcessGroup(BaseProcessGroup):
     """Wrapper process group whose SUM/AVG reductions use a fixed-order fold."""
@@ -36,7 +71,7 @@ class DetProcessGroup(BaseProcessGroup):
     # ------------------------------------------------------------------ #
 
     def allreduce(self, tensors: list[torch.Tensor], opts: object) -> Work:
-        reduce_op = opts.reduceOp if isinstance(opts, dist.AllreduceOptions) else opts
+        reduce_op = _reduce_op_of(opts)
         if reduce_op not in _DETERMINISTIC_OPS:
             # MAX/MIN and friends are exactly associative-commutative: order cannot
             # change the bits, so the native implementation is already deterministic.
@@ -56,7 +91,7 @@ class DetProcessGroup(BaseProcessGroup):
         return self.allreduce(tensors, opts)
 
     def _reduce_scatter_base(self, output: torch.Tensor, input: torch.Tensor, opts: object) -> Work:
-        reduce_op = opts.reduceOp if isinstance(opts, dist.ReduceScatterOptions) else opts
+        reduce_op = _reduce_op_of(opts)
         if reduce_op not in _DETERMINISTIC_OPS:
             return self._inner._reduce_scatter_base(output, input, opts)
 
@@ -72,7 +107,7 @@ class DetProcessGroup(BaseProcessGroup):
     def reduce_scatter(
         self, output_tensors: list[torch.Tensor], input_tensors: list[list[torch.Tensor]], opts: object
     ) -> Work:
-        reduce_op = opts.reduceOp if isinstance(opts, dist.ReduceScatterOptions) else opts
+        reduce_op = _reduce_op_of(opts)
         if reduce_op not in _DETERMINISTIC_OPS:
             return self._inner.reduce_scatter(output_tensors, input_tensors, opts)
 
@@ -106,6 +141,9 @@ class DetProcessGroup(BaseProcessGroup):
         self, output_tensors: list[torch.Tensor], input_tensors: list[torch.Tensor], opts: object
     ) -> Work:
         return self._inner.allgather_into_tensor_coalesced(output_tensors, input_tensors, opts)
+
+    def _allgather_base(self, output: torch.Tensor, input: torch.Tensor, opts: object) -> Work:
+        return self._inner._allgather_base(output, input, opts)
 
     def barrier(self, opts: object) -> Work:
         return self._inner.barrier(opts)
