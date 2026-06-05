@@ -1150,6 +1150,18 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Weighting scheme for top-k OPD token rewards.",
             )
             parser.add_argument(
+                "--opd-topk-per-position",
+                action="store_true",
+                default=False,
+                help=(
+                    "Send per-position token ids to the teacher/student scoring server "
+                    "(token_ids_logprob_positions) instead of the global top-k union, so the "
+                    "response is O(response_len * k) instead of O(response_len * |union|). "
+                    "Requires a patched sglang server that supports token_ids_logprob_positions; "
+                    "leave off for an unpatched server."
+                ),
+            )
+            parser.add_argument(
                 "--opd-teacher-load",
                 type=str,
                 default=None,

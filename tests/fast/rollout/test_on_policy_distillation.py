@@ -4,7 +4,7 @@ from argparse import Namespace
 import pytest
 from tests.ci.ci_register import register_cpu_ci
 
-from miles.rollout.on_policy_distillation import _compute_topk_reverse_kl
+from miles.rollout.on_policy_distillation import _compute_topk_reverse_kl, _per_position_ids, _score_payload
 from miles.utils.types import Sample
 
 register_cpu_ci(est_time=60, suite="stage-a-cpu")
@@ -100,3 +100,26 @@ def test_topk_xor_uses_symmetric_difference_without_normalization():
     expected_1 = math.log(0.3 / 0.6) + math.log(0.1 / 0.2)
 
     assert reverse_kl.tolist() == pytest.approx([expected_0, expected_1])
+
+
+def test_per_position_ids_pads_prompt_and_keeps_response_order():
+    # Two response positions, each with two top-k entries [logprob, token_id].
+    student_top = [[_entry(0.6, 5), _entry(0.4, 7)], [_entry(0.7, 9), _entry(0.3, 11)]]
+    per_pos = _per_position_ids(student_top, prompt_len=3)
+    # 3 empty prompt slots, then response positions with their own token ids.
+    assert per_pos == [[], [], [], [5, 7], [9, 11]]
+    # Aligns with the existing _trim_input_field extraction values[1:][-R:]: for a
+    # length-5 response, indices 3,4 are the response positions.
+    values = list(range(5))
+    assert values[1:][-2:] == [3, 4]
+    assert per_pos[3] == [5, 7] and per_pos[4] == [9, 11]
+
+
+def test_score_payload_routes_per_position_vs_flat():
+    flat = _score_payload([1, 2, 3], token_ids=[5, 7])
+    assert flat["token_ids_logprob"] == [5, 7]
+    assert "token_ids_logprob_positions" not in flat
+
+    per_pos = _score_payload([1, 2, 3], token_ids_positions=[[], [5, 7], [9, 11]])
+    assert per_pos["token_ids_logprob_positions"] == [[], [5, 7], [9, 11]]
+    assert "token_ids_logprob" not in per_pos
