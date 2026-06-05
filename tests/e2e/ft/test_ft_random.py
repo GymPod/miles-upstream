@@ -20,13 +20,20 @@ if _miles_root_str in sys.path:
 sys.path.insert(0, _miles_root_str)
 
 import typer
+from tests.ci.ci_register import register_cuda_ci
 from tests.e2e.ft.conftest_ft.app import resolve_dump_dir
 from tests.e2e.ft.conftest_ft.execution import get_common_train_args, get_ft_args, prepare, run_training
 from tests.e2e.ft.conftest_ft.modes import FTTestMode, resolve_mode
 
 from miles.utils.test_utils.fault_injector import FailureMode
 
+register_cuda_ci(est_time=1800, suite="stage-c-8-gpu-h200", labels=["ft"])
+
 app: typer.Typer = typer.Typer()
+
+# The mode CI runs (bare `python3 test_ft_random.py`). Single soak mode; others run
+# manually via `python tests/e2e/ft/test_ft_random.py run --mode <x>`.
+_CI_MODE: str = "dp2_cp2_tp2_ep2"
 
 _CONTROL_SERVER_PORT: int = 18080
 _MEAN_INTERVAL_SECONDS: float = 60.0
@@ -155,4 +162,9 @@ def run(
 
 
 if __name__ == "__main__":
-    app()
+    # CUDA CI runs this file as bare `python3 <file>`, so run the soak mode directly
+    # (exit code = pass/fail) instead of dispatching to the typer app.
+    if len(sys.argv) > 1:
+        app()
+    else:
+        run(mode=_CI_MODE)
