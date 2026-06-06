@@ -79,6 +79,10 @@ def _compute_zero_advantage_witness_ids(
     and its witness is absent from EVERY cell — even cells that never owned it.
     Keying per (rollout_id, cell_index) would let a cell excuse only its own shard,
     falsely flagging peers' zero-advantage witnesses as missing.
+
+    Snapshot checks must excuse these ids cumulatively (see _zero_adv_ids_up_to): a
+    witness id is trained exactly once, so a zero-advantage sample stays absent from
+    every later snapshot too, while the expected set keeps it forever.
     """
     result: dict[int, set[int]] = defaultdict(set)
 
@@ -141,7 +145,7 @@ def _find_mismatches(
                 )
                 continue
 
-            zero_adv_ids = zero_adv_witness_ids_by_rollout.get(rollout_id, set())
+            zero_adv_ids = _zero_adv_ids_up_to(zero_adv_witness_ids_by_rollout, rollout_id)
 
             for event in witness_events_of_cell:
                 issue = _compare_snapshot(
@@ -153,6 +157,14 @@ def _find_mismatches(
                 )
                 if issue is not None:
                     yield issue
+
+
+def _zero_adv_ids_up_to(zero_adv_witness_ids_by_rollout: dict[int, set[int]], rollout_id: int) -> set[int]:
+    result: set[int] = set()
+    for rid, ids in zero_adv_witness_ids_by_rollout.items():
+        if rid <= rollout_id:
+            result |= ids
+    return result
 
 
 def _compare_snapshot(
