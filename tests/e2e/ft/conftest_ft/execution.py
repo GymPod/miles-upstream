@@ -154,15 +154,19 @@ def get_ft_args(mode: FTTestMode) -> str:
     )
 
 
-# Makes both sides of a comparison bitwise-comparable: deterministic kernels plus the
-# fixed-order (det_nccl) collectives, so cross-run drift cannot leak into comparisons.
-DETERMINISTIC_TRAIN_ARGS: str = (
+# Deterministic kernels only: removes run-to-run kernel noise between the two compared
+# runs. Safe with faults (unlike the det_nccl collectives below, whose post-crash abort
+# can wedge survivors), so the fault-injecting scenarios can use it.
+DETERMINISTIC_KERNEL_ARGS: str = (
     "--deterministic-mode "
     '--train-env-vars \'{"NCCL_ALGO": "Ring", '
     '"NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0", '
     '"CUBLAS_WORKSPACE_CONFIG": ":4096:8"}\' '
-    "--debug-deterministic-collective "
 )
+
+# Makes both sides of a comparison bitwise-comparable even across different reduction
+# topologies: deterministic kernels plus the fixed-order (det_nccl) collectives.
+DETERMINISTIC_TRAIN_ARGS: str = DETERMINISTIC_KERNEL_ARGS + "--debug-deterministic-collective "
 
 
 # Required for reproducibility (ref: https://github.com/THUDM/slime/pull/370)

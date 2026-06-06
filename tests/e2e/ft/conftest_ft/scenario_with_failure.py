@@ -4,7 +4,7 @@
 import json
 
 from tests.e2e.ft.conftest_ft.app import create_comparison_app_and_run_ci
-from tests.e2e.ft.conftest_ft.execution import DETERMINISTIC_TRAIN_ARGS, get_common_train_args, get_ft_args
+from tests.e2e.ft.conftest_ft.execution import DETERMINISTIC_KERNEL_ARGS, get_common_train_args, get_ft_args
 from tests.e2e.ft.conftest_ft.modes import FTTestMode
 
 from miles.utils.test_utils.comparisons import (
@@ -58,6 +58,14 @@ def _build_phase_args(mode: FTTestMode, dump_dir: str, *, is_target: bool, enabl
     # by ~10%). indep_dp-vs-flat equivalence is what scenario_no_failure and
     # scenario_deterministic already verify; this scenario isolates the fault + heal.
     base += get_ft_args(mode)
+
+    # Deterministic kernels remove run-to-run kernel noise between the two compared
+    # runs (with identical data, weights, and topology, that noise was the only
+    # remaining diff source: half the step-0 grad dumps showed ulp-level rel diffs
+    # and a small layernorm grad amplified them to 2.5% > 0.85%). This deliberately
+    # does NOT include the det_nccl fixed-order collectives, whose post-crash abort
+    # is known to wedge survivors.
+    base += DETERMINISTIC_KERNEL_ARGS
 
     # Real rollout: the faulted side replays the rollout data the fault-free side
     # generated and saved (real_rollout runs always --save-debug-rollout-data into
