@@ -121,9 +121,9 @@ class DetProcessGroup(BaseProcessGroup):
             # Slot sizes may be uneven (same per slot across ranks); fold the
             # concatenated slots and keep this rank's window at its true offset.
             flat_inputs = [t.contiguous().view(-1) for t in inputs]
-            assert flat_inputs[self.rank()].numel() == output.numel(), (
-                f"slot {self.rank()} numel {flat_inputs[self.rank()].numel()} != output numel {output.numel()}"
-            )
+            assert (
+                flat_inputs[self.rank()].numel() == output.numel()
+            ), f"slot {self.rank()} numel {flat_inputs[self.rank()].numel()} != output numel {output.numel()}"
             self._det_reduce_scatter(
                 output,
                 torch.cat(flat_inputs),
