@@ -162,8 +162,6 @@ class _RawPGUtil(GeneralPGUtil):
 
     def all_reduce(self, tensor: torch.Tensor, group: dist.ProcessGroup, op: dist.ReduceOp) -> None:
         if op == dist.ReduceOp.SUM and _is_det_world():
-            # torchft groups cannot host the det_nccl backend; fold at this seam so
-            # every order-sensitive SUM over them shares the deterministic tree.
             world_size = self.get_size(group)
             det_all_reduce(
                 tensor,
@@ -239,10 +237,6 @@ class MultiPGUtil:
         floating-point non-determinism in the reduce path.
         """
         if _is_det_world():
-            # Deterministic mode: every level folds with the shared fixed tree (c10d
-            # levels inside the det_nccl backend, torchft levels in _RawPGUtil), and
-            # inner-pair x outer-tree composes to the flat tree -- bitwise-equal to a
-            # single flat group's fold and identical on every rank (no broadcast).
             assert op == dist.ReduceOp.SUM, f"det multi-group reduce supports SUM only, got {op}"
             for group in groups_inner_to_outer:
                 GeneralPGUtil.create(group).all_reduce(tensor, group, op)
