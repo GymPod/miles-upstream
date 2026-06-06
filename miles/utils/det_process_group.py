@@ -220,9 +220,9 @@ def det_reduce_scatter(
     """SUM/AVG-reduce ``input`` across ranks with the fixed fold and write this rank's
     ``1/world_size`` slice into ``output`` (mirrors ``dist.reduce_scatter_tensor``).
     """
-    assert input.numel() == world_size * output.numel(), (
-        f"uneven reduce_scatter: input numel {input.numel()} != {world_size} x output numel {output.numel()}"
-    )
+    assert (
+        input.numel() == world_size * output.numel()
+    ), f"uneven reduce_scatter: input numel {input.numel()} != {world_size} x output numel {output.numel()}"
     _det_reduce_scatter_window(
         output,
         input.contiguous().view(-1),
