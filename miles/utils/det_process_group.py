@@ -102,19 +102,12 @@ class DetProcessGroup(BaseProcessGroup):
             f"{self.size()} x output numel {output.numel()}"
         )
 
-        flat = input.contiguous().view(-1)
-        out_flat = output.view(-1) if output.is_contiguous() else torch.empty_like(output).view(-1)
-        _det_chunked_fold(
-            flat,
-            out_flat,
+        self._det_reduce_scatter(
+            output,
+            input.contiguous().view(-1),
             out_offset=self.rank() * output.numel(),
-            world_size=self.size(),
-            gather_fn=lambda output, input: self._inner._allgather_base(output, input, AllgatherOptions()).wait(),
+            reduce_op=reduce_op,
         )
-        if not output.is_contiguous():
-            output.copy_(out_flat.view(output.shape))
-        if reduce_op == dist.ReduceOp.AVG:
-            output.div_(self.size())
         return _CompletedWork()
 
     def reduce_scatter(
@@ -128,22 +121,32 @@ class DetProcessGroup(BaseProcessGroup):
             # Slot sizes may be uneven (same per slot across ranks); fold the
             # concatenated slots and keep this rank's window at its true offset.
             flat_inputs = [t.contiguous().view(-1) for t in inputs]
-            assert (
-                flat_inputs[self.rank()].numel() == output.numel()
-            ), f"slot {self.rank()} numel {flat_inputs[self.rank()].numel()} != output numel {output.numel()}"
-            out_flat = output.view(-1) if output.is_contiguous() else torch.empty_like(output).view(-1)
-            _det_chunked_fold(
-                torch.cat(flat_inputs),
-                out_flat,
-                out_offset=sum(t.numel() for t in flat_inputs[: self.rank()]),
-                world_size=self.size(),
-                gather_fn=lambda output, input: self._inner._allgather_base(output, input, AllgatherOptions()).wait(),
+            assert flat_inputs[self.rank()].numel() == output.numel(), (
+                f"slot {self.rank()} numel {flat_inputs[self.rank()].numel()} != output numel {output.numel()}"
             )
-            if not output.is_contiguous():
-                output.copy_(out_flat.view(output.shape))
-            if reduce_op == dist.ReduceOp.AVG:
-                output.div_(self.size())
+            self._det_reduce_scatter(
+                output,
+                torch.cat(flat_inputs),
+                out_offset=sum(t.numel() for t in flat_inputs[: self.rank()]),
+                reduce_op=reduce_op,
+            )
         return _CompletedWork()
+
+    def _det_reduce_scatter(
+        self, output: torch.Tensor, flat_input: torch.Tensor, *, out_offset: int, reduce_op: object
+    ) -> None:
+        out_flat = output.view(-1) if output.is_contiguous() else torch.empty_like(output).view(-1)
+        _det_chunked_fold(
+            flat_input,
+            out_flat,
+            out_offset=out_offset,
+            world_size=self.size(),
+            gather_fn=lambda output, input: self._inner._allgather_base(output, input, AllgatherOptions()).wait(),
+        )
+        if not output.is_contiguous():
+            output.copy_(out_flat.view(output.shape))
+        if reduce_op == dist.ReduceOp.AVG:
+            output.div_(self.size())
 
     # ------------------------------------------------------------------ #
     # Plain delegation
