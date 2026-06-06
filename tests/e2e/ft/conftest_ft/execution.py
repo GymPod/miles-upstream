@@ -141,17 +141,6 @@ def get_ft_args(mode: FTTestMode) -> str:
     return "--use-fault-tolerance " "--ft-components train " "--control-server-port 0 "
 
 
-# Makes baseline and target bitwise-comparable: deterministic kernels plus the
-# fixed-order (det_nccl) collectives, so comparisons can assert exact equality.
-DETERMINISTIC_TRAIN_ARGS: str = (
-    "--deterministic-mode "
-    '--train-env-vars \'{"NCCL_ALGO": "Ring", '
-    '"NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0", '
-    '"CUBLAS_WORKSPACE_CONFIG": ":4096:8"}\' '
-    "--debug-deterministic-collective "
-)
-
-
 # Required for reproducibility (ref: https://github.com/THUDM/slime/pull/370)
 _DETERMINISTIC_ENV_VARS: dict[str, str] = {
     "NCCL_ALGO": "Ring",

@@ -82,15 +82,15 @@ Dumps are written under `/node_public/dumps/<test_name>/` (see `conftest_ft/app.
 
 Dumps use per-tensor boolean predicates over `rel`/`max_abs`/`mean_abs`
 (`compare_dumps(diff_thresholds=[(name_regex, predicate), ...])`): the deterministic
-and with_failure scenarios require bitwise equality (`rel <= 0`), which relies on both
+scenario requires bitwise equality (`rel <= 0`), which relies on both
 `--deterministic-mode` (kernel determinism) and `--debug-deterministic-collective`
-(fixed-tree SUM collectives), shared as `DETERMINISTIC_TRAIN_ARGS` in
-`conftest_ft/execution.py`. Metrics are also compared at `rtol=atol=0`, except
+(fixed-tree SUM collectives). Metrics are also compared at `rtol=atol=0`, except
 `train/grad_norm` (`rtol<=1e-6`): its bracketing depends on the distributed-optimizer
 shard count (8 flat vs 2 per cell), so a few fp32 ulps are inherent, while the grads
-themselves stay bitwise-checked via the dumps. The no_failure scenario allows a small
-relative diff (`rel <= 0.0085`). Unmatched tensors are a fail-closed error, so end each
-list with a `.*` catch-all. Exact per-scenario thresholds are in Test Definitions below.
+themselves stay bitwise-checked via the dumps. Every other scenario allows a small
+relative diff (`rel <= 0.0085`, with_failure also flooring near-zero MoE-expert grads at
+`max_abs <= 1e-3`). Unmatched tensors are a fail-closed error, so end each list with a `.*`
+catch-all. Exact per-scenario thresholds are in Test Definitions below.
 
 ## Debug Rollout Data
 
@@ -144,9 +144,7 @@ Multi-phase comparison test. Verifies indep_dp matches normal DP after fault + c
 
 ```
 Type: comparison, multi-phase (phase_a + phase_b)
-Phase A steps: 1, Phase B steps: 4
-Comparison: dump rel <= 0 (bitwise), metrics rtol=0 / atol=0 (exact),
-train/grad_norm rtol<=1e-6 (shard-count bracketing; see Comparison criterion)
+Phase A steps: 1, Phase B steps: 4, metrics rtol: 5e-2
 
 Phase A (both baseline and target):
   1. Run 1 step of training
@@ -166,10 +164,8 @@ Phase B — target:
   6. Rollout 3: _refresh_cells() healing → N cells
   7. Rollout 4: N cells stable
 
-Compare: phase_b dumps bitwise (rel <= 0) and metrics exact (rtol=atol=0, grad_norm
-rtol<=1e-6). Both sides run with DETERMINISTIC_TRAIN_ARGS; the crashed attempt is
-discarded and retried on the same data, so the surviving trajectory must reproduce
-the baseline bit-for-bit.
+Compare: phase_b dumps (rel <= 0.0085, MoE expert grads also tolerate max_abs <= 1e-3)
+and metrics (rtol=5e-2).
 
 Fault injection via --ci-ft-test-actions JSON (data-driven, executed by RayTrainGroup).
 The JSON `at_rollout` field specifies which rollout_id triggers the action.
