@@ -53,7 +53,13 @@ def _build_phase_args(mode: FTTestMode, dump_dir: str, *, is_target: bool, enabl
         base += f"--save {dump_dir}/ckpt --save-interval 1 "
         base += f"--debug-exit-after-rollout {NUM_PHASE_A_STEPS} "
     else:
-        phase_a_dir = dump_dir.replace("/phase_b", "/phase_a")
+        # Both sides resume from the BASELINE's phase_a checkpoint so phase_b starts
+        # from identical weights. phase_a trains flat DP on one side and FT cells on
+        # the other, whose reduction orders differ slightly; resuming from per-side
+        # checkpoints leaked that drift into the phase_b comparison (observed: a
+        # run-to-run reproducible rel=0.0113 on a small k_layernorm grad at step 0,
+        # over the 0.85% threshold before any fault was even injected).
+        phase_a_dir = dump_dir.replace("/phase_b", "/phase_a").replace("/target/", "/baseline/")
         base += f"--load {phase_a_dir}/ckpt "
         if is_target:
             base += f"--ci-ft-test-actions '{json.dumps(_WITH_FAILURE_ACTIONS)}' "

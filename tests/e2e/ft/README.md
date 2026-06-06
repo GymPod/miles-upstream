@@ -150,12 +150,16 @@ Phase A (both baseline and target):
   1. Run 1 step of training
   2. Save checkpoint (--save-interval 1)
 
+Phase B (both sides) resumes from the BASELINE's phase_a checkpoint: phase_a trains
+flat DP vs FT cells whose reduction orders differ slightly, and per-side checkpoints
+would leak that drift into the comparison before any fault is injected.
+
 Phase B — baseline:
-  1. Resume from phase_a checkpoint
+  1. Resume from baseline phase_a checkpoint
   2. Run 4 normal steps
 
 Phase B — target:
-  1. Resume from phase_a checkpoint
+  1. Resume from baseline phase_a checkpoint
   2. Rollout 1: N cells normal
   3. Rollout 2, attempt 0: crash_before_allreduce on last cell rank 0
      → os._exit(1) → allreduce timeout → should_commit=false → retry
