@@ -366,6 +366,66 @@ def _check_uneven_reduce_scatter(rank: int, det1: dist.ProcessGroup) -> None:
     _assert_bitwise("uneven reduce_scatter (list)", out, expected)
 
 
+def _expected_slot_fold(rank: int, my_slot_input: torch.Tensor) -> torch.Tensor:
+    """Reference for list reduce_scatter: gather every rank's copy of MY slot and tree-fold."""
+    slot_copies = [torch.empty_like(my_slot_input.contiguous()) for _ in range(_WORLD_SIZE)]
+    dist.all_gather(slot_copies, my_slot_input.contiguous())
+    return _manual_tree_sum(slot_copies)
+
+
+def _check_uneven_reduce_scatter_shapes(rank: int, det1: dist.ProcessGroup) -> None:
+    """List reduce_scatter with per-slot distinct multi-dim shapes, non-contiguous slots/output,
+    bf16, and a forced multi-chunk fold all match the per-slot tree fold bitwise."""
+    import miles.utils.det_process_group as dpg
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    slot_shapes = [(2, 3), (5,), (4, 2), (3, 3)]
+
+    def make_inputs(seed: int, dtype: torch.dtype) -> list[torch.Tensor]:
+        gen = torch.Generator().manual_seed(seed + 17 * rank)
+        return [torch.randn(shape, generator=gen, dtype=dtype).to(device) for shape in slot_shapes]
+
+    # Distinct multi-dim shapes per slot, via the dist API.
+    inputs = make_inputs(_SEED + 400, torch.float32)
+    expected = _expected_slot_fold(rank, inputs[rank])
+    out = torch.empty(slot_shapes[rank], device=device)
+    dist.reduce_scatter(out, inputs, op=dist.ReduceOp.SUM, group=det1)
+    _assert_bitwise("uneven multi-dim reduce_scatter", out.view(-1), expected)
+
+    # bf16 variant.
+    inputs_bf16 = make_inputs(_SEED + 401, torch.bfloat16)
+    expected_bf16 = _expected_slot_fold(rank, inputs_bf16[rank])
+    out_bf16 = torch.empty(slot_shapes[rank], dtype=torch.bfloat16, device=device)
+    dist.reduce_scatter(out_bf16, inputs_bf16, op=dist.ReduceOp.SUM, group=det1)
+    _assert_bitwise("uneven bf16 reduce_scatter", out_bf16.view(-1), expected_bf16)
+
+    # Non-contiguous slot inputs and a non-contiguous output, via the group method
+    # directly (the dist wrapper would densify).
+    nc_shapes = [(3, 2), (5, 1), (2, 4), (3, 3)]
+    bases = make_inputs(_SEED + 402, torch.float32)
+    nc_inputs = [base.reshape(shape).t() for base, shape in zip(bases, nc_shapes, strict=True)]
+    assert all(not t.is_contiguous() for t in nc_inputs if t.dim() > 1 and min(t.shape) > 1)
+    expected_nc = _expected_slot_fold(rank, nc_inputs[rank])
+    out_base = torch.empty(nc_shapes[rank], device=device)
+    out_nc = out_base.t()
+    opts = dist.ReduceScatterOptions()
+    opts.reduceOp = dist.ReduceOp.SUM
+    det1.reduce_scatter([out_nc], [nc_inputs], opts).wait()
+    _assert_bitwise("uneven non-contiguous reduce_scatter", out_nc.contiguous().view(-1), expected_nc)
+
+    # Forced multi-chunk fold through the real gather path.
+    original_cap = dpg._GATHER_BUFFER_CAP_BYTES
+    dpg._GATHER_BUFFER_CAP_BYTES = _WORLD_SIZE * 2 * 4
+    try:
+        inputs_chunked = make_inputs(_SEED + 403, torch.float32)
+        expected_chunked = _expected_slot_fold(rank, inputs_chunked[rank])
+        out_chunked = torch.empty(slot_shapes[rank], device=device)
+        dist.reduce_scatter(out_chunked, inputs_chunked, op=dist.ReduceOp.SUM, group=det1)
+    finally:
+        dpg._GATHER_BUFFER_CAP_BYTES = original_cap
+    _assert_bitwise("uneven multi-chunk reduce_scatter", out_chunked.view(-1), expected_chunked)
+
+
 def _check_coalescing_manager(rank: int, det1: dist.ProcessGroup, x, tree, x2, tree2) -> None:
     device = torch.device("cuda", torch.cuda.current_device())
 
@@ -611,6 +671,7 @@ def _worker(rank: int, world_size: int, port: int) -> None:
     _check_allreduce(rank, det1, det2, x, tree)
     _check_reduce_scatter_vs_allreduce(rank, det1, x, tree)
     _check_uneven_reduce_scatter(rank, det1)
+    _check_uneven_reduce_scatter_shapes(rank, det1)
     _check_coalescing_manager(rank, det1, x, tree, x2, tree2)
     _check_non_contiguous(rank, det1)
     _check_delegation(rank, det1)
