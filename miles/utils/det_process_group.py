@@ -96,9 +96,10 @@ class DetProcessGroup(BaseProcessGroup):
             f"{self.size()} x output numel {output.numel()}"
         )
 
-        self._det_reduce_scatter(
+        det_reduce_scatter(
             output,
             input.contiguous().view(-1),
+            group=self._inner,
             out_offset=self.rank() * output.numel(),
             reduce_op=reduce_op,
         )
@@ -118,23 +119,14 @@ class DetProcessGroup(BaseProcessGroup):
             assert (
                 flat_inputs[self.rank()].numel() == output.numel()
             ), f"slot {self.rank()} numel {flat_inputs[self.rank()].numel()} != output numel {output.numel()}"
-            self._det_reduce_scatter(
+            det_reduce_scatter(
                 output,
                 torch.cat(flat_inputs),
+                group=self._inner,
                 out_offset=sum(t.numel() for t in flat_inputs[: self.rank()]),
                 reduce_op=reduce_op,
             )
         return _CompletedWork()
-
-    def _det_reduce_scatter(
-        self, output: torch.Tensor, flat_input: torch.Tensor, *, out_offset: int, reduce_op: object
-    ) -> None:
-        out_flat = output.view(-1) if output.is_contiguous() else torch.empty_like(output).view(-1)
-        _det_chunked_fold(flat_input, out_flat, out_offset=out_offset, group=self._inner)
-        if not output.is_contiguous():
-            output.copy_(out_flat.view(output.shape))
-        if reduce_op == dist.ReduceOp.AVG:
-            output.div_(self.size())
 
     # ------------------------------------------------------------------ #
     # Plain delegation
@@ -222,6 +214,25 @@ def det_all_reduce(tensor: torch.Tensor, *, group: dist.ProcessGroup, reduce_op:
     _det_chunked_fold(flat, flat, out_offset=0, group=group)
     if reduce_op == dist.ReduceOp.AVG:
         flat.div_(group.size())
+
+
+def det_reduce_scatter(
+    output: torch.Tensor,
+    flat_input: torch.Tensor,
+    *,
+    group: dist.ProcessGroup,
+    out_offset: int,
+    reduce_op: object = dist.ReduceOp.SUM,
+) -> None:
+    """SUM/AVG-reduce ``flat_input`` across ranks with the fixed fold and write the
+    window ``[out_offset, out_offset + output.numel())`` of the result into ``output``.
+    """
+    out_flat = output.view(-1) if output.is_contiguous() else torch.empty_like(output).view(-1)
+    _det_chunked_fold(flat_input, out_flat, out_offset=out_offset, group=group)
+    if not output.is_contiguous():
+        output.copy_(out_flat.view(output.shape))
+    if reduce_op == dist.ReduceOp.AVG:
+        output.div_(group.size())
 
 
 def _det_chunked_fold(
