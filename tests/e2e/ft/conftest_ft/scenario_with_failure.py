@@ -46,7 +46,7 @@ _WITH_FAILURE_ACTIONS: list[dict] = [
 ]
 
 
-def _build_phase_args(mode: FTTestMode, dump_dir: str, *, is_target: bool, enable_dumper: bool = True) -> str:
+def _build_phase_args(mode: FTTestMode, dump_dir: str, *, is_target: bool, enable_dumper: bool = True) -> str | None:
     is_phase_a: bool = dump_dir.endswith("phase_a")
     base = get_common_train_args(mode, dump_dir=dump_dir, num_steps=NUM_PHASE_B_STEPS, enable_dumper=enable_dumper)
 
@@ -84,12 +84,11 @@ def _build_phase_args(mode: FTTestMode, dump_dir: str, *, is_target: bool, enabl
         base += f"--save {dump_dir}/ckpt --save-interval 1 "
         base += f"--debug-exit-after-rollout {NUM_PHASE_A_STEPS} "
     elif is_datagen:
-        if mode.has_real_rollout and not is_target:
-            base += f"--load {baseline_phase_a}/ckpt "
-        else:
-            # The pipeline runs every phase on both sides; only the baseline's
-            # generated data is consumed, so everything else is a no-op run.
-            base += "--num-rollout 0 "
+        # Only the baseline generates data; every other (side, mode) combination
+        # skips this phase entirely.
+        if not (mode.has_real_rollout and not is_target):
+            return None
+        base += f"--load {baseline_phase_a}/ckpt "
     else:
         # Both sides resume from the BASELINE's phase_a checkpoint so phase_b starts
         # from identical weights and optimizer state.
