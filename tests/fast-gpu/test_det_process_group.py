@@ -204,9 +204,7 @@ def test_det_reduce_scatter_multi_chunk_slice_matches_full_fold(monkeypatch: pyt
     monkeypatch.setattr(dpg, "_GATHER_BUFFER_CAP_BYTES", _WORLD_SIZE * 7 * 4)
     rank = 1
     out = torch.empty(12, dtype=torch.float32)
-    dpg.det_reduce_scatter(
-        out, per_rank[0].clone(), group=_FakeFlatGroup(per_rank), rank=rank, world_size=_WORLD_SIZE
-    )
+    dpg.det_reduce_scatter(out, per_rank[0].clone(), group=_FakeFlatGroup(per_rank), rank=rank, world_size=_WORLD_SIZE)
 
     assert torch.equal(out, expected_full[12:24])
 

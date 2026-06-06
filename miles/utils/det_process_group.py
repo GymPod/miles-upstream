@@ -107,9 +107,9 @@ class DetProcessGroup(BaseProcessGroup):
         for output, inputs in zip(output_tensors, input_tensors, strict=True):
             # Slot j has one size on every rank (sizes may differ between slots);
             # every rank joins each slot's fold, only rank j keeps the result.
-            assert inputs[self.rank()].numel() == output.numel(), (
-                f"slot {self.rank()} numel {inputs[self.rank()].numel()} != output numel {output.numel()}"
-            )
+            assert (
+                inputs[self.rank()].numel() == output.numel()
+            ), f"slot {self.rank()} numel {inputs[self.rank()].numel()} != output numel {output.numel()}"
             for slot, slot_input in enumerate(inputs):
                 _det_reduce_scatter_slot(
                     output if slot == self.rank() else None, slot_input, group=self._inner, reduce_op=reduce_op
@@ -216,9 +216,9 @@ def det_reduce_scatter(
     """SUM/AVG-reduce ``input`` across ranks with the fixed fold and write this rank's
     ``1/world_size`` slice into ``output`` (mirrors ``dist.reduce_scatter_tensor``).
     """
-    assert input.numel() == world_size * output.numel(), (
-        f"uneven reduce_scatter: input numel {input.numel()} != {world_size} x output numel {output.numel()}"
-    )
+    assert (
+        input.numel() == world_size * output.numel()
+    ), f"uneven reduce_scatter: input numel {input.numel()} != {world_size} x output numel {output.numel()}"
 
     flat = input.contiguous().view(-1)
     slot_numel = output.numel()
