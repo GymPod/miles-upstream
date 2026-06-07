@@ -234,7 +234,13 @@ def _det_reduce_scatter_slot(
         _det_chunked_fold(flat_input, None, group=group)
         return
 
-    out_flat = output.view(-1) if output.is_contiguous() else torch.empty_like(output).view(-1)
+    # NOTE: empty_like preserves the (non-contiguous) layout, so it cannot be view(-1)'d;
+    # allocate the staging buffer flat directly.
+    out_flat = (
+        output.view(-1)
+        if output.is_contiguous()
+        else torch.empty(output.numel(), dtype=output.dtype, device=output.device)
+    )
     _det_chunked_fold(flat_input, out_flat, group=group)
     if not output.is_contiguous():
         output.copy_(out_flat.view(output.shape))
