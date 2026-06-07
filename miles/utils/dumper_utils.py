@@ -25,9 +25,6 @@ class DumperPhase(enum.Enum):
     FWD_BWD = "fwd_bwd"
 
 
-_PHASES_PARENT_WIPED: set[DumperPhase] = set()
-
-
 # ------------------------------- SGLang -------------------------------------
 
 
@@ -80,6 +77,14 @@ async def configure_sglang(args: Namespace) -> None:
 
 
 # ------------------------------- Megatron -------------------------------------
+
+
+@dataclasses.dataclass
+class _DumperMegatronUtilGlobalState:
+    phases_parent_wiped: set[DumperPhase] = dataclasses.field(default_factory=set)
+
+
+_dumper_megatron_util_global_state = _DumperMegatronUtilGlobalState()
 
 
 class DumperMegatronUtil:
@@ -157,8 +162,8 @@ class DumperMegatronUtil:
 
         full_config = DumperConfig(**merged)
         dumper.reset()
-        if phase not in _PHASES_PARENT_WIPED:
-            _PHASES_PARENT_WIPED.add(phase)
+        if phase not in _dumper_megatron_util_global_state.phases_parent_wiped:
+            _dumper_megatron_util_global_state.phases_parent_wiped.add(phase)
             _cleanup_dump_dir(Path(merged["dir"]) / phase.value)
         _cleanup_dump_dir(Path(merged["dir"]) / merged["exp_name"])
         dumper.configure(**dataclasses.asdict(full_config))

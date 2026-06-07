@@ -72,11 +72,11 @@ class TestDumperMegatronUtilConfigure:
     """Per-rollout dump directory layout and the process-level parent-wipe latch."""
 
     @pytest.fixture(autouse=True)
-    def reset_latch(self):
-        """Each test starts with a clean per-phase parent-wipe latch."""
-        dumper_utils._PHASES_PARENT_WIPED.clear()
+    def reset_global_state(self):
+        """Each test starts with fresh dumper-megatron global state."""
+        dumper_utils._dumper_megatron_util_global_state = dumper_utils._DumperMegatronUtilGlobalState()
         yield
-        dumper_utils._PHASES_PARENT_WIPED.clear()
+        dumper_utils._dumper_megatron_util_global_state = dumper_utils._DumperMegatronUtilGlobalState()
 
     @pytest.fixture()
     def parallel_state(self):
@@ -123,7 +123,7 @@ class TestDumperMegatronUtilConfigure:
         self._configure(args, phase=DumperPhase.FWD_BWD, rollout_id=0)
 
         assert not phase_parent.exists()
-        assert DumperPhase.FWD_BWD in dumper_utils._PHASES_PARENT_WIPED
+        assert DumperPhase.FWD_BWD in dumper_utils._dumper_megatron_util_global_state.phases_parent_wiped
 
     def test_second_configure_does_not_wipe_parent_only_own_subdir(self, tmp_path: Path, parallel_state) -> None:
         """The second rollout keeps sibling rollout dirs and only cleans/recreates its own subdir."""
@@ -148,4 +148,7 @@ class TestDumperMegatronUtilConfigure:
         args = _make_args(tmp_path)
         self._configure(args, phase=DumperPhase.FWD_BWD, rollout_id=0)
         self._configure(args, phase=DumperPhase.FWD_ONLY, rollout_id=0)
-        assert dumper_utils._PHASES_PARENT_WIPED == {DumperPhase.FWD_BWD, DumperPhase.FWD_ONLY}
+        assert dumper_utils._dumper_megatron_util_global_state.phases_parent_wiped == {
+            DumperPhase.FWD_BWD,
+            DumperPhase.FWD_ONLY,
+        }
