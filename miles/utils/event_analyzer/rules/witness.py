@@ -118,7 +118,7 @@ def _find_mismatches(
     expected_witness_ids_of_step: dict[int, set[int]],
     zero_adv_witness_ids_by_rollout: dict[int, set[int]],
 ) -> Iterator[WitnessIssue]:
-    latest_witness_events = _filter_to_latest_attempt(
+    latest_attempt_witness_events = _filter_to_latest_attempt(
         all_witness_events, group_key=lambda e: (e.rollout_id, e.source.cell_index)
     )
 
@@ -132,7 +132,9 @@ def _find_mismatches(
                 continue
 
             witness_events_of_cell = [
-                e for e in latest_witness_events if e.rollout_id == rollout_id and e.source.cell_index == cell_index
+                e
+                for e in latest_attempt_witness_events
+                if e.rollout_id == rollout_id and e.source.cell_index == cell_index
             ]
 
             if not witness_events_of_cell:
