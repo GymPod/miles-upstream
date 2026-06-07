@@ -317,7 +317,7 @@ def main(
         experiments = [only]
 
     results: dict[str, str] = {}
-    for i, exp in enumerate(experiments):
+    for exp in experiments:
         cell_store = TCPStore(host_name="localhost", port=0, is_master=True, wait_for_workers=False)
         results[exp] = _run(
             exp,
