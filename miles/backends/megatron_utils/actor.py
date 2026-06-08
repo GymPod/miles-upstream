@@ -354,6 +354,22 @@ class MegatronTrainRayActor(TrainRayActor):
         for iterator in data_iterator:
             iterator.reset()
 
+    def _ft_sync_before_forward(self) -> None:
+        """Drain the device and CPU-barrier the intra-cell ranks to a clean epoch boundary.
+
+        On the FT rejoin path a freshly respawned cell can enter the first heavy MoE+CP forward
+        while the quorum reconfigure's NCCL traffic is still in flight; the concurrent intra-cell
+        communicators (TP/CP/EP/expert-TP) then deadlock mid-forward (NCCL multi-communicator
+        hazard: no outstanding ops when changing communicators, and ops must be submitted at the
+        same epoch across ranks). Draining the device per rank and synchronizing the intra-cell
+        ranks via a gloo (CPU) barrier -- which does not touch the possibly-wedged NCCL comms --
+        forces a clean epoch boundary before the forward. Numerically inert.
+        """
+        if not self.args.use_fault_tolerance:
+            return
+        torch.cuda.synchronize()
+        dist.barrier(group=get_gloo_group())
+
     def compute_log_prob(
         self,
         data_iterator: list[DataIterator],
@@ -361,6 +377,7 @@ class MegatronTrainRayActor(TrainRayActor):
         rollout_id: int,
         store_prefix: str = "",
     ) -> dict[str, list[torch.Tensor]]:
+        self._ft_sync_before_forward()
 
         with timer(f"{store_prefix}log_probs"):
             return forward_only(
@@ -385,6 +402,7 @@ class MegatronTrainRayActor(TrainRayActor):
     ) -> TrainStepOutcome:
         self._heartbeat.bump()
         self._last_rollout_id = rollout_id
+        self._ft_sync_before_forward()
         if self.args.offload_train:
             self.wake_up()
 
