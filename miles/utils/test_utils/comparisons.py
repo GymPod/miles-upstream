@@ -63,17 +63,22 @@ def compare_dumps(
 
     failed_leaves: list[str] = []
     for leaf in baseline_leaves:
-        # FT retries re-run a rollout in the same process: the failed attempt leaves
-        # partial dumps at a lower dumper step and the successful (final) attempt lands
-        # at the highest step. Compare only the final attempt against baseline's single
-        # clean attempt -- the dump analog of compare_metrics._keep_only_final_attempt.
+        # Weights/grads (param__/grad__, the tensors we compare) are dumped once per rollout
+        # at finalize -- at the dumper's last/max `step`. A clean rollout is a single
+        # microbatch, so everything (incl weights/grads) is at step=0. After a crash the
+        # rollout re-runs on the surviving cell, which covers the full global batch over more
+        # dumper steps, so the target's weights/grads land at a higher step than baseline's
+        # step=0. Restrict the target to its max step (where its weights/grads are) and skip
+        # `step` in grouping (in _run_comparator) so they align with baseline. Lower-step
+        # entries are per-microbatch model inputs (input_ids/cu_seqlens/qkv_format), covered
+        # by the skip/allow-failed patterns.
         target_steps = _distinct_dump_steps(target_root / leaf)
         final_step: int | None = None
         if len(target_steps) > 1:
             baseline_steps = _distinct_dump_steps(baseline_root / leaf)
             assert len(baseline_steps) == 1, (
-                f"Baseline leaf {leaf} unexpectedly holds multiple dump steps "
-                f"{sorted(baseline_steps)}; baseline has no FT retries (one attempt)."
+                f"Baseline leaf {leaf} unexpectedly spans multiple dump steps "
+                f"{sorted(baseline_steps)}; expected one microbatch (weights/grads at step 0)."
             )
             final_step = max(target_steps)
 
