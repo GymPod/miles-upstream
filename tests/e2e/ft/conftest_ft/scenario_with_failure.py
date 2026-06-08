@@ -68,12 +68,19 @@ def _compare(dump_dir: str, mode: FTTestMode) -> None:
         key_prefixes=["train/"],
         exclude_keys=[],
     )
+    # Skip 'step' in grouping: after the crash the rollout re-runs on the surviving cell,
+    # which processes the full global batch over more dumper microbatches than baseline, so
+    # the target's once-per-rollout weights/grads land at a higher dumper step (finalize)
+    # than baseline's. Weights/grads are dumped exactly once per rollout, so 'step' carries
+    # no meaning for them -- skipping it matches them by name regardless of which step each
+    # landed on. The per-microbatch model inputs genuinely differ and are skip/allow-failed.
     compare_dumps(
         baseline_dir=f"{dump_dir}/baseline/phase_b",
         target_dir=f"{dump_dir}/target/phase_b",
         diff_thresholds=TOLERANCE_DIFF_THRESHOLDS,
         allow_skipped_pattern=INPUT_TENSORS_SKIP_PATTERN,
         allow_failed_pattern=INPUT_TENSORS_ALLOW_FAILED_PATTERN,
+        grouping_skip_keys=["rank", "step"],
     )
     print("With-failure comparison test PASSED")
 
