@@ -155,6 +155,21 @@ _TRAINER_FT_ENV_VARS: dict[str, str] = {
     "MILES_EXPERIMENTAL_FT_TRAINER": "1",
 }
 
+# Run the model eager (disable Megatron's `jit_fuser = torch.compile`). On the FT rejoin
+# path a freshly respawned cell must JIT-compile + cuModuleLoad its fused-op kernels on the
+# first forward; that load deadlocks against the in-flight cross-cell NCCL collective and
+# never completes (forensics: py-spy stuck in static_triton_launcher.load_kernel /
+# triton._init_handles, cuda-gdb shows a ncclDevKernel_AllReduce spinning on the same device;
+# a 540s timeout did not help, so it is an infinite deadlock, not a slow compile). Startup is
+# fine because all cells compile symmetrically; only the warm-survivor vs cold-rejoin
+# asymmetry deadlocks. This is a torch.compile<->NCCL infra incompatibility, independent of
+# the FT logic under test. Disabling the JIT fuser for both baseline and target keeps them
+# numerically consistent (all asserts stay strict) and lets the FT crash-recovery / numerical
+# -equivalence assertions run. See agent-context 2026-06-08-600s-cell-rejoin-hang.md.
+_DISABLE_TORCH_COMPILE_ENV_VARS: dict[str, str] = {
+    "TORCHDYNAMO_DISABLE": "1",
+}
+
 
 def run_training(
     train_args: str,
@@ -165,7 +180,12 @@ def run_training(
 ) -> None:
     if dump_dir is not None and os.path.exists(dump_dir):
         shutil.rmtree(dump_dir)
-    merged_env_vars = {**_DETERMINISTIC_ENV_VARS, **_TRAINER_FT_ENV_VARS, **(extra_env_vars or {})}
+    merged_env_vars = {
+        **_DETERMINISTIC_ENV_VARS,
+        **_TRAINER_FT_ENV_VARS,
+        **_DISABLE_TORCH_COMPILE_ENV_VARS,
+        **(extra_env_vars or {}),
+    }
     U.execute_train(
         train_args=train_args,
         num_gpus_per_node=mode.train_gpus_per_node,
