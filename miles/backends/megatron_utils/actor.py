@@ -721,32 +721,23 @@ class MegatronTrainRayActor(TrainRayActor):
         )
 
     def warmup_intra_cell_pgs(self) -> None:
-        """Warm up this cell's intra-cell NCCL process groups (collective AND point-to-point
-        channels) with a bounded timeout, right after a quorum reconfigure/rejoin and before
-        the next train step.
+        """Exercise this cell's intra-cell NCCL process groups with a bounded timeout,
+        right after a quorum reconfigure/rejoin and before the next train step.
 
-        Root cause this addresses (empirically nailed, see agent-context
-        2026-06-08-600s-cell-rejoin-hang.md): after a cell rejoins it rebuilds its intra-cell
-        communicators (pipeline, cp, ...) from scratch. NCCL establishes point-to-point
-        send/recv channels LAZILY on first use, separately from collective channels. The first
-        real pipeline P2P (recv_forward / _communicate_shapes) is therefore the first P2P on
-        the fresh communicator, and its channel setup -- racing with the concurrent rejoin /
-        quorum / checkpoint traffic -- can hang until the NCCL watchdog tears the process down.
-        A plain barrier does NOT cover this: it only warms collective channels (which is why a
-        warm-up barrier passes yet training still deadlocks). So here we (1) barrier each group
-        to warm collective channels, then (2) do a tiny P2P round-trip on the pipeline and cp
-        groups to pre-establish the P2P channels, so the first real recv_forward reuses an
-        already-established channel instead of setting one up under contention.
+        A cell that just rejoined rebuilds its intra-cell communicators (pipeline, cp,
+        ...) from scratch; if one fails to match on first use, the first real collective
+        (e.g. the pipeline P2P shape exchange in recv_forward) would hang until the 600s
+        NCCL watchdog tears the process down. Running a barrier per group here surfaces
+        such a desync within _REJOIN_WARMUP_PG_TIMEOUT and lets it become a normal
+        errored-cell retry (the controller kills+confirms the cell and re-heals).
 
-        Only INTRA-cell groups are exercised, never the cross-cell indep_dp group: a failure
-        then stays cell-local (errors just this cell -> normal errored-cell retry), whereas a
-        cross-cell op would propagate one cell's desync into its peer and could error both at
-        once.
+        Only INTRA-cell groups are exercised, never the cross-cell indep_dp group: a
+        barrier failure then stays cell-local (errors just this cell), whereas a
+        cross-cell barrier would propagate one cell's desync into its peer and could
+        error both cells at once.
         """
         parallel_state = get_parallel_state()
-        device = torch.cuda.current_device()
-
-        collective_groups: list[tuple[str, dist.ProcessGroup]] = []
+        groups: list[tuple[str, dist.ProcessGroup]] = []
         for name, info in [
             ("pp", parallel_state.pp),
             ("cp", parallel_state.cp),
@@ -754,31 +745,11 @@ class MegatronTrainRayActor(TrainRayActor):
             ("tp", parallel_state.tp),
         ]:
             if info.group is not None and info.size > 1:
-                collective_groups.append((name, info.group))
-        collective_groups.append(("world", dist.group.WORLD))
-        for name, group in collective_groups:
-            dist.barrier(group=group, async_op=True).wait(timeout=_REJOIN_WARMUP_PG_TIMEOUT)
+                groups.append((name, info.group))
+        groups.append(("world", dist.group.WORLD))
 
-        # Pre-establish P2P channels on the groups that use point-to-point in training
-        # (pipeline send/recv; cp ring-attention exchange).
-        for name, info in [("pp", parallel_state.pp), ("cp", parallel_state.cp)]:
-            if info.group is not None and info.size > 1:
-                self._warmup_p2p_roundtrip(info.group, device)
-
-        torch.cuda.synchronize()
-        logger.info("Post-reconfigure intra-cell PG warm-up passed (barriers + pp/cp P2P round-trip)")
-
-    @staticmethod
-    def _warmup_p2p_roundtrip(group: "dist.ProcessGroup", device: "torch.device") -> None:
-        """Exchange a 1-element tensor with every other rank in `group` to force NCCL to
-        establish point-to-point channels, with a bounded wait so a stuck setup surfaces fast."""
-        my_rank = dist.get_rank()
-        peers = [r for r in dist.get_process_group_ranks(group) if r != my_rank]
-        if not peers:
-            return
-        send_t = torch.ones(1, dtype=torch.float32, device=device)
-        recv_ts = [torch.empty(1, dtype=torch.float32, device=device) for _ in peers]
-        ops = [dist.P2POp(dist.isend, send_t, peer, group=group) for peer in peers]
-        ops += [dist.P2POp(dist.irecv, rt, peer, group=group) for peer, rt in zip(peers, recv_ts)]
-        for work in dist.batch_isend_irecv(ops):
+        for name, group in groups:
+            work = dist.barrier(group=group, async_op=True)
             work.wait(timeout=_REJOIN_WARMUP_PG_TIMEOUT)
+        torch.cuda.synchronize()
+        logger.info(f"Post-reconfigure intra-cell PG warm-up passed ({[n for n, _ in groups]})")
