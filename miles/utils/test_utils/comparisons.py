@@ -88,11 +88,6 @@ def compare_dumps(
 
 
 def _find_leaf_dump_dirs(root: Path) -> list[str]:
-    """Relative paths of dirs that directly contain .pt files (searched recursively).
-
-    Returns ['.'] when .pt files sit directly in root. The sglang comparator treats one
-    such dir as a single flat dump set, so each leaf is one comparison unit.
-    """
     leaves: set[str] = {str(p.parent.relative_to(root)) for p in root.rglob("*.pt")}
     return sorted(leaves)
 
