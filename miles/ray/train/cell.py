@@ -133,8 +133,7 @@ class RayTrainCell:
         handles = self._get_actor_handles() if self.is_allocated else []
         self.stop()
 
-        for handle in handles:
-            await _confirm_actor_dead(handle)
+        await asyncio.gather(*[_confirm_actor_dead(handle) for handle in handles])
 
     def mark_as_pending(self) -> None:
         if self.is_pending or self.is_allocated:
