@@ -73,6 +73,12 @@ def get_common_train_args(
             "--debug-train-only "
             "--rollout-batch-size 32 "
             "--n-samples-per-prompt 8 "
+            # The real-rollout path sets --deterministic-mode; the debug-train-only path did not.
+            # MoE routing/dispatch has determinism-sensitive ops (router topk, token sorting); without
+            # this the freshly respawned cell's expert-parallel collectives can diverge across ranks
+            # and deadlock on rejoin. Strengthens determinism (not a weakening); applied to both
+            # baseline and target so they stay numerically consistent.
+            "--deterministic-mode "
         )
     else:
         rollout_args = (
