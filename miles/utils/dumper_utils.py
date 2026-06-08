@@ -119,15 +119,10 @@ class DumperMegatronUtil:
             _log_model_grad_coverage(extracted_model)
             get_grad = _build_full_grad_getter(extracted_model)
 
-        # Pin the model dump (weights/grads) to the canonical step 0. These are a
-        # once-per-rollout end-state, not a per-microbatch artifact, but they are dumped
-        # at the dumper's current `step` -- which the per-microbatch stepping (see
-        # _wrap_forward_step_with_stepping) advances to (num_microbatches - 1). A clean
-        # rollout runs 1 microbatch (step 0); a crashed/healed rollout re-runs on the
-        # surviving cell over the full global batch in more microbatches, landing its
-        # weights/grads at a higher step. Pinning to step 0 keeps both aligned for the
-        # dump comparison regardless of microbatch count (per-microbatch activations/inputs
-        # keep their own steps; dump_index still makes filenames unique).
+        # Weights/grads are a once-per-rollout end-state, so pin them to step 0 instead of
+        # the running per-microbatch step. Otherwise a crashed/healed rollout (more
+        # microbatches on the surviving cell) lands them at a higher step than baseline's
+        # step 0 and the dump comparison misaligns.
         dumper.dump_model(extracted_model, get_grad=get_grad, step=0)
         dumper.step()
         dumper.configure(enable=False)
