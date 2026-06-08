@@ -165,19 +165,7 @@ def run_training(
 ) -> None:
     if dump_dir is not None and os.path.exists(dump_dir):
         shutil.rmtree(dump_dir)
-    # Eagerly establish the full NCCL connection mesh at communicator init instead of lazily
-    # connecting on first use. On the FT rejoin path the freshly respawned cell otherwise
-    # lazily establishes some connections (e.g. the CP ring-attention batch_isend_irecv P2P
-    # links) mid-forward, concurrently with the EP/TP collectives, which deadlocks (NCCL's
-    # documented multi-communicator P2P+collective hazard). Numerically inert (a connection
-    # setting), applied to both baseline and target.
-    _EAGER_CONNECT_ENV_VARS: dict[str, str] = {"NCCL_RUNTIME_CONNECT": "0"}
-    merged_env_vars = {
-        **_DETERMINISTIC_ENV_VARS,
-        **_TRAINER_FT_ENV_VARS,
-        **_EAGER_CONNECT_ENV_VARS,
-        **(extra_env_vars or {}),
-    }
+    merged_env_vars = {**_DETERMINISTIC_ENV_VARS, **_TRAINER_FT_ENV_VARS, **(extra_env_vars or {})}
     U.execute_train(
         train_args=train_args,
         num_gpus_per_node=mode.train_gpus_per_node,
