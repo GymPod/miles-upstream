@@ -174,6 +174,44 @@ class MegatronTrainRayActor(TrainRayActor):
 
         verify_megatron_parallel_state(self.model)
 
+        if args.use_fault_tolerance:
+            # On the FT rejoin path a freshly respawned cell's MoE expert-parallel all_to_all hangs
+            # on first real use even with consistent splits and both members present (verified via
+            # per-rank trace), while a continuously-running cell is fine. Eagerly establish the
+            # EXACT NCCL comms the MoE token dispatcher uses -- found by walking the model, since
+            # they may be different PG objects than miles' ParallelState groups -- before any
+            # training collective. The EP comm needs an actual all_to_all to establish its channels
+            # (a barrier does not); the tp_ep count-exchange comm needs an all_gather.
+            warmup_device = torch.cuda.current_device()
+            warmed_group_ids: set[int] = set()
+            for model_chunk in self.model:
+                for submodule in model_chunk.modules():
+                    dispatcher = getattr(submodule, "token_dispatcher", None)
+                    if dispatcher is None:
+                        continue
+                    ep_group = getattr(dispatcher, "ep_group", None)
+                    if ep_group is not None and id(ep_group) not in warmed_group_ids:
+                        n = dist.get_world_size(ep_group)
+                        if n > 1:
+                            dist.all_to_all_single(
+                                torch.zeros(n, device=warmup_device),
+                                torch.zeros(n, device=warmup_device),
+                                group=ep_group,
+                            )
+                        warmed_group_ids.add(id(ep_group))
+                    tp_ep_group = getattr(dispatcher, "tp_ep_group", None)
+                    if tp_ep_group is not None and id(tp_ep_group) not in warmed_group_ids:
+                        n = dist.get_world_size(tp_ep_group)
+                        if n > 1:
+                            dist.all_gather_into_tensor(
+                                torch.zeros(n, device=warmup_device),
+                                torch.zeros(1, device=warmup_device),
+                                group=tp_ep_group,
+                            )
+                        warmed_group_ids.add(id(tp_ep_group))
+            torch.cuda.synchronize()
+            logger.info(f"FT: warmed up {len(warmed_group_ids)} MoE dispatcher NCCL comms")
+
         if role == "critic":
             if self.args.offload_train:
                 self.sleep()
