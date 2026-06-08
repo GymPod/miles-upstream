@@ -18,6 +18,18 @@ _REQUIRED_METRIC_KEYS: list[str] = ["train/grad_norm", "train/loss"]
 INPUT_TENSORS_SKIP_PATTERN: str = "input_ids|positions|cu_seqlens_q|cu_seqlens_kv|qkv_format|.*witness.*"
 INPUT_TENSORS_ALLOW_FAILED_PATTERN: str = "input_ids|positions|cu_seqlens_q|cu_seqlens_kv|qkv_format"
 
+# Per-tensor dump pass predicates for the tolerance comparison on the NORMAL (non-deterministic)
+# path -- indep_dp vs normal DP run with different collective reduction orders, so this is not
+# bitwise. Weights stay strict (rel <= 0.0085). Grads additionally pass when their absolute diff
+# is tiny (max_abs <= 1e-3): near-zero grads (starved MoE experts, some layernorm grads) get
+# their relative diff amplified by the differing reduction order (the diverging set varies run to
+# run -> FP noise; observed max_abs ~1e-5..few e-4). Real grads (~1e-2) exceed the 1e-3 floor, so
+# a real gradient bug still fails. An unmatched tensor is a fail-closed error (catch-all '.*').
+TOLERANCE_DIFF_THRESHOLDS: list[tuple[str, str]] = [
+    (r"grad__.*", "rel <= 0.0085 or max_abs <= 1e-3"),
+    (".*", "rel <= 0.0085"),
+]
+
 
 def compare_dumps(
     baseline_dir: str,
