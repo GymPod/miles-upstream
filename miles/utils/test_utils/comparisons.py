@@ -29,27 +29,54 @@ def compare_dumps(
     extra_args: list[str] | None = None,
 ) -> None:
     subdir = phase_subdir or ""
-    baseline_path = Path(baseline_dir) / "dumps" / subdir
-    target_path = Path(target_dir) / "dumps" / subdir
+    baseline_root = Path(baseline_dir) / "dumps" / subdir
+    target_root = Path(target_dir) / "dumps" / subdir
 
-    assert baseline_path.exists(), f"Baseline dump dir does not exist: {baseline_path}"
-    assert target_path.exists(), f"Target dump dir does not exist: {target_path}"
+    assert baseline_root.exists(), f"Baseline dump dir does not exist: {baseline_root}"
+    assert target_root.exists(), f"Target dump dir does not exist: {target_root}"
 
-    result = _run_comparator(
-        baseline_path=baseline_path,
-        target_path=target_path,
-        diff_thresholds=diff_thresholds,
-        allow_skipped_pattern=allow_skipped_pattern,
-        allow_failed_pattern=allow_failed_pattern,
-        extra_args=extra_args,
+    # Dumps are segmented into leaf dirs (e.g. fwd_bwd/rollout_<id>), each a flat set of
+    # .pt files with its own per-leaf step numbering. The sglang comparator compares one
+    # flat dir at a time, so compare each matching leaf pair independently.
+    baseline_leaves = _find_leaf_dump_dirs(baseline_root)
+    target_leaves = _find_leaf_dump_dirs(target_root)
+
+    assert baseline_leaves, f"No .pt dump files found under {baseline_root}"
+    assert baseline_leaves == target_leaves, (
+        f"Dump leaf-dir mismatch: baseline={baseline_leaves} vs target={target_leaves} "
+        f"(under {baseline_root} vs {target_root})"
     )
 
-    assert result.returncode == 0, (
-        f"Dump comparator failed (rc={result.returncode}): {baseline_path} vs {target_path}. "
-        f"The comparator applies the per-tensor predicates ({diff_thresholds}) and the allow/skip "
-        f"patterns itself; see comparator_report.jsonl under {target_path} for the offending tensors."
+    failed_leaves: list[str] = []
+    for leaf in baseline_leaves:
+        result = _run_comparator(
+            baseline_path=baseline_root / leaf,
+            target_path=target_root / leaf,
+            diff_thresholds=diff_thresholds,
+            allow_skipped_pattern=allow_skipped_pattern,
+            allow_failed_pattern=allow_failed_pattern,
+            extra_args=extra_args,
+        )
+        if result.returncode != 0:
+            failed_leaves.append(leaf)
+
+    assert not failed_leaves, (
+        f"Dump comparator failed (rc!=0) for {len(failed_leaves)}/{len(baseline_leaves)} leaf dir(s): "
+        f"{failed_leaves} (baseline {baseline_root} vs target {target_root}). The comparator applies the "
+        f"per-tensor predicates ({diff_thresholds}) and the allow/skip patterns itself; see "
+        f"comparator_report.jsonl under {target_root}/<leaf> for the offending tensors."
     )
-    print(f"Dump comparison passed: {baseline_path} vs {target_path}")
+    print(f"Dump comparison passed: {len(baseline_leaves)} leaf dir(s) under {baseline_root} vs {target_root}")
+
+
+def _find_leaf_dump_dirs(root: Path) -> list[str]:
+    """Relative paths of dirs that directly contain .pt files (searched recursively).
+
+    Returns ['.'] when .pt files sit directly in root. The sglang comparator treats one
+    such dir as a single flat dump set, so each leaf is one comparison unit.
+    """
+    leaves: set[str] = {str(p.parent.relative_to(root)) for p in root.rglob("*.pt")}
+    return sorted(leaves)
 
 
 def compare_metrics(
