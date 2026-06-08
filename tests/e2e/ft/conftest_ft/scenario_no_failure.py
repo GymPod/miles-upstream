@@ -9,7 +9,6 @@ from tests.e2e.ft.conftest_ft.modes import FTTestMode
 from miles.utils.test_utils.comparisons import (
     INPUT_TENSORS_ALLOW_FAILED_PATTERN,
     INPUT_TENSORS_SKIP_PATTERN,
-    TOLERANCE_DIFF_THRESHOLDS,
     compare_dumps,
     compare_metrics,
 )
@@ -42,7 +41,7 @@ def _compare(dump_dir: str, mode: FTTestMode) -> None:
     compare_dumps(
         baseline_dir=f"{dump_dir}/baseline",
         target_dir=f"{dump_dir}/target",
-        diff_thresholds=TOLERANCE_DIFF_THRESHOLDS,
+        diff_thresholds=[(".*", "rel <= 0.0085")],
         allow_skipped_pattern=INPUT_TENSORS_SKIP_PATTERN,
         allow_failed_pattern=INPUT_TENSORS_ALLOW_FAILED_PATTERN,
         grouping_skip_keys=["rank", "dp", "edp"],
