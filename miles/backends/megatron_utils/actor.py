@@ -174,28 +174,6 @@ class MegatronTrainRayActor(TrainRayActor):
 
         verify_megatron_parallel_state(self.model)
 
-        if args.use_fault_tolerance:
-            # On the FT rejoin path a freshly respawned cell creates fresh intra-cell NCCL comms.
-            # The MoE expert-parallel all_to_all on such a fresh comm can fail to complete on its
-            # first real use -- even with both members present and consistent split sizes (verified
-            # via per-rank trace) -- while a continuously-running cell is fine. It is a comm-channel
-            # establishment race specific to the fresh process. Eagerly establish every intra-cell
-            # comm here (after model + PG init, before any training collective). The EP comm needs
-            # an actual all_to_all to establish its channels; a barrier / all_reduce alone does not.
-            warmup_device = torch.cuda.current_device()
-            for group_info in (parallel_state.tp, parallel_state.cp, parallel_state.pp):
-                if group_info.size > 1:
-                    dist.all_reduce(torch.zeros(1, device=warmup_device), group=group_info.group)
-            if parallel_state.ep.size > 1:
-                ep_n = parallel_state.ep.size
-                dist.all_to_all_single(
-                    torch.zeros(ep_n, device=warmup_device),
-                    torch.zeros(ep_n, device=warmup_device),
-                    group=parallel_state.ep.group,
-                )
-            torch.cuda.synchronize()
-            logger.info("FT: warmed up intra-cell NCCL comms (tp/cp/pp all_reduce + ep all_to_all)")
-
         if role == "critic":
             if self.args.offload_train:
                 self.sleep()
