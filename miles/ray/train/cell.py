@@ -127,13 +127,6 @@ class RayTrainCell:
         self._change_state("stop", (StatePending, StateAllocatedBase), StateStopped())
 
     async def stop_and_confirm_dead(self) -> None:
-        """Kill all actors and block until their OS processes are confirmed gone.
-
-        Required before a surviving cell reconfigures its indep_dp PG: aborting an
-        NCCL comm whose remote peer is still a live (wedged) process blocks until
-        that peer dies (the 600s abort hang). Killing the peer and confirming it
-        is gone first makes the subsequent abort hit a dead comm and return at once.
-        """
         if self.is_stopped:
             return
 
@@ -266,14 +259,6 @@ class RayTrainCell:
 
 
 async def _confirm_actor_dead(handle: ray.actor.ActorHandle) -> None:
-    """Poll a killed actor until a probe call surfaces RayActorError.
-
-    ray.kill is asynchronous, so the actor may still answer a probe in the brief
-    window before SIGKILL lands. Keep probing until the call errors (process
-    gone) or the overall timeout elapses; a probe that answers (still alive) or
-    times out just triggers another round.
-    """
-
     async def _probe() -> None:
         await handle.__ray_ready__.remote()
 

@@ -305,23 +305,20 @@ class RayTrainGroup:
         if not needs_reconfigure:
             return
 
-        # Step 0.5: Kill any errored cells and confirm their processes are gone
-        # BEFORE the surviving cells reconfigure. Aborting an indep_dp NCCL comm
-        # whose remote peer is still a live (wedged) process blocks until that
-        # peer dies (the 600s abort hang); a confirmed-dead peer makes the abort
-        # return immediately. We accept losing the errored actors' stack traces.
+        # Step 1: Kill any errored cells and confirm their processes are gone
+        # BEFORE the surviving cells reconfigure. Otherwise, indep_dp NCCL abort hangs.
         await self._kill_errored_cells_and_confirm_dead()
 
-        # Step 1: Bump states
+        # Step 2: Bump states
         self._indep_dp_quorum_id += 1
 
-        # Step 2: Allocate pending actors
+        # Step 3: Allocate pending actors
         # We currently do not consider this phase to have errors (because it does not touch GPUs)
         for c in self._cells:
             if c.cell_index in snapshotted_pending_indices:
                 c.allocate_for_pending()
 
-        # Step 3: Cooperatively prepare
+        # Step 4: Cooperatively prepare
         src_cell_index = snapshotted_alive_indices[0]  # TODO make it balanced, and support multi-src-to-one-dst
         src_alive_rank = will_alive_indices.index(src_cell_index)
         ckpt_dst_alive_ranks = [will_alive_indices.index(x) for x in snapshotted_pending_indices]
