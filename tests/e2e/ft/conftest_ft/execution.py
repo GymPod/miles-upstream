@@ -146,6 +146,12 @@ _DETERMINISTIC_ENV_VARS: dict[str, str] = {
     "NCCL_ALGO": "Ring",
     "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0",
     "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+    # cuda-gdb shows the freshly-respawned FT cell wedges with ALL ranks spinning in
+    # ncclDevKernel_AllReduce_Sum_f32_RING_LL -- a small AllReduce on the LL (low-latency)
+    # protocol, which signals completion via flag-polling in a buffer. On a fresh process stale/
+    # uninitialized LL flags can make an LL collective hang despite all ranks being present. Force
+    # the Simple protocol (no LL flag path) to avoid it. Numerically inert; both baseline+target.
+    "NCCL_PROTO": "Simple",
 }
 
 # Selects v2 RayTrainGroup (miles.ray.train.group). Required because
