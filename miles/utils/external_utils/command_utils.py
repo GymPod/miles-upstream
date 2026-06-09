@@ -116,12 +116,6 @@ def execute_train(
     train_backend_fsdp = "--train-backend fsdp" in train_args
     assert train_backend_fsdp == (megatron_model_type is None)
 
-    # The FT (indep_dp) trainer must NOT run with CUDA_DEVICE_MAX_CONNECTIONS=1: with a single
-    # hardware queue, the freshly respawned cell's concurrent intra-cell comms (TP/CP/EP/expert-TP)
-    # during the first MoE+CP forward serialize and deadlock on rejoin. Leave it unset (CUDA default)
-    # so the comms can progress on independent queues. (validate_args asserts this requirement.)
-    use_fault_tolerance = "--use-fault-tolerance" in train_args
-
     exec_command(
         "pkill -9 sglang; "
         "sleep 3; "
@@ -153,11 +147,10 @@ def execute_train(
         {
             "env_vars": {
                 "PYTHONPATH": megatron_path,
-                # If setting this in FSDP, the computation communication overlapping may have issues.
-                # The FT trainer also requires it unset (see use_fault_tolerance above).
+                # If setting this in FSDP, the computation communication overlapping may have issues
                 **(
                     {}
-                    if (train_backend_fsdp or use_fault_tolerance)
+                    if train_backend_fsdp
                     else {
                         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
                     }
