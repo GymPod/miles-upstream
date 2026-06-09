@@ -1,3 +1,4 @@
+import os
 from argparse import Namespace
 from collections.abc import Callable
 from typing import Protocol
@@ -177,7 +178,7 @@ def policy_loss_function(
 
     pg_loss, pg_clipfrac = compute_policy_loss(ppo_kl, advantages, args.eps_clip, args.eps_clip_high)
 
-    if getattr(args, "dump_details", None) is not None:
+    if getattr(args, "dump_details", None) is not None or os.environ.get("MILES_DUMP_PL"):
         from miles.backends.training_utils.debug_dump import maybe_dump_policy_loss_debug
 
         maybe_dump_policy_loss_debug(

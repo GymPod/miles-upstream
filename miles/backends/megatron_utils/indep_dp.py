@@ -87,6 +87,29 @@ def _allreduce_grads_across_replicas(args, model: Sequence["DDP"], parallel_stat
     pg = parallel_state.indep_dp.group
     util = GeneralPGUtil.create(pg)
 
+    if __import__("os").environ.get("MILES_SANITY_INDEPDP"):
+        import torch
+
+        gloo = parallel_state.indep_dp.gloo_group
+        gloo_util = GeneralPGUtil.create(gloo)
+        # 1) nccl all_reduce BEFORE any gloo sync
+        n0 = torch.ones(1, device="cuda")
+        util.all_reduce(n0, pg, op=dist.ReduceOp.SUM)
+        # 2) gloo all_reduce (cpu) — does gloo form 2-member?
+        g0 = torch.ones(1)
+        gloo_util.all_reduce(g0, gloo, op=dist.ReduceOp.SUM)
+        # 3) nccl all_reduce AFTER gloo sync — does syncing fix it?
+        n1 = torch.ones(1, device="cuda")
+        util.all_reduce(n1, pg, op=dist.ReduceOp.SUM)
+        logger.warning(
+            "INDEPDP_SANITY size=%s rank=%s nccl_pre=%s gloo=%s nccl_post_gloo=%s",
+            parallel_state.indep_dp.size,
+            parallel_state.indep_dp.rank,
+            n0.item(),
+            g0.item(),
+            n1.item(),
+        )
+
     allreduce_success = True
     try:
         for model_chunk in model:
