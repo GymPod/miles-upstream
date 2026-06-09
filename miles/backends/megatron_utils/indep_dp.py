@@ -69,6 +69,23 @@ def create_indep_dp_group(
     gloo_pg = _create(ProcessGroupGloo, "gloo")
     _barrier_via_gloo(gloo_pg)
     nccl_pg = _create(ProcessGroupNCCL, "nccl")
+    if __import__("os").environ.get("MILES_SANITY_INDEPDP"):
+        import torch
+
+        g = torch.ones(1)
+        GeneralPGUtil.create(gloo_pg).all_reduce(g, gloo_pg, op=dist.ReduceOp.SUM)
+        n = torch.ones(1, device="cuda")
+        GeneralPGUtil.create(nccl_pg).all_reduce(n, nccl_pg, op=dist.ReduceOp.SUM)
+        logger.warning(
+            "INDEPDP_POSTCREATE quorum=%s mr=%s alive_size=%s gloo_size=%s nccl_size=%s gloo_ar=%s nccl_ar=%s",
+            indep_dp_info.quorum_id,
+            megatron_rank,
+            indep_dp_info.alive_size,
+            gloo_pg.size(),
+            nccl_pg.size(),
+            g.item(),
+            n.item(),
+        )
     logger.info(
         f"Configured independent DP PG: {indep_dp_info}, "
         f"megatron_rank={megatron_rank}, megatron_world_size={megatron_world_size}"
