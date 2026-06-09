@@ -16,12 +16,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Per-process args needed to recreate the current reconfigured cross-cell comm (see
+# maybe_refresh_reconfigured_comm). Set whenever a >1-member indep_dp comm is created.
+_INDEP_DP_RECREATE_ARGS: dict | None = None
+# Monotonic per-process counter giving each recreate a unique store-rendezvous sub-key. It is
+# bumped only inside maybe_refresh_reconfigured_comm, which runs on every alive cell in lockstep
+# (only at alive_size>1 grad reductions), so all cells pick the same key and rendezvous correctly.
+_RECREATE_COUNTER = 0
+
 
 def create_indep_dp_group(
     store_addr: str | None,
     indep_dp_info: IndepDPInfo,
     megatron_rank: int,
     megatron_world_size: int,
+    recreate_tag: str = "",
 ) -> GroupInfo:
     if indep_dp_info.alive_size <= 1:
         return GroupInfo(rank=0, size=1, group=None)
@@ -47,7 +56,7 @@ def create_indep_dp_group(
     def _create(pg_cls: type, backend_name: str) -> dist.ProcessGroup:
         pg = pg_cls(timeout=_TIMEOUT)
         pg.configure(
-            store_addr=f"{store_addr}/indep_dp/{backend_name}/{indep_dp_info.quorum_id}/{megatron_rank}",
+            store_addr=f"{store_addr}{recreate_tag}/indep_dp/{backend_name}/{indep_dp_info.quorum_id}/{megatron_rank}",
             replica_id=str(indep_dp_info.cell_index),
             rank=indep_dp_info.alive_rank,
             world_size=indep_dp_info.alive_size,
@@ -86,6 +95,13 @@ def create_indep_dp_group(
             g.item(),
             n.item(),
         )
+    global _INDEP_DP_RECREATE_ARGS
+    _INDEP_DP_RECREATE_ARGS = dict(
+        store_addr=store_addr,
+        indep_dp_info=indep_dp_info,
+        megatron_rank=megatron_rank,
+        megatron_world_size=megatron_world_size,
+    )
     logger.info(
         f"Configured independent DP PG: {indep_dp_info}, "
         f"megatron_rank={megatron_rank}, megatron_world_size={megatron_world_size}"
@@ -97,6 +113,43 @@ def _barrier_via_gloo(gloo_pg: dist.ProcessGroup) -> None:
     import torch
 
     GeneralPGUtil.create(gloo_pg).all_reduce(torch.ones(1), gloo_pg, op=dist.ReduceOp.SUM)
+
+
+def maybe_refresh_reconfigured_comm(parallel_state: ParallelState) -> None:
+    """Recreate a reconfigured cross-cell comm right before it is used for a reduction.
+
+    NCCL 2.28 workaround: a cross-cell torchft comm that was reconfigured after a rejoin
+    (quorum_id > 0) is created correctly (verified nranks=2 right after create) but silently
+    degrades to single-member DURING the rejoin step's compute-interleaved forward/backward --
+    its subsequent all_reduce then no-ops (each cell reduces with itself), so the cross-cell
+    gradient and metric reductions are skipped and a wrong un-reduced gradient is applied. The
+    initial quorum_0 comm is unaffected, so this only refreshes reconfigured comms.
+
+    A freshly-created comm survives a single reduction, so we recreate it (fresh store sub-key)
+    immediately before the grad reduction; the later metric all_reduce in the same step reuses
+    this fresh comm too (no forward runs in between). The recreate counter is bumped here on every
+    alive cell in lockstep (this path runs only at alive_size>1 steps that all cells execute
+    together), so every cell selects the same store-rendezvous key.
+    """
+    args = _INDEP_DP_RECREATE_ARGS
+    if args is None or args["indep_dp_info"].quorum_id == 0:
+        return
+
+    global _RECREATE_COUNTER
+    _RECREATE_COUNTER += 1
+
+    old = parallel_state.indep_dp
+    for g in [old.group, old.gloo_group]:
+        if g is not None:
+            g.abort(errored=False)
+
+    parallel_state.indep_dp = create_indep_dp_group(
+        store_addr=args["store_addr"],
+        indep_dp_info=args["indep_dp_info"],
+        megatron_rank=args["megatron_rank"],
+        megatron_world_size=args["megatron_world_size"],
+        recreate_tag=f"/recreate/{_RECREATE_COUNTER}",
+    )
 
 
 def reconfigure_indep_dp_group(
@@ -127,6 +180,11 @@ def _allreduce_grads_across_replicas(args, model: Sequence["DDP"], parallel_stat
         f"indep_dp requires intra_dp.size == 1, got {parallel_state.intra_dp.size}. "
         "Simultaneous intra and indep DP is not supported."
     )
+
+    # NCCL 2.28 workaround: refresh a reconfigured (post-rejoin) cross-cell comm that the forward
+    # pass corrupted to single-member, so this grad reduction (and the step's later metric reduce)
+    # run over an uncorrupted comm. No-op for the unaffected initial quorum_0 comm.
+    maybe_refresh_reconfigured_comm(parallel_state)
 
     pg = parallel_state.indep_dp.group
     util = GeneralPGUtil.create(pg)
