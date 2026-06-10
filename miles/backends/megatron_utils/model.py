@@ -372,15 +372,6 @@ def train_one_step(
     """
     args = get_args()
     parallel_state = get_parallel_state()
-    if __import__("os").environ.get("MILES_SANITY_INDEPDP") and parallel_state.indep_dp.size > 1:
-        import torch.distributed as _dist
-
-        from miles.utils.process_group_utils import GeneralPGUtil
-
-        _pg = parallel_state.indep_dp.group
-        _s = torch.ones(1, device="cuda")
-        GeneralPGUtil.create(_pg).all_reduce(_s, _pg, op=_dist.ReduceOp.SUM)
-        logger.warning("INDEPDP_PRETRAIN mr=%s all_reduce(ones)=%s", _dist.get_rank(), _s.item())
     dumper_phase_util = DumperMegatronUtil(args, model, DumperPhase.FWD_BWD, rollout_id=rollout_id)
     disable_optimizer = args.debug_disable_optimizer or optimizer is None
 

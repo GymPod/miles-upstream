@@ -404,17 +404,7 @@ def aggregate_train_losses(
 
     assert len(keys) + 1 == values.numel(), f"Expected {len(keys) + 1} values, got {values.numel()}"
 
-    # After a cross-cell reconfigure the NCCL indep_dp comm degrades during the forward (NCCL 2.28),
-    # so reduce the metrics over the CPU gloo groups instead (which do not degrade). Pre-crash steps
-    # keep the fast NCCL path. Mirrors the gradient reduction in indep_dp._allreduce_grads_across_replicas.
-    from miles.backends.megatron_utils.indep_dp import _indep_dp_was_reconfigured
-
-    if _indep_dp_was_reconfigured():
-        host = values.to("cpu")
-        MultiPGUtil.all_reduce(host, parallel_state.effective_dp_cp.gloo_groups_inner_to_outer, op=dist.ReduceOp.SUM)
-        values.copy_(host.to(values.device))
-    else:
-        MultiPGUtil.all_reduce(values, parallel_state.effective_dp_cp.groups_inner_to_outer, op=dist.ReduceOp.SUM)
+    MultiPGUtil.all_reduce(values, parallel_state.effective_dp_cp.groups_inner_to_outer, op=dist.ReduceOp.SUM)
 
     loss_reduced = {}
     values = values.tolist()

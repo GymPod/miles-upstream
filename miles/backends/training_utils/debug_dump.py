@@ -1,4 +1,3 @@
-import os
 from argparse import Namespace
 from pathlib import Path
 
@@ -23,11 +22,6 @@ def maybe_dump_policy_loss_debug(
     pg_loss: torch.Tensor,
 ) -> None:
     dump_dir = getattr(args, "dump_details", None)
-    if dump_dir is None and os.environ.get("MILES_DUMP_PL"):
-        # Per-phase fallback: save_debug_event_data is "{phase_dump_dir}/events", so its
-        # parent puts the policy-loss dump under each phase's own dir (baseline vs target).
-        ev = getattr(args, "save_debug_event_data", None)
-        dump_dir = str(Path(ev).parent) if ev else os.environ["MILES_DUMP_PL"]
     if dump_dir is None:
         return
 
@@ -36,13 +30,7 @@ def maybe_dump_policy_loss_debug(
     _POLICY_LOSS_DUMP_COUNTER += 1
 
     rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
-    # Under FT each cell uses cell-local ranks (0..3), so both cells would write the same
-    # rank_X file and overwrite each other. Tag with the indep_dp (cell) rank to keep them
-    # distinct, so a diagnostic can compare both cells' tensors for the same step.
-    from miles.backends.training_utils.parallel import get_parallel_state
-
-    cell = get_parallel_state().indep_dp.rank
-    path = Path(dump_dir) / "policy_loss_debug" / f"cell_{cell}_rank_{rank}_call_{counter}.pt"
+    path = Path(dump_dir) / "policy_loss_debug" / f"rank_{rank}_call_{counter}.pt"
     path.parent.mkdir(parents=True, exist_ok=True)
 
     def to_cpu(tensor: torch.Tensor) -> torch.Tensor:

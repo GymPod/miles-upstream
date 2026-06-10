@@ -49,10 +49,6 @@ _WITH_FAILURE_ACTIONS: list[dict] = [
 def _build_phase_args(mode: FTTestMode, dump_dir: str, *, is_target: bool, enable_dumper: bool = True) -> str:
     is_phase_a: bool = dump_dir.endswith("phase_a")
     base = get_common_train_args(mode, dump_dir=dump_dir, num_steps=NUM_PHASE_B_STEPS, enable_dumper=enable_dumper)
-    # Kernel determinism. --deterministic-mode also routes the cross-cell grad reduction
-    # through a fixed-fold SUM (indep_dp.py) so a recovered reformed-quorum reduction is
-    # bitwise-identical to the no-failure baseline (the rejoin step amplifies any residual).
-    base += "--deterministic-mode "
 
     if is_target:
         base += get_ft_args(mode)
