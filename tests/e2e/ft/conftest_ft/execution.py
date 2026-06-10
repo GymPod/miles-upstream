@@ -138,7 +138,16 @@ def get_common_train_args(
 
 
 def get_ft_args(mode: FTTestMode) -> str:
-    return "--use-fault-tolerance " "--ft-components train " "--control-server-port 0 "
+    # Even with the shared compile cache, a respawned cell's first forward takes ~180s, during which
+    # the survivor waits on the cross-cell collective. Ordering recompile(~180s) < comm_timeout(240s)
+    # < heartbeat(300s) keeps the comm alive through that step (no degraded/un-reduced gradient)
+    # while a genuine crash still times out and recovers before the survivor is declared dead.
+    return (
+        "--use-fault-tolerance "
+        "--ft-components train "
+        "--control-server-port 0 "
+        "--trainer-heartbeat-checker-max-heartbeat-age 300 "
+    )
 
 
 # Required for reproducibility (ref: https://github.com/THUDM/slime/pull/370)
