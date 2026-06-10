@@ -132,33 +132,35 @@ def maybe_refresh_reconfigured_comm(parallel_state: ParallelState, rollout_id: i
     if args is None or args["indep_dp_info"].quorum_id == 0:
         return
 
-    # Recreate with a SHORT timeout so a transient cross-cell desync (a cell briefly at a
-    # different rollout/attempt during recovery) fails fast instead of blocking the rendezvous for
-    # the full timeout and tripping the heartbeat watchdog. On failure keep the current comm and
-    # proceed: such desync only happens on recovery-transition steps whose attempt is later
-    # superseded (dropped by the comparator's keep-only-final-attempt), while the compared stable
-    # steps reach this collectively and rendezvous cleanly.
-    quorum_id = args["indep_dp_info"].quorum_id
-    try:
-        fresh = create_indep_dp_group(
-            store_addr=args["store_addr"],
-            indep_dp_info=args["indep_dp_info"],
-            megatron_rank=args["megatron_rank"],
-            megatron_world_size=args["megatron_world_size"],
-            recreate_tag=f"/recreate/{quorum_id}_{rollout_id}_{attempt}",
-            timeout_s=30,
-        )
-    except Exception:
-        logger.warning(
-            "indep_dp recreate (q=%s rollout=%s attempt=%s) failed; keeping current comm",
-            quorum_id,
-            rollout_id,
-            attempt,
-            exc_info=True,
-        )
-        return
-
     old = parallel_state.indep_dp
+
+    # Synchronize all alive cells on the persistent gloo group BEFORE recreating. The gloo group
+    # is CPU-based and survives the GPU forward pass that corrupts the NCCL comm, so this barrier
+    # makes every cell reach the new comm's store rendezvous together -- avoiding the transient
+    # cross-cell desync (one cell still finishing its first post-rejoin forward) that otherwise
+    # blocks the rendezvous past the heartbeat watchdog or leaves it single-member.
+    quorum_id = args["indep_dp_info"].quorum_id
+    if old.gloo_group is not None:
+        import torch
+
+        _b = torch.ones(1)
+        GeneralPGUtil.create(old.gloo_group).all_reduce(_b, old.gloo_group, op=dist.ReduceOp.SUM)
+        if __import__("os").environ.get("MILES_SANITY_INDEPDP"):
+            logger.warning(
+                "INDEPDP_GLOO_BARRIER mr=%s q=%s rollout=%s gloo_ar=%s (expect alive_size)",
+                dist.get_rank(),
+                quorum_id,
+                rollout_id,
+                _b.item(),
+            )
+    fresh = create_indep_dp_group(
+        store_addr=args["store_addr"],
+        indep_dp_info=args["indep_dp_info"],
+        megatron_rank=args["megatron_rank"],
+        megatron_world_size=args["megatron_world_size"],
+        recreate_tag=f"/recreate/{quorum_id}_{rollout_id}_{attempt}",
+    )
+
     parallel_state.indep_dp = fresh
     for g in [old.group, old.gloo_group]:
         if g is not None:
