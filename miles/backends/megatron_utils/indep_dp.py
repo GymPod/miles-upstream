@@ -27,6 +27,7 @@ def create_indep_dp_group(
     megatron_rank: int,
     megatron_world_size: int,
     recreate_tag: str = "",
+    timeout_s: float = 120,
 ) -> GroupInfo:
     if indep_dp_info.alive_size <= 1:
         return GroupInfo(rank=0, size=1, group=None)
@@ -36,7 +37,7 @@ def create_indep_dp_group(
     except ImportError as e:
         raise ImportError("torchft is required for indep_dp. Install with: pip install torchft") from e
 
-    _TIMEOUT = timedelta(seconds=120)
+    _TIMEOUT = timedelta(seconds=timeout_s)
 
     if __import__("os").environ.get("MILES_SANITY_INDEPDP"):
         logger.warning(
@@ -131,19 +132,37 @@ def maybe_refresh_reconfigured_comm(parallel_state: ParallelState, rollout_id: i
     if args is None or args["indep_dp_info"].quorum_id == 0:
         return
 
+    # Recreate with a SHORT timeout so a transient cross-cell desync (a cell briefly at a
+    # different rollout/attempt during recovery) fails fast instead of blocking the rendezvous for
+    # the full timeout and tripping the heartbeat watchdog. On failure keep the current comm and
+    # proceed: such desync only happens on recovery-transition steps whose attempt is later
+    # superseded (dropped by the comparator's keep-only-final-attempt), while the compared stable
+    # steps reach this collectively and rendezvous cleanly.
+    quorum_id = args["indep_dp_info"].quorum_id
+    try:
+        fresh = create_indep_dp_group(
+            store_addr=args["store_addr"],
+            indep_dp_info=args["indep_dp_info"],
+            megatron_rank=args["megatron_rank"],
+            megatron_world_size=args["megatron_world_size"],
+            recreate_tag=f"/recreate/{quorum_id}_{rollout_id}_{attempt}",
+            timeout_s=30,
+        )
+    except Exception:
+        logger.warning(
+            "indep_dp recreate (q=%s rollout=%s attempt=%s) failed; keeping current comm",
+            quorum_id,
+            rollout_id,
+            attempt,
+            exc_info=True,
+        )
+        return
+
     old = parallel_state.indep_dp
+    parallel_state.indep_dp = fresh
     for g in [old.group, old.gloo_group]:
         if g is not None:
             g.abort(errored=False)
-
-    quorum_id = args["indep_dp_info"].quorum_id
-    parallel_state.indep_dp = create_indep_dp_group(
-        store_addr=args["store_addr"],
-        indep_dp_info=args["indep_dp_info"],
-        megatron_rank=args["megatron_rank"],
-        megatron_world_size=args["megatron_world_size"],
-        recreate_tag=f"/recreate/{quorum_id}_{rollout_id}_{attempt}",
-    )
 
 
 def reconfigure_indep_dp_group(
