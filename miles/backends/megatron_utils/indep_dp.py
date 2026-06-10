@@ -22,6 +22,7 @@ def create_indep_dp_group(
     indep_dp_info: IndepDPInfo,
     megatron_rank: int,
     megatron_world_size: int,
+    timeout_s: float = 120,
 ) -> GroupInfo:
     if indep_dp_info.alive_size <= 1:
         return GroupInfo(rank=0, size=1, group=None)
@@ -31,14 +32,6 @@ def create_indep_dp_group(
     except ImportError as e:
         raise ImportError("torchft is required for indep_dp. Install with: pip install torchft") from e
 
-    # A cell that respawned at a post-crash quorum runs a cold torch.compile of its first forward
-    # (~180-300s, variable) while the survivor waits on this comm. Reconfigured comms (quorum_id > 0)
-    # therefore use a long timeout so that wait does not expire (which would silently degrade the
-    # comm to single-member and apply an un-reduced gradient). The initial quorum_0 comm keeps a
-    # short timeout so a crash on it is detected and recovered quickly; the only crash the test
-    # injects is on the quorum_0 comm, and quorum>0 only ever sees a recompile or a graceful
-    # stop/start (never a dead-peer block), so the long timeout never delays crash recovery.
-    timeout_s = 120 if indep_dp_info.quorum_id == 0 else 900
     _TIMEOUT = timedelta(seconds=timeout_s)
 
     if __import__("os").environ.get("MILES_SANITY_INDEPDP"):
@@ -120,11 +113,18 @@ def reconfigure_indep_dp_group(
         if g is not None:
             g.abort(errored=False)
 
+    # A reconfigured comm is always created during recovery, where a cell that just respawned runs a
+    # cold torch.compile of its first forward (~180-300s, variable) while the survivor waits on this
+    # comm. Use a long timeout so that wait cannot expire (which would silently degrade the comm to
+    # single-member and apply an un-reduced gradient). Only the initial comm (create_indep_dp_group's
+    # short default) needs the fast timeout that makes a crash recoverable -- crashes happen during
+    # normal training on the initial comm, never on a reconfigured one mid-recovery.
     parallel_state.indep_dp = create_indep_dp_group(
         store_addr=store_addr,
         indep_dp_info=indep_dp_info,
         megatron_rank=megatron_rank,
         megatron_world_size=megatron_world_size,
+        timeout_s=900,
     )
     logger.info(f"Reconfigured indep_dp PG with quorum_id={indep_dp_info.quorum_id}")
 
