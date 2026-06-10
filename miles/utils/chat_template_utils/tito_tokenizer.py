@@ -789,6 +789,14 @@ class DeepSeekV4TITOTokenizer(TITOTokenizer):
             allowed_roles=frozenset({"tool"}),
             template=None,
         ),
+        # {tool, user} is only append-only with drop_thinking=False: the official
+        # encoder gates thinking blocks on index > last_user_idx, so appending a
+        # user turn would otherwise re-render (strip) earlier assistants' thinking.
+        FixedTemplateRow(
+            allowed_roles=frozenset({"tool", "user"}),
+            template=None,
+            extra_kwargs={"drop_thinking": False},
+        ),
     )
 
     _DEFAULT_ASSISTANT_START = "<｜Assistant｜>"
