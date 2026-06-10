@@ -229,7 +229,9 @@ def init_http_client(args):
     _client_concurrency = args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
     if _http_client is None:
         _http_client = httpx.AsyncClient(
-            limits=httpx.Limits(max_connections=_client_concurrency),
+            # max_keepalive_connections=0: idle pooled connections go stale during
+            # long agentic rollouts and surface as httpx.ReadError / 500 storms.
+            limits=httpx.Limits(max_connections=_client_concurrency, max_keepalive_connections=0),
             timeout=httpx.Timeout(None),
         )
 
@@ -263,7 +265,7 @@ def _init_ray_distributed_post(args):
         def __init__(self, concurrency: int):
             # Lazy creation to this actor's event loop
             self._client = httpx.AsyncClient(
-                limits=httpx.Limits(max_connections=max(1, concurrency)),
+                limits=httpx.Limits(max_connections=max(1, concurrency), max_keepalive_connections=0),
                 timeout=httpx.Timeout(None),
             )
 
