@@ -30,6 +30,7 @@ def create_indep_dp_group(
     megatron_rank: int,
     megatron_world_size: int,
     timeout_s: float = 120,
+    reuse_gloo: "dist.ProcessGroup | None" = None,
 ) -> GroupInfo:
     if indep_dp_info.alive_size <= 1:
         return GroupInfo(rank=0, size=1, group=None)
@@ -74,7 +75,11 @@ def create_indep_dp_group(
     # gates the NCCL rendezvous until every alive cell is present, so the NCCL comm forms with
     # all members. This is always entered collectively by all alive cells (alive_size > 1) and
     # cannot deadlock on a mid-crash peer (crashed cells are killed before this reconfigure).
-    gloo_pg = _create(ProcessGroupGloo, "gloo")
+    # Recreating the gloo PG on every post-recovery reduction leaks CPU memory and churns the store
+    # (it crashed the actor with an OOM/EOF). The gloo PG is CPU-based and does NOT degrade during
+    # the GPU forward, so callers that only need to refresh the corrupted NCCL comm pass the existing
+    # gloo PG via reuse_gloo to keep it across recreations.
+    gloo_pg = reuse_gloo if reuse_gloo is not None else _create(ProcessGroupGloo, "gloo")
     _barrier_via_gloo(gloo_pg)
     nccl_pg = _create(ProcessGroupNCCL, "nccl")
     if __import__("os").environ.get("MILES_SANITY_INDEPDP"):
@@ -161,18 +166,25 @@ def maybe_refresh_reconfigured_comm(parallel_state: ParallelState, rollout_id: i
 
     old = parallel_state.indep_dp
     quorum_id = args["indep_dp_info"].quorum_id
+    # Reuse the persistent gloo PG (CPU, does not degrade) and recreate ONLY the NCCL comm. Creating
+    # a fresh gloo every step leaked memory and crashed the actor (OOM/EOF) after several rejoins.
     fresh = create_indep_dp_group(
         store_addr=f"{args['store_addr']}/recreate/{quorum_id}_{rollout_id}_{attempt}",
         indep_dp_info=args["indep_dp_info"],
         megatron_rank=args["megatron_rank"],
         megatron_world_size=args["megatron_world_size"],
         timeout_s=1500,
+        reuse_gloo=old.gloo_group,
     )
 
     parallel_state.indep_dp = fresh
-    for g in [old.group, old.gloo_group]:
-        if g is not None:
-            g.abort(errored=False)
+    # Abort only the old NCCL comm; the gloo PG is reused (kept alive in `fresh`). Then free the
+    # aborted comm's references promptly so repeated rejoins do not accumulate GPU/CPU memory.
+    if old.group is not None:
+        old.group.abort(errored=False)
+    import gc
+
+    gc.collect()
 
 
 def _allreduce_grads_across_replicas(
