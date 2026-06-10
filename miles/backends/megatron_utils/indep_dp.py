@@ -19,10 +19,6 @@ logger = logging.getLogger(__name__)
 # Per-process args needed to recreate the current reconfigured cross-cell comm (see
 # maybe_refresh_reconfigured_comm). Set whenever a >1-member indep_dp comm is created.
 _INDEP_DP_RECREATE_ARGS: dict | None = None
-# Monotonic per-process counter giving each recreate a unique store-rendezvous sub-key. It is
-# bumped only inside maybe_refresh_reconfigured_comm, which runs on every alive cell in lockstep
-# (only at alive_size>1 grad reductions), so all cells pick the same key and rendezvous correctly.
-_RECREATE_COUNTER = 0
 
 
 def create_indep_dp_group(
@@ -115,7 +111,7 @@ def _barrier_via_gloo(gloo_pg: dist.ProcessGroup) -> None:
     GeneralPGUtil.create(gloo_pg).all_reduce(torch.ones(1), gloo_pg, op=dist.ReduceOp.SUM)
 
 
-def maybe_refresh_reconfigured_comm(parallel_state: ParallelState) -> None:
+def maybe_refresh_reconfigured_comm(parallel_state: ParallelState, rollout_id: int, attempt: int) -> None:
     """Recreate a reconfigured cross-cell comm right before it is used for a reduction.
 
     NCCL 2.28 workaround: a cross-cell torchft comm that was reconfigured after a rejoin
@@ -125,30 +121,28 @@ def maybe_refresh_reconfigured_comm(parallel_state: ParallelState) -> None:
     gradient and metric reductions are skipped and a wrong un-reduced gradient is applied. The
     initial quorum_0 comm is unaffected, so this only refreshes reconfigured comms.
 
-    A freshly-created comm survives a single reduction, so we recreate it (fresh store sub-key)
-    immediately before the grad reduction; the later metric all_reduce in the same step reuses
-    this fresh comm too (no forward runs in between). The recreate counter is bumped here on every
-    alive cell in lockstep (this path runs only at alive_size>1 steps that all cells execute
-    together), so every cell selects the same store-rendezvous key.
+    A freshly-created comm survives a single reduction, so we recreate it immediately before the
+    grad reduction; the later metric all_reduce in the same step reuses this fresh comm too (no
+    forward runs in between). The store sub-key is derived from controller-assigned, cell-synced
+    (quorum_id, rollout_id, attempt) so every alive cell rendezvous on the same key (a per-process
+    counter would desync across a cell stop/start and hang the rendezvous).
     """
     args = _INDEP_DP_RECREATE_ARGS
     if args is None or args["indep_dp_info"].quorum_id == 0:
         return
-
-    global _RECREATE_COUNTER
-    _RECREATE_COUNTER += 1
 
     old = parallel_state.indep_dp
     for g in [old.group, old.gloo_group]:
         if g is not None:
             g.abort(errored=False)
 
+    quorum_id = args["indep_dp_info"].quorum_id
     parallel_state.indep_dp = create_indep_dp_group(
         store_addr=args["store_addr"],
         indep_dp_info=args["indep_dp_info"],
         megatron_rank=args["megatron_rank"],
         megatron_world_size=args["megatron_world_size"],
-        recreate_tag=f"/recreate/{_RECREATE_COUNTER}",
+        recreate_tag=f"/recreate/{quorum_id}_{rollout_id}_{attempt}",
     )
 
 
@@ -174,7 +168,9 @@ def reconfigure_indep_dp_group(
     logger.info(f"Reconfigured indep_dp PG with quorum_id={indep_dp_info.quorum_id}")
 
 
-def _allreduce_grads_across_replicas(args, model: Sequence["DDP"], parallel_state: ParallelState) -> bool:
+def _allreduce_grads_across_replicas(
+    args, model: Sequence["DDP"], parallel_state: ParallelState, rollout_id: int, attempt: int
+) -> bool:
     assert not args.calculate_per_token_loss, "calculate_per_token_loss is not supported with indep_dp yet"
     assert parallel_state.intra_dp.size == 1, (
         f"indep_dp requires intra_dp.size == 1, got {parallel_state.intra_dp.size}. "
@@ -184,7 +180,7 @@ def _allreduce_grads_across_replicas(args, model: Sequence["DDP"], parallel_stat
     # NCCL 2.28 workaround: refresh a reconfigured (post-rejoin) cross-cell comm that the forward
     # pass corrupted to single-member, so this grad reduction (and the step's later metric reduce)
     # run over an uncorrupted comm. No-op for the unaffected initial quorum_0 comm.
-    maybe_refresh_reconfigured_comm(parallel_state)
+    maybe_refresh_reconfigured_comm(parallel_state, rollout_id, attempt)
 
     pg = parallel_state.indep_dp.group
     util = GeneralPGUtil.create(pg)

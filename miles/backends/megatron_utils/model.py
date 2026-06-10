@@ -501,7 +501,7 @@ def train_one_step(
         if ft_actor_executor is not None:
             ft_actor_executor.maybe_crash(rollout_id=rollout_id, attempt=attempt)
 
-        ok = _allreduce_grads_across_replicas(args, model, parallel_state)
+        ok = _allreduce_grads_across_replicas(args, model, parallel_state, rollout_id, attempt)
         if not ok:
             outcome = TrainStepOutcome.DISCARDED_SHOULD_RETRY
             valid_step = False
