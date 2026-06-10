@@ -4,7 +4,6 @@ import logging
 import math
 from argparse import Namespace
 from collections.abc import Callable, Sequence
-from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
 
@@ -47,28 +46,6 @@ logger = logging.getLogger(__name__)
 
 from .bridge_lora_helpers import _ensure_model_list, _setup_lora_model_via_bridge  # noqa: F401
 from .lora_utils import save_lora_checkpoint
-
-
-def _true_on_policy_batch_keys(args: Namespace) -> list[str]:
-    if not args.true_on_policy_mode:
-        return []
-    return ["sample_indices", "rollout_dp_ranks", "local_token_counts"]
-
-
-def _sglang_moe_rollout_context(args: Namespace, batch):
-    if not args.true_on_policy_mode:
-        return nullcontext()
-
-    try:
-        from miles_megatron_plugins.true_on_policy.moe import sglang_moe_rollout_context
-    except Exception:
-        return nullcontext()
-
-    return sglang_moe_rollout_context(
-        sample_indices=batch.get("sample_indices"),
-        rollout_dp_ranks=batch.get("rollout_dp_ranks"),
-        token_counts=batch.get("local_token_counts"),
-    )
 
 
 def get_optimizer_param_scheduler(args: Namespace, optimizer: MegatronOptimizer) -> OptimizerParamScheduler:
@@ -275,8 +252,7 @@ def forward_only(
                 "total_lengths",
                 "response_lengths",
                 "max_seq_lens",
-            ]
-            + _true_on_policy_batch_keys(args),
+            ],
             args.data_pad_size_multiplier,
             args.qkv_format,
             allgather_cp=args.allgather_cp,
@@ -291,17 +267,16 @@ def forward_only(
             model_kwargs["fp32_output"] = False
             if batch.get("padding_mask") is not None:
                 model_kwargs["padding_mask"] = batch["padding_mask"]
-        with _sglang_moe_rollout_context(args, batch):
-            output_tensor = model(
-                input_ids=tokens,
-                position_ids=None,
-                attention_mask=None,
-                labels=None,
-                packed_seq_params=packed_seq_params,
-                loss_mask=batch["full_loss_masks"],
-                **model_kwargs,
-                **(batch["multimodal_train_inputs"] if batch["multimodal_train_inputs"] is not None else {}),
-            )
+        output_tensor = model(
+            input_ids=tokens,
+            position_ids=None,
+            attention_mask=None,
+            labels=None,
+            packed_seq_params=packed_seq_params,
+            loss_mask=batch["full_loss_masks"],
+            **model_kwargs,
+            **(batch["multimodal_train_inputs"] if batch["multimodal_train_inputs"] is not None else {}),
+        )
 
         return output_tensor, partial(
             f,
@@ -434,8 +409,7 @@ def train_one_step(
                 "returns",
                 "rollout_log_probs",
                 "max_seq_lens",
-            ]
-            + _true_on_policy_batch_keys(args),
+            ],
             args.data_pad_size_multiplier,
             args.qkv_format,
             allgather_cp=args.allgather_cp,
@@ -452,16 +426,15 @@ def train_one_step(
             model_kwargs = {}
             if args.true_on_policy_mode and batch.get("padding_mask") is not None:
                 model_kwargs["padding_mask"] = batch["padding_mask"]
-            with _sglang_moe_rollout_context(args, batch):
-                output_tensor = model.build_schedule_plan(
-                    input_ids=batch["tokens"],
-                    position_ids=None,
-                    attention_mask=None,
-                    labels=None,
-                    packed_seq_params=get_packed_seq_params(batch, args),
-                    loss_mask=batch["full_loss_masks"],
-                    **model_kwargs,
-                )
+            output_tensor = model.build_schedule_plan(
+                input_ids=batch["tokens"],
+                position_ids=None,
+                attention_mask=None,
+                labels=None,
+                packed_seq_params=get_packed_seq_params(batch, args),
+                loss_mask=batch["full_loss_masks"],
+                **model_kwargs,
+            )
         else:
             forward_kwargs = {
                 "input_ids": batch["tokens"],
@@ -480,8 +453,7 @@ def train_one_step(
             if batch["multimodal_train_inputs"] is not None:
                 forward_kwargs.update(batch["multimodal_train_inputs"])
 
-            with _sglang_moe_rollout_context(args, batch):
-                output_tensor = model(**forward_kwargs)
+            output_tensor = model(**forward_kwargs)
 
         for m, old_stage in zip(all_replay_managers, old_stages, strict=True):
             m.stage = old_stage
