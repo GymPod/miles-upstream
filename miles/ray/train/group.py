@@ -225,8 +225,11 @@ class RayTrainGroup:
         # Fetch the updatable engines + lock once (like V1 RayActorGroup) so all
         # ranks observe a consistent engine set; the actor releases the lock itself.
         info = await self._rollout_manager.get_updatable_engines_and_lock.remote()
-        # Catch with vanilla retry: cells w/ exceptions are auto marked errored, thus retry will find the next one
-        await retry(lambda _: self._execute_first_alive("update_weights", info=info))
+        try:
+            # Catch with vanilla retry: cells w/ exceptions are auto marked errored, thus retry will find the next one
+            await retry(lambda _: self._execute_first_alive("update_weights", info=info))
+        finally:
+            await self._rollout_manager.resume_health_monitoring.remote()
 
     async def onload(self):
         # Catch *without* retry: cells w/ exceptions are auto marked errored, and will not be used

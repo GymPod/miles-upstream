@@ -84,6 +84,7 @@ class RolloutManager:
 
         # TODO will be replaced by full ft, thus temporarily leave it without modifications
         self._health_monitors = []
+        self._health_checking_before_update = False
         if not self.args.debug_train_only and self.args.use_fault_tolerance:
             for srv in self.servers.values():
                 for group in srv.server_groups:
@@ -197,13 +198,14 @@ class RolloutManager:
     # -------------------------- engine management -----------------------------
 
     async def get_updatable_engines_and_lock(self):
-        """Return engines eligible for weight updates."""
-        # The weight update pauses generation on every engine, and sglang's internal
-        # watchdog starts failing /health_generate once generation has been paused for
-        # ~20s (no detokenizer heartbeat). A post-crash training step can easily stretch
-        # the paused window past that, at which point the health monitor would ray.kill a
-        # perfectly healthy engine in the middle of the weight broadcast. Health checking
-        # resumes at the next generate()/eval() call, after generation continues.
+        """Return engines eligible for weight updates.
+
+        Pauses health checking for the duration of the weight update: the update pauses
+        generation on every engine, and sglang's /health_generate fails once generation
+        has been paused for ~20s, so the monitor would kill a healthy engine mid-update.
+        The caller resumes it via resume_health_monitoring once the update is done.
+        """
+        self._health_checking_before_update = any(m.is_checking_enabled() for m in self._health_monitors)
         self._health_monitoring_pause()
         srv = self._get_updatable_server()
         if not srv:
@@ -223,6 +225,12 @@ class RolloutManager:
             engine_gpu_counts=srv.engine_gpu_counts,
             engine_gpu_offsets=srv.engine_gpu_offsets,
         )
+
+    async def resume_health_monitoring(self):
+        """Undo get_updatable_engines_and_lock's pause; no-op if checking was already off
+        (e.g. engines offloaded)."""
+        if self._health_checking_before_update:
+            self._health_monitoring_resume()
 
     def clear_updatable_has_new_engines(self):
         # when fault tolerance is not enabled, we need to manually clear has_new_engines after update_weights
