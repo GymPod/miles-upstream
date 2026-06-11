@@ -1,135 +1,41 @@
 from __future__ import annotations
 
-import importlib
 import logging
-import os
-import subprocess
-import sys
 from collections.abc import Sequence
-from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
-_WORKSPACE_PARENT = _WORKSPACE_ROOT.parent
-_LOCAL_IFEVAL_REQUIREMENTS = _WORKSPACE_ROOT / "examples" / "eval_multi_task" / "requirements_ifeval.txt"
-
-# The original IFEval ships inside the multi-GB google-research monorepo, so we
-# sparse-checkout only the instruction_following_eval/ package instead of cloning
-# the whole tree. This is the sibling of ifbench.py, which targets AllenAI's
-# extended IFBench; here we target the original 25-instruction Google benchmark.
-_IFEVAL_CHECKOUT = _WORKSPACE_PARENT / "google-research-ifeval"
-_GOOGLE_RESEARCH_REPO = "https://github.com/google-research/google-research.git"
-_IFEVAL_PACKAGE = "instruction_following_eval"
-
-
 JsonDict = dict[str, Any]
 KwargsDict = dict[str, str | int | float | None]
 
-# Cached official module; loaded lazily on first scoring (see _get_evaluation_lib).
-_evaluation_lib = None
+
+def _get_instruction_dict():
+    """Return IFEvalG's instruction registry, imported lazily on first scoring.
+
+    The registry pulls in nltk/langdetect/immutabledict at import time; those are
+    optional extras (examples/eval_multi_task/requirements_ifeval.txt), so importing
+    this module for its pure helpers — or under fast unit tests that lack the extras —
+    must not trigger that import. Python caches the module, so the deferral is free
+    after the first call. The package is vendored under IFEvalG/, so there is no
+    network or pip side effect (unlike the previous official-checkout loader)."""
+
+    from .IFEvalG import instructions_registry
+
+    return instructions_registry.INSTRUCTION_DICT
 
 
-def _ensure_ifeval_repo() -> Path:
-    """Sparse-checkout the official instruction_following_eval package and expose it
-    on sys.path.
+def _remove_thinking_section(text: str) -> str:
+    """Strip reasoning scaffolding so only the user-visible answer is verified.
 
-    We put the checkout *root* (not the package dir) on the path and later import
-    the package-qualified ``instruction_following_eval.evaluation_lib``. Two reasons:
-    the package's own modules import each other as ``from instruction_following_eval
-    import ...``, and the qualified name avoids clashing with IFBench, whose fork
-    ships an identically named top-level ``evaluation_lib`` module."""
+    Reasoning-model rollouts wrap the answer in <think>...</think> and sometimes
+    <answer> tags; the IFEval constraints must be checked against the answer a user
+    would see, not the chain-of-thought that precedes it."""
 
-    package_path = _IFEVAL_CHECKOUT / _IFEVAL_PACKAGE
-    if not package_path.exists():
-        try:
-            subprocess.run(
-                [
-                    "git",
-                    "clone",
-                    "--no-checkout",
-                    "--depth",
-                    "1",
-                    "--filter=blob:none",
-                    _GOOGLE_RESEARCH_REPO,
-                    str(_IFEVAL_CHECKOUT),
-                ],
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "-C", str(_IFEVAL_CHECKOUT), "sparse-checkout", "set", _IFEVAL_PACKAGE],
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "-C", str(_IFEVAL_CHECKOUT), "checkout"],
-                check=True,
-                capture_output=True,
-            )
-        except Exception as exc:
-            raise ImportError(
-                "Unable to automatically fetch the official Google IFEval source. "
-                "Clone https://github.com/google-research/google-research.git and "
-                f"sparse-checkout '{_IFEVAL_PACKAGE}' into {_IFEVAL_CHECKOUT}."
-            ) from exc
-
-    root = str(_IFEVAL_CHECKOUT)
-    if root not in sys.path:
-        sys.path.insert(0, root)
-
-    current_pythonpath = os.environ.get("PYTHONPATH")
-    if current_pythonpath is None:
-        os.environ["PYTHONPATH"] = root
-    elif root not in current_pythonpath.split(os.pathsep):
-        os.environ["PYTHONPATH"] = os.pathsep.join([root, current_pythonpath])
-
-    return _IFEVAL_CHECKOUT
-
-
-def _ensure_ifeval_dependencies() -> None:
-    """Install IFEval requirements the first time the lib fails to import."""
-
-    requirements_file = _LOCAL_IFEVAL_REQUIREMENTS
-
-    if not requirements_file.exists():
-        logger.debug("Local IFEval requirements file not found at %s; skipping install.", requirements_file)
-        return
-
-    sentinel = _IFEVAL_CHECKOUT / ".deps_installed"
-    if sentinel.exists():
-        return
-
-    install_cmd = [sys.executable, "-m", "pip", "install", "-r", str(requirements_file)]
-    try:
-        subprocess.run(install_cmd, check=True)
-    except Exception as exc:
-        logger.warning("Failed to install IFEval dependencies automatically: %s", exc)
-    else:
-        sentinel.write_text("installed\n")
-
-
-def _load_evaluation_lib():
-    _ensure_ifeval_repo()
-    try:
-        return importlib.import_module(f"{_IFEVAL_PACKAGE}.evaluation_lib")
-    except ImportError:
-        _ensure_ifeval_dependencies()
-        return importlib.import_module(f"{_IFEVAL_PACKAGE}.evaluation_lib")
-
-
-def _get_evaluation_lib():
-    """Return the official evaluation_lib, loading it lazily on first use.
-
-    Loading clones the source and may pip-install, so we defer it until a reward is
-    actually computed. Importing this module (for the pure helpers, or under unit
-    tests that stub the lib) must stay free of that network/IO side effect."""
-
-    global _evaluation_lib
-    if _evaluation_lib is None:
-        _evaluation_lib = _load_evaluation_lib()
-    return _evaluation_lib
+    text = text.replace("<|assistant|>", "").strip()
+    text = text.split("</think>")[-1]
+    text = text.replace("<answer>", "").replace("</answer>", "")
+    return text.strip()
 
 
 def _normalize_instruction_ids(raw_ids: Sequence[Any]) -> list[str]:
@@ -147,7 +53,7 @@ def _normalize_instruction_ids(raw_ids: Sequence[Any]) -> list[str]:
 
 
 def _coerce_kwargs_list(raw_kwargs: Any, num_instructions: int) -> list[KwargsDict]:
-    """Convert stored kwargs into the per-instruction list IFEval expects.
+    """Convert stored kwargs into the per-instruction list IFEvalG expects.
 
     None values are dropped so that ``build_description(**kwargs)`` only receives the
     keys a given instruction actually declares; the dataset stores every possible
@@ -177,56 +83,88 @@ def _coerce_kwargs_list(raw_kwargs: Any, num_instructions: int) -> list[KwargsDi
     return sanitized
 
 
-def _build_input_example(metadata: JsonDict, input_example_cls):
-    """Build the official InputExample from stored metadata.
+def _loose_response_variants(answer: str) -> list[str]:
+    """Response variants for the official IFEval ``loose`` criterion.
 
-    The InputExample class is injected rather than imported at module level so the
-    lib stays lazily loaded and unit tests can pass a stand-in."""
+    Loose tolerates boilerplate that brackets an otherwise-compliant answer: a lead-in
+    or sign-off line, and surrounding ``*`` markdown emphasis. An instruction passes if
+    any variant satisfies it. This mirrors instruction_following_eval.evaluation_lib;
+    IFEvalG itself ships only the per-instruction checkers, so we reproduce the variant
+    set here to keep the loose score aligned with the official benchmark."""
 
-    instruction_ids = _normalize_instruction_ids(metadata.get("instruction_id_list") or [])
-    if not instruction_ids:
-        logger.debug("Missing instruction identifiers in metadata: %s", metadata)
-        return None
+    lines = answer.split("\n")
+    remove_first = "\n".join(lines[1:]).strip()
+    remove_last = "\n".join(lines[:-1]).strip()
+    remove_both = "\n".join(lines[1:-1]).strip()
+    return [
+        answer,
+        answer.replace("*", ""),
+        remove_first,
+        remove_last,
+        remove_both,
+        remove_first.replace("*", ""),
+        remove_last.replace("*", ""),
+        remove_both.replace("*", ""),
+    ]
 
-    prompt_text = metadata.get("prompt_text")
-    prompt_text = "" if prompt_text is None else str(prompt_text)
 
-    kwargs_list = _coerce_kwargs_list(metadata.get("kwargs"), len(instruction_ids))
+def _instruction_satisfied(instruction, candidates: Sequence[str]) -> bool:
+    """Whether the instruction is followed by any candidate response variant.
 
-    return input_example_cls(
-        key=int(metadata.get("record_id") or 0),
-        instruction_id_list=instruction_ids,
-        prompt=prompt_text,
-        kwargs=kwargs_list,
-    )
+    A checker that raises on pathological model output is treated as "not followed"
+    (with the traceback logged), not propagated, so a single bad rollout cannot crash
+    reward scoring for the whole batch."""
+
+    for candidate in candidates:
+        if not candidate.strip():
+            continue
+        try:
+            if instruction.check_following(candidate):
+                return True
+        except Exception:
+            logger.exception("IFEval checker %s raised; treating as not followed", instruction)
+    return False
 
 
 def compute_ifeval_reward(
     response: str, label: Any, metadata: JsonDict | None = None, *, strict: bool = True
 ) -> float:
-    """Score a model response using the official Google IFEval rules.
+    """Score a model response using IFEvalG rules (open-instruct IFEvalVerifier style).
 
-    Sibling of compute_ifbench_reward but for the original 25-instruction IFEval.
-    ``strict`` selects between the two official criteria, exposed as the
-    ``ifeval_strict`` / ``ifeval_loose`` reward types: strict checks the raw
-    response, while loose retries the check against response variants with the
-    leading/trailing line or surrounding ``*`` markdown stripped."""
+    Sibling of compute_ifbench_reward. Constraints are read from ``metadata``
+    (``instruction_id_list`` / ``kwargs``), the same schema the IFBench reward uses;
+    ``label`` is accepted for interface parity but unused. Scoring is all-or-nothing:
+    every instruction must be followed for a reward of 1.0. ``strict`` selects the
+    criterion exposed as the ``ifeval_strict`` / ``ifeval_loose`` reward types — strict
+    checks the raw answer, loose retries against formatting-stripped variants."""
 
     if metadata is None:
         logger.debug("No metadata provided for IFEval scoring.")
         return 0.0
-
-    if response is None:
+    if not response:
         return 0.0
 
-    evaluation_lib = _get_evaluation_lib()
-    inp = _build_input_example(metadata, evaluation_lib.InputExample)
-    if inp is None:
+    instruction_ids = _normalize_instruction_ids(metadata.get("instruction_id_list") or [])
+    if not instruction_ids:
+        logger.debug("Missing instruction identifiers in metadata: %s", metadata)
         return 0.0
 
-    prompt_to_response = {inp.prompt: str(response or "")}
-    evaluate = (
-        evaluation_lib.test_instruction_following_strict if strict else evaluation_lib.test_instruction_following_loose
-    )
-    output = evaluate(inp, prompt_to_response)
-    return 1.0 if output.follow_all_instructions else 0.0
+    kwargs_list = _coerce_kwargs_list(metadata.get("kwargs"), len(instruction_ids))
+
+    answer = _remove_thinking_section(str(response))
+    if not answer:
+        return 0.0
+    candidates = [answer] if strict else _loose_response_variants(answer)
+
+    instruction_dict = _get_instruction_dict()
+    # _coerce_kwargs_list pads/truncates kwargs to len(instruction_ids), so they pair 1:1.
+    for instruction_id, kwargs in zip(instruction_ids, kwargs_list, strict=True):
+        instruction_cls = instruction_dict.get(instruction_id)
+        if instruction_cls is None:
+            logger.warning("Unknown IFEval instruction id: %s", instruction_id)
+            return 0.0
+        instruction = instruction_cls(instruction_id)
+        instruction.build_description(**kwargs)
+        if not _instruction_satisfied(instruction, candidates):
+            return 0.0
+    return 1.0

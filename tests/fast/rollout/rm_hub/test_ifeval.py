@@ -2,19 +2,19 @@
 
 Two layers:
 
-* Pure-helper and fake-lib tests run everywhere with no external deps — they pin
-  down our metadata parsing and the strict/loose routing that this module adds.
-* The ``TestComputeIfevalRewardOfficial`` cases drive the real, official Google
-  IFEval ``evaluation_lib`` end to end. They are skipped unless its pip deps are
-  installed (fast CI legitimately lacks them), so the cheap layers above are what
-  actually guard the wrapper in CI; the official layer is the upper-bound check.
+* Pure-helper tests (metadata parsing, thinking-section stripping, loose-variant
+  generation) run everywhere with no external deps — they pin down the wrapper logic
+  this module owns.
+* The ``@requires_ifevalg`` cases drive the real vendored IFEvalG checkers end to end
+  (strict / loose scoring, dispatch routing). They are skipped only when IFEvalG's
+  extras (nltk / langdetect / immutabledict) are not installed, since fast CI may lack
+  them; on a fully-provisioned env they are the real correctness check.
 """
 
 from __future__ import annotations
 
 import functools
 import importlib.util
-from dataclasses import dataclass
 from unittest.mock import MagicMock
 
 import pytest
@@ -66,144 +66,79 @@ class TestCoerceKwargsList:
         assert ifeval._coerce_kwargs_list([{"keep": 1, "drop": None}], 1) == [{"keep": 1}]
 
 
-@dataclass
-class _FakeInputExample:
-    key: int
-    instruction_id_list: list
-    prompt: str
-    kwargs: list
+class TestRemoveThinkingSection:
+    """The constraints must be checked against the user-visible answer, so reasoning
+    scaffolding (<think>, <answer>, <|assistant|>) is stripped before verification."""
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("<think>reasoning, with a comma</think>\nFinal answer", "Final answer"),
+            ("<answer>hello there</answer>", "hello there"),
+            ("<|assistant|>plain text", "plain text"),
+            ("no tags at all", "no tags at all"),
+            # Only content after the *last* </think> survives.
+            ("<think>a</think>mid<think>b</think>tail", "tail"),
+        ],
+    )
+    def test_strip(self, raw, expected):
+        assert ifeval._remove_thinking_section(raw) == expected
 
 
-class _FakeOutput:
-    def __init__(self, follow_all_instructions):
-        self.follow_all_instructions = follow_all_instructions
+class TestLooseResponseVariants:
+    def test_includes_raw_and_markdown_stripped(self):
+        variants = ifeval._loose_response_variants("*bold answer*")
+        assert "*bold answer*" in variants
+        assert "bold answer" in variants
+
+    def test_includes_first_and_last_line_removed(self):
+        variants = ifeval._loose_response_variants("intro line\nmiddle\nsign-off")
+        assert "middle\nsign-off" in variants  # first line removed
+        assert "intro line\nmiddle" in variants  # last line removed
+        assert "middle" in variants  # both removed
 
 
-class _FakeLib:
-    """Stand-in for instruction_following_eval.evaluation_lib.
-
-    Records which criterion was invoked and the InputExample it was handed, so the
-    wrapper tests can assert routing and metadata translation without the real lib.
-    """
-
-    def __init__(self, follow_strict, follow_loose):
-        self.InputExample = _FakeInputExample
-        self._follow_strict = follow_strict
-        self._follow_loose = follow_loose
-        self.calls: list[str] = []
-        self.last_inp = None
-        self.last_prompt_to_response = None
-
-    def test_instruction_following_strict(self, inp, prompt_to_response):
-        self.calls.append("strict")
-        self.last_inp = inp
-        self.last_prompt_to_response = prompt_to_response
-        return _FakeOutput(self._follow_strict)
-
-    def test_instruction_following_loose(self, inp, prompt_to_response):
-        self.calls.append("loose")
-        self.last_inp = inp
-        self.last_prompt_to_response = prompt_to_response
-        return _FakeOutput(self._follow_loose)
+# --- Wrapper guards (no IFEvalG import needed: they return before scoring) ----------
 
 
-@pytest.fixture
-def install_fake_lib(monkeypatch):
-    """Inject a fake evaluation_lib so compute_ifeval_reward never clones/imports."""
-
-    def _install(follow_strict=False, follow_loose=False):
-        lib = _FakeLib(follow_strict=follow_strict, follow_loose=follow_loose)
-        monkeypatch.setattr(ifeval, "_evaluation_lib", lib)
-        return lib
-
-    return _install
-
-
-class TestComputeIfevalRewardWrapper:
-    def test_none_metadata_returns_zero(self, install_fake_lib):
-        install_fake_lib(follow_strict=True, follow_loose=True)
+class TestComputeIfevalRewardGuards:
+    def test_none_metadata_returns_zero(self):
         assert ifeval.compute_ifeval_reward("anything", None, metadata=None) == 0.0
 
-    def test_none_response_returns_zero(self, install_fake_lib):
-        install_fake_lib(follow_strict=True, follow_loose=True)
+    def test_none_response_returns_zero(self):
         metadata = {"instruction_id_list": ["keywords:existence"]}
         assert ifeval.compute_ifeval_reward(None, None, metadata=metadata) == 0.0
 
-    def test_missing_instruction_ids_returns_zero(self, install_fake_lib):
-        install_fake_lib(follow_strict=True, follow_loose=True)
+    def test_missing_instruction_ids_returns_zero(self):
         assert ifeval.compute_ifeval_reward("resp", None, metadata={"instruction_id_list": []}) == 0.0
 
-    def test_default_mode_is_strict(self, install_fake_lib):
-        lib = install_fake_lib(follow_strict=True, follow_loose=False)
-        reward = ifeval.compute_ifeval_reward("resp", None, metadata={"instruction_id_list": ["keywords:existence"]})
-        assert reward == 1.0
-        assert lib.calls == ["strict"]
 
-    def test_loose_mode_routes_to_loose(self, install_fake_lib):
-        lib = install_fake_lib(follow_strict=False, follow_loose=True)
-        reward = ifeval.compute_ifeval_reward(
-            "resp", None, metadata={"instruction_id_list": ["keywords:existence"]}, strict=False
-        )
-        assert reward == 1.0
-        assert lib.calls == ["loose"]
+# --- Integration against the real vendored IFEvalG checkers -------------------------
 
-    def test_not_following_returns_zero(self, install_fake_lib):
-        install_fake_lib(follow_strict=False, follow_loose=False)
-        reward = ifeval.compute_ifeval_reward("resp", None, metadata={"instruction_id_list": ["keywords:existence"]})
-        assert reward == 0.0
-
-    def test_input_example_built_from_metadata(self, install_fake_lib):
-        lib = install_fake_lib(follow_strict=True, follow_loose=True)
-        metadata = {
-            "instruction_id_list": [" keywords:existence "],
-            "kwargs": [{"keywords": ["foo"], "num_words": None}],
-            "prompt_text": "Write something.",
-            "record_id": 7,
-        }
-        ifeval.compute_ifeval_reward("my response", None, metadata=metadata)
-        assert lib.last_inp.key == 7
-        assert lib.last_inp.instruction_id_list == ["keywords:existence"]
-        # None-valued kwargs are dropped so build_description only sees declared keys.
-        assert lib.last_inp.kwargs == [{"keywords": ["foo"]}]
-        assert lib.last_inp.prompt == "Write something."
-        assert lib.last_prompt_to_response == {"Write something.": "my response"}
-
-
-# --- Integration against the official Google IFEval library -------------------
-
-_IFEVAL_DEP_MODULES = ("absl", "immutabledict", "langdetect", "nltk")
+_IFEVALG_DEP_MODULES = ("nltk", "langdetect", "immutabledict")
 
 
 @functools.lru_cache(maxsize=1)
-def _official_lib_available() -> bool:
-    # Cheap gate first: if the pip deps are not installed, do not attempt a network
-    # checkout. Only once they are present do we let the production loader fetch and
-    # import the source (raising → unavailable rather than failing the suite).
-    if any(importlib.util.find_spec(name) is None for name in _IFEVAL_DEP_MODULES):
+def _ifevalg_available() -> bool:
+    if any(importlib.util.find_spec(name) is None for name in _IFEVALG_DEP_MODULES):
         return False
     try:
-        ifeval._load_evaluation_lib()
+        ifeval._get_instruction_dict()
         return True
     except Exception:
         return False
 
 
-requires_official_ifeval = pytest.mark.skipif(
-    not _official_lib_available(),
-    reason="official Google IFEval source/deps not available in this environment",
+requires_ifevalg = pytest.mark.skipif(
+    not _ifevalg_available(),
+    reason="IFEvalG extras (nltk/langdetect/immutabledict) not installed",
 )
 
 
-@requires_official_ifeval
-class TestComputeIfevalRewardOfficial:
-    """End-to-end checks against the real official checkers.
-
-    Cases below are chosen so that strict and loose agree (single-line, no markdown)
-    except the final mode-sensitive case, which only passes once loose strips the
-    offending first line — that one pins down that the strict/loose routing is real.
-    All chosen instructions are regex/string based (no nltk punkt data, no langdetect),
-    so results are deterministic.
-    """
+@requires_ifevalg
+class TestComputeIfevalRewardScoring:
+    """End-to-end against the real checkers. All chosen instructions are regex/string
+    based (no nltk punkt data, no langdetect), so results are deterministic."""
 
     @pytest.mark.parametrize(
         "instruction_id,kwargs,response,expected_strict,expected_loose",
@@ -237,44 +172,55 @@ class TestComputeIfevalRewardOfficial:
             ("punctuation:no_comma", {}, "Listen, this is the intro.\nThis line is clean", 0.0, 1.0),
         ],
     )
-    def test_reward_matches_official(self, instruction_id, kwargs, response, expected_strict, expected_loose):
-        metadata = {
-            "instruction_id_list": [instruction_id],
-            "kwargs": [kwargs],
-            "prompt_text": "Follow the instruction.",
-            "record_id": 0,
-        }
+    def test_strict_and_loose(self, instruction_id, kwargs, response, expected_strict, expected_loose):
+        metadata = {"instruction_id_list": [instruction_id], "kwargs": [kwargs]}
         assert ifeval.compute_ifeval_reward(response, None, metadata=metadata, strict=True) == expected_strict
         assert ifeval.compute_ifeval_reward(response, None, metadata=metadata, strict=False) == expected_loose
 
+    def test_all_or_nothing_across_constraints(self):
+        # Two constraints: full credit only when both hold; partial compliance scores 0.
+        metadata = {
+            "instruction_id_list": ["keywords:existence", "punctuation:no_comma"],
+            "kwargs": [{"keywords": ["banana"]}, {}],
+        }
+        assert ifeval.compute_ifeval_reward("a banana with no commas", None, metadata=metadata) == 1.0
+        assert ifeval.compute_ifeval_reward("a banana, yes", None, metadata=metadata) == 0.0  # comma fails
+        assert ifeval.compute_ifeval_reward("no fruit here", None, metadata=metadata) == 0.0  # keyword fails
 
+    def test_thinking_section_is_stripped_before_checking(self):
+        # The only comma lives inside <think>; stripping it lets no_comma pass.
+        metadata = {"instruction_id_list": ["punctuation:no_comma"], "kwargs": [{}]}
+        response = "<think>hmm, let me reason</think>\nNo commas in the answer"
+        assert ifeval.compute_ifeval_reward(response, None, metadata=metadata, strict=True) == 1.0
+
+    def test_unknown_instruction_returns_zero(self):
+        metadata = {"instruction_id_list": ["does_not:exist"], "kwargs": [{}]}
+        assert ifeval.compute_ifeval_reward("anything", None, metadata=metadata) == 0.0
+
+
+@requires_ifevalg
 class TestIfevalRmTypeDispatch:
     """The rm_type token must select the right criterion: bare ``ifeval`` and
-    ``ifeval_strict`` route to strict, ``ifeval_loose`` to loose. A fake lib is
-    injected so this exercises the full async_rm dispatch without a network clone."""
+    ``ifeval_strict`` route to strict, ``ifeval_loose`` to loose. Exercised through the
+    full async_rm dispatch against the real checkers, using the mode-sensitive comma
+    case so strict (0.0) and loose (1.0) diverge."""
 
     @pytest.mark.parametrize(
-        "rm_type,expected_call",
+        "rm_type,expected_reward",
         [
-            ("ifeval", "strict"),
-            ("ifeval_strict", "strict"),
-            ("ifeval_loose", "loose"),
+            ("ifeval", 0.0),
+            ("ifeval_strict", 0.0),
+            ("ifeval_loose", 1.0),
         ],
     )
-    def test_rm_type_routes_to_mode(self, monkeypatch, rm_type, expected_call):
-        lib = _FakeLib(follow_strict=True, follow_loose=True)
-        monkeypatch.setattr(ifeval, "_evaluation_lib", lib)
-
+    def test_rm_type_routes_to_mode(self, rm_type, expected_reward):
         args = MagicMock()
         args.custom_rm_path = None
         args.rm_type = rm_type
         sample = Sample(
             prompt="",
-            response="resp",
+            response="Listen, this is the intro.\nThis line is clean",
             label=None,
-            metadata={"instruction_id_list": ["keywords:existence"]},
+            metadata={"instruction_id_list": ["punctuation:no_comma"], "kwargs": [{}]},
         )
-        reward = run(async_rm(args, sample))
-
-        assert reward == 1.0
-        assert lib.calls == [expected_call]
+        assert run(async_rm(args, sample)) == expected_reward
