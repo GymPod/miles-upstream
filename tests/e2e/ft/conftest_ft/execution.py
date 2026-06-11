@@ -185,6 +185,17 @@ def run_training(
         **_DETERMINISTIC_ENV_VARS,
         **_TRAINER_FT_ENV_VARS,
         **_FT_NCCL_REJOIN_WORKAROUND_ENV_VARS,
+        # Run eager (no torch.compile). A cell respawned after a crash cold-recompiles its first
+        # forward; under dynamic batch sizes that is a per-shape Inductor compile that is slow
+        # (observed 124s..1510s, growing) and memory-heavy enough to OOM-kill the actor. That
+        # recompile-on-respawn is a torch.compile + FT infra limitation orthogonal to what these
+        # tests assert (FT crash recovery + baseline-vs-target metric equivalence); both runs are
+        # eager so the comparison stays valid.
+        #
+        # TODO: this only sidesteps the respawn recompile cost, it does not fix it. Investigate
+        # keeping torch.compile under FT respawn (warm/shared Inductor cache survivor->respawn, or
+        # bounded recompile) so the tests can exercise the compiled path again.
+        "TORCHDYNAMO_DISABLE": "1",
         **(extra_env_vars or {}),
     }
     U.execute_train(
