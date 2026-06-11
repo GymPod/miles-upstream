@@ -279,20 +279,9 @@ def _cleanup_dump_dir(dump_dir: Path) -> None:
 
 
 def _barrier_after_dump_dir_cleanup() -> None:
-    # Keep other ranks from writing dump files into a directory that cell 0's
-    # rank 0 may still be deleting.
-    #
-    # This MUST issue exactly the same collectives on every rank of every cell
-    # for a given dumper setup, independent of per-process state. A NCCL barrier
-    # is an ordinary count-1 allreduce under the hood, and NCCL pairs collectives
-    # on a communicator purely by call order; the parent-wipe latch above is
-    # per-process, so putting a cross-cell barrier inside _cleanup_dump_dir made
-    # a freshly respawned cell (empty latch -> two cleanups) issue one more
-    # barrier than the surviving cell on the first post-healing step. From then
-    # on EVERY collective on that communicator paired with the wrong peer op:
-    # gradient buckets reduced against probe scalars and metric vectors, all
-    # silently. Hence: rmtree above stays latch-dependent (local FS work only),
-    # while the barrier here runs unconditionally once per dumper setup.
+    # Must issue exactly the same collectives on every rank of every cell, independent of
+    # per-process state (e.g. the parent-wipe latch): an asymmetric barrier count shifts
+    # the pairing of every later collective on the cross-cell communicator.
     if dist.is_initialized():
         dist.barrier()
 
