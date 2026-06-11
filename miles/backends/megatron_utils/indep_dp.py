@@ -86,6 +86,8 @@ def _allreduce_grads_across_replicas(args, model: Sequence["DDP"], parallel_stat
 
     pg = parallel_state.indep_dp.group
     util = GeneralPGUtil.create(pg)
+    cell_rank = parallel_state.indep_dp.rank
+    expected_members = parallel_state.indep_dp.size
 
     allreduce_success = True
     try:
@@ -96,11 +98,25 @@ def _allreduce_grads_across_replicas(args, model: Sequence["DDP"], parallel_stat
                     util.all_reduce(bucket.grad_data, pg, op=dist.ReduceOp.SUM)
     except Exception:
         allreduce_success = False
-        logger.exception("Gradient allreduce across replicas failed")
+        logger.exception(
+            "indep_dp cross-cell gradient allreduce raised (cell_rank=%d, expected_members=%d); "
+            "discarding this step's grads",
+            cell_rank,
+            expected_members,
+        )
 
+    # pg.errored() can force a CUDA/stream sync, so call it exactly once per step here -- do NOT
+    # sprinkle extra errored() probes. When it does report an async error it MUST be logged loudly:
+    # a swallowed cross-cell error means an un-reduced (wrong) gradient would be applied silently.
     if (e := pg.errored()) is not None:
         allreduce_success = False
-        logger.error("indep_dp PG has async error: %s", e)
+        logger.error(
+            "indep_dp cross-cell PG async error (cell_rank=%d, expected_members=%d): %s; "
+            "discarding this step's grads",
+            cell_rank,
+            expected_members,
+            e,
+        )
 
     # Intra-cell consensus: if ANY rank's allreduce failed, ALL ranks discard.
     # get_gloo_group() is cell-local (created from the default world PG).
