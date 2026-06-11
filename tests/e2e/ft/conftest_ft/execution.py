@@ -189,6 +189,20 @@ _FT_NCCL_REJOIN_WORKAROUND_ENV_VARS: dict[str, str] = {
     "NCCL_PROTO": "Simple",
 }
 
+# Debug-only passthrough: forward selected diagnostic env vars from the test launcher's
+# environment to the training actors (NCCL_DEBUG* for comm traces, MILES_FT_DEBUG_* for
+# env-gated probes such as the indep_dp membership probe, RAY_DEDUP_LOGS=0 so Ray does not
+# collapse identical per-rank log lines into "[repeated Nx]"). No-op when none are set.
+_DEBUG_ENV_PASSTHROUGH_PREFIXES: tuple[str, ...] = (
+    "NCCL_DEBUG",
+    "MILES_FT_DEBUG_",
+    "RAY_DEDUP_LOGS",
+)
+
+
+def _get_debug_passthrough_env_vars() -> dict[str, str]:
+    return {k: v for k, v in os.environ.items() if k.startswith(_DEBUG_ENV_PASSTHROUGH_PREFIXES)}
+
 
 def run_training(
     train_args: str,
@@ -214,6 +228,7 @@ def run_training(
         # keeping torch.compile under FT respawn (warm/shared Inductor cache survivor->respawn, or
         # bounded recompile) so the tests can exercise the compiled path again.
         "TORCHDYNAMO_DISABLE": "1",
+        **_get_debug_passthrough_env_vars(),
         **(extra_env_vars or {}),
     }
     U.execute_train(

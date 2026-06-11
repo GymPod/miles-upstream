@@ -1,8 +1,10 @@
 import logging
+import os
 from collections.abc import Sequence
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
+import torch
 import torch.distributed as dist
 
 from miles.utils.distributed_utils import get_gloo_group
@@ -52,6 +54,9 @@ def create_indep_dp_group(
         f"Configured independent DP PG: {indep_dp_info}, "
         f"megatron_rank={megatron_rank}, megatron_world_size={megatron_world_size}"
     )
+    _debug_membership_probe(
+        pg=nccl_pg, expected_members=indep_dp_info.alive_size, cell_rank=indep_dp_info.alive_rank, where="postcreate"
+    )
     return GroupInfo(rank=indep_dp_info.alive_rank, size=indep_dp_info.alive_size, group=nccl_pg, gloo_group=gloo_pg)
 
 
@@ -87,6 +92,13 @@ def _allreduce_grads_across_replicas(args, model: Sequence["DDP"], parallel_stat
     pg = parallel_state.indep_dp.group
     util = GeneralPGUtil.create(pg)
 
+    _debug_membership_probe(
+        pg=pg,
+        expected_members=parallel_state.indep_dp.size,
+        cell_rank=parallel_state.indep_dp.rank,
+        where="pre_grad_reduce",
+    )
+
     allreduce_success = True
     try:
         for model_chunk in model:
@@ -117,3 +129,49 @@ def _allreduce_grads_across_replicas(args, model: Sequence["DDP"], parallel_stat
     # Intra-cell consensus: if ANY rank's allreduce failed, ALL ranks discard.
     # get_gloo_group() is cell-local (created from the default world PG).
     return collective_bool_and(value=allreduce_success, group=get_gloo_group())
+
+
+# Debug-only membership probe, gated off by default. A degraded (single-member) cross-cell
+# communicator turns every all_reduce into a legal no-op: it neither raises nor sets
+# pg.errored(), so the loud-logging paths above can never fire for it and an un-reduced
+# gradient gets applied silently. The probe all_reduces ones(1) and compares the result with
+# the expected member count, which catches that silent degradation at the exact step it
+# happens. The .item() readback is a CUDA sync per call, which is why this must stay off
+# (zero-cost) outside debug runs.
+_DEBUG_MEMBERSHIP_PROBE_ENV_VAR = "MILES_FT_DEBUG_INDEP_DP_PROBE"
+
+
+def _debug_membership_probe(pg: dist.ProcessGroup, expected_members: int, cell_rank: int, where: str) -> None:
+    if not bool(int(os.environ.get(_DEBUG_MEMBERSHIP_PROBE_ENV_VAR, "0"))):
+        return
+
+    try:
+        probe = torch.ones(1, dtype=torch.float32, device="cuda")
+        GeneralPGUtil.create(pg).all_reduce(probe, pg, op=dist.ReduceOp.SUM)
+        observed = probe.item()
+    except Exception:
+        logger.exception(
+            "indep_dp membership probe raised (where=%s, cell_rank=%d, expected_members=%d)",
+            where,
+            cell_rank,
+            expected_members,
+        )
+        return
+
+    if observed == float(expected_members):
+        logger.info(
+            "indep_dp membership probe ok (where=%s, cell_rank=%d, members=%d)", where, cell_rank, expected_members
+        )
+        return
+
+    # The extra errored() call (and its potential CUDA sync) is acceptable here: this whole
+    # path only runs in env-gated debug mode and the comm is already known-degraded.
+    logger.error(
+        "indep_dp membership probe DEGRADED (where=%s, cell_rank=%d, expected_members=%d, observed_sum=%s, "
+        "pg.errored()=%s)",
+        where,
+        cell_rank,
+        expected_members,
+        observed,
+        pg.errored(),
+    )
