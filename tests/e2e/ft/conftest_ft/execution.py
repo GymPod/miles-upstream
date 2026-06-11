@@ -20,13 +20,6 @@ _DEBUG_ROLLOUT_DATA_DIR: str = f"{_DATA_DIR}/{DEBUG_ROLLOUT_DATA_HF_REPO.split('
 
 
 def materialize_cyclic_debug_rollout_data(count: int) -> str:
-    """Symlink the recorded debug rollouts cyclically into a fresh temp dir as 0.pt..{count-1}.pt.
-
-    The recorded set is finite (one .pt per rollout). A soak that runs more steps than there are
-    files (e.g. the random-failure test) needs one file per rollout_id; the rollout content is
-    irrelevant to what a soak asserts (FT survival across crashes), so we reuse the files cyclically.
-    Doing it here (test fixture) keeps the production load path (load_debug_rollout_data) unchanged.
-    """
     src = Path(_DEBUG_ROLLOUT_DATA_DIR)
     available = sorted(int(p.stem) for p in src.glob("*.pt") if p.stem.isdigit())
     if not available:
