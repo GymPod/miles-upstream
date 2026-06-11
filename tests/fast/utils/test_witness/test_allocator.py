@@ -133,3 +133,40 @@ class TestComputeStaleIds:
     def test_buffer_size_one(self) -> None:
         assert _compute_stale_ids(keep_count=1, counter=5, buffer_size=1) == []
         assert _compute_stale_ids(keep_count=0, counter=5, buffer_size=1) == [0]
+
+
+class TestWitnessIdAllocatorResume:
+    def test_resume_continues_allocation_without_reusing_ids(self) -> None:
+        """Resuming from a persisted counter issues fresh ids, as if the run never stopped."""
+        saved = WitnessIdAllocator(buffer_size=100)
+        saved_info = saved.allocate(10)
+        assert saved_info.counter == 10
+
+        resumed = WitnessIdAllocator(buffer_size=100)
+        resumed.resume(saved_info.counter)
+        info = resumed.allocate(5)
+
+        assert info.witness_ids == [10, 11, 12, 13, 14]
+        assert info.counter == 15
+
+    def test_resume_with_smaller_counter_is_noop(self) -> None:
+        """resume() never moves the counter backwards."""
+        allocator = WitnessIdAllocator(buffer_size=100)
+        allocator.allocate(10)
+
+        allocator.resume(3)
+
+        assert allocator.allocate(1).witness_ids == [10]
+
+    def test_counter_matches_uninterrupted_run(self) -> None:
+        """A save/resume sequence allocates the same ids as one uninterrupted allocator."""
+        uninterrupted = WitnessIdAllocator(buffer_size=7)
+        expected = [uninterrupted.allocate(3).witness_ids for _ in range(4)]
+
+        first = WitnessIdAllocator(buffer_size=7)
+        actual = [first.allocate(3).witness_ids, first.allocate(3).witness_ids]
+        second = WitnessIdAllocator(buffer_size=7)
+        second.resume(first.allocate(0).counter)
+        actual += [second.allocate(3).witness_ids, second.allocate(3).witness_ids]
+
+        assert actual == expected

@@ -355,7 +355,7 @@ class TestWitnessDumpAndClearStale:
         model = [chunk0, chunk1]
         all_params = list(chunk0.parameters()) + list(chunk1.parameters())
         optimizer = torch.optim.Adam(all_params, lr=0.01)
-        witness_info = WitnessInfo(witness_ids=[1, 2, 3, 4], stale_ids=[5, 6])
+        witness_info = WitnessInfo(witness_ids=[1, 2, 3, 4], stale_ids=[5, 6], counter=4)
 
         with patch("miles.utils.witness.module.get_event_logger") as mock_get_logger, patch(
             "miles.utils.witness.module.get_parallel_state"
@@ -387,7 +387,7 @@ class TestWitnessDumpAndClearStale:
 
         model = [chunk]
         optimizer = torch.optim.Adam(chunk.parameters(), lr=0.01)
-        witness_info = WitnessInfo(witness_ids=[0], stale_ids=[3, 7])
+        witness_info = WitnessInfo(witness_ids=[0], stale_ids=[3, 7], counter=1)
 
         with patch("miles.utils.witness.module.get_event_logger") as mock_get_logger, patch(
             "miles.utils.witness.module.get_parallel_state"
@@ -410,7 +410,7 @@ class TestWitnessDumpAndClearStale:
 
         model = [chunk]
         optimizer = torch.optim.Adam(chunk.parameters(), lr=0.01)
-        witness_info = WitnessInfo(witness_ids=[0], stale_ids=[])
+        witness_info = WitnessInfo(witness_ids=[0], stale_ids=[], counter=1)
 
         with patch("miles.utils.witness.module.get_event_logger") as mock_get_logger, patch(
             "miles.utils.witness.module.get_parallel_state"
@@ -619,3 +619,35 @@ class TestAbsBroadcastAddDoubleBackward:
             lambda h: _AbsBroadcastAdd.apply(h, addend.detach()),
             (hidden,),
         )
+
+
+class TestAllocationCounterPersistence:
+    def test_dump_updates_counter_and_read_returns_it(self) -> None:
+        """witness_dump_and_clear_stale persists WitnessInfo.counter onto every witness."""
+        chunk = _make_fake_chunk(buffer_size=10)
+        model = [chunk]
+        optimizer = torch.optim.Adam(chunk.parameters(), lr=0.01)
+        witness_info = WitnessInfo(witness_ids=[0, 1, 2], stale_ids=[], counter=3)
+
+        with patch("miles.utils.witness.module.get_event_logger") as mock_get_logger, patch(
+            "miles.utils.witness.module.get_parallel_state"
+        ) as mock_get_parallel_state:
+            mock_get_parallel_state.return_value.pp.rank = 0
+            mock_get_logger.return_value = MagicMock()
+            witness_dump_and_clear_stale(model=model, witness_info=witness_info, optimizer=optimizer)
+
+        from miles.utils.witness.module import read_witness_allocation_counter
+
+        assert chunk.module.local_head_witness.allocation_counter.item() == 3
+        assert chunk.module.local_tail_witness.allocation_counter.item() == 3
+        assert read_witness_allocation_counter(model) == 3
+
+    def test_counter_survives_state_dict_roundtrip(self) -> None:
+        """The counter is a persistent buffer, so checkpoints carry it across a resume."""
+        witness = _DataWitness(buffer_size=10)
+        witness.allocation_counter.fill_(42)
+
+        restored = _DataWitness(buffer_size=10)
+        restored.load_state_dict(witness.state_dict())
+
+        assert restored.allocation_counter.item() == 42

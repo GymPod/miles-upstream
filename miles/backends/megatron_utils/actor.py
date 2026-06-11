@@ -28,6 +28,7 @@ from miles.utils.timer import Timer, inverse_timer, timer
 from miles.utils.tracking_utils import init_tracking
 from miles.utils.types import RolloutBatch
 from miles.utils.witness.allocator import WitnessInfo
+from miles.utils.witness.module import read_witness_allocation_counter
 
 from ...utils.profile_utils import TrainProfiler
 from ...utils.tensor_backper import TensorBackuper
@@ -689,6 +690,9 @@ class MegatronTrainRayActor(TrainRayActor):
             rank=0 if self.role == "actor" else 1,
             group_name=group_name,
         )
+
+    def get_witness_allocation_counter(self) -> int:
+        return read_witness_allocation_counter(self.model)
 
     def send_ckpt(self, dst_rank: int) -> None:
         # These states are not handled

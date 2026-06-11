@@ -115,6 +115,7 @@ class RayTrainGroup:
         self._witness_allocator: WitnessIdAllocator | None = (
             WitnessIdAllocator(buffer_size=args.witness_buffer_size) if args.enable_witness else None
         )
+        self._witness_allocator_resumed = False
 
         self._test_action_executor = FTTestActionGroupExecutor.from_args(args, group=self)
 
@@ -124,6 +125,7 @@ class RayTrainGroup:
         """Do one rollout training"""
 
         run_analysis_from_args(self.args)
+        await self._maybe_resume_witness_allocator()
 
         async def _fn(attempt: int):
             witness_info = self._allocate_witness_info(
@@ -151,6 +153,20 @@ class RayTrainGroup:
         await retry(_fn)
 
         self._test_action_executor.run_after_step(rollout_id=rollout_id)
+
+    async def _maybe_resume_witness_allocator(self) -> None:
+        """Continue id allocation from the loaded checkpoint's counter.
+
+        Aligns a resumed run with a never-interrupted one: rows of previously allocated
+        ids still hold the saved run's witness state, so re-issuing those ids would let a
+        new sample read as "present" without ever receiving gradient.
+        """
+        if self._witness_allocator is None or self._witness_allocator_resumed:
+            return
+
+        counters = await self._execute_first_alive("get_witness_allocation_counter")
+        self._witness_allocator.resume(max(counters))
+        self._witness_allocator_resumed = True
 
     def _allocate_witness_info(self, *, rollout_id: int, attempt: int, sample_indices):
         if self._witness_allocator is None:
