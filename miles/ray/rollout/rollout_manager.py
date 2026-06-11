@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 import ray
@@ -37,6 +39,21 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def health_monitoring_paused(rollout_manager) -> AsyncIterator[None]:
+    """Pause engine health checking around a weight update.
+
+    The update pauses generation on every engine, and sglang's /health_generate fails
+    once generation has been paused for ~20s, so the health monitor would kill a healthy
+    engine in the middle of the weight broadcast.
+    """
+    await rollout_manager.pause_health_monitoring.remote()
+    try:
+        yield
+    finally:
+        await rollout_manager.resume_health_monitoring.remote()
 
 
 @ray.remote
@@ -84,7 +101,7 @@ class RolloutManager:
 
         # TODO will be replaced by full ft, thus temporarily leave it without modifications
         self._health_monitors = []
-        self._health_checking_before_update = False
+        self._health_checking_before_pause = False
         if not self.args.debug_train_only and self.args.use_fault_tolerance:
             for srv in self.servers.values():
                 for group in srv.server_groups:
@@ -198,15 +215,7 @@ class RolloutManager:
     # -------------------------- engine management -----------------------------
 
     async def get_updatable_engines_and_lock(self):
-        """Return engines eligible for weight updates.
-
-        Pauses health checking for the duration of the weight update: the update pauses
-        generation on every engine, and sglang's /health_generate fails once generation
-        has been paused for ~20s, so the monitor would kill a healthy engine mid-update.
-        The caller resumes it via resume_health_monitoring once the update is done.
-        """
-        self._health_checking_before_update = any(m.is_checking_enabled() for m in self._health_monitors)
-        self._health_monitoring_pause()
+        """Return engines eligible for weight updates."""
         srv = self._get_updatable_server()
         if not srv:
             return EnginesAndLock(
@@ -226,10 +235,13 @@ class RolloutManager:
             engine_gpu_offsets=srv.engine_gpu_offsets,
         )
 
+    async def pause_health_monitoring(self):
+        self._health_checking_before_pause = any(m.is_checking_enabled() for m in self._health_monitors)
+        self._health_monitoring_pause()
+
     async def resume_health_monitoring(self):
-        """Undo get_updatable_engines_and_lock's pause; no-op if checking was already off
-        (e.g. engines offloaded)."""
-        if self._health_checking_before_update:
+        """Undo pause_health_monitoring; no-op if checking was already off (e.g. engines offloaded)."""
+        if self._health_checking_before_pause:
             self._health_monitoring_resume()
 
     def clear_updatable_has_new_engines(self):
