@@ -14,6 +14,7 @@ from miles.utils.witness.module import (
     _record_and_log_witness_param,
     _zero_witness_rows,
     install_witness,
+    reset_witness_state,
     witness_dump_and_clear_stale,
 )
 
@@ -619,3 +620,33 @@ class TestAbsBroadcastAddDoubleBackward:
             lambda h: _AbsBroadcastAdd.apply(h, addend.detach()),
             (hidden,),
         )
+
+
+class TestResetWitnessState:
+    def test_reset_zeroes_all_rows_and_optimizer_state(self) -> None:
+        """All witness rows and their Adam state are zeroed, simulating a disk-ckpt resume."""
+        chunk = _make_fake_chunk(buffer_size=10)
+        chunk.module.local_head_witness.witness.weight.data.fill_(1.0)
+        chunk.module.local_tail_witness.witness.weight.data.fill_(1.0)
+
+        optimizer = torch.optim.Adam(chunk.parameters(), lr=0.01)
+        loss = sum(w.witness.weight.sum() for w in [chunk.module.local_head_witness, chunk.module.local_tail_witness])
+        loss.backward()
+        optimizer.step()
+
+        reset_witness_state(model=[chunk], optimizer=optimizer)
+
+        for witness in [chunk.module.local_head_witness, chunk.module.local_tail_witness]:
+            weight = witness.witness.weight
+            assert (weight.data == 0).all(), "witness rows must be zeroed on reset"
+            state = optimizer.state[weight]
+            assert (state["exp_avg"] == 0).all() and (state["exp_avg_sq"] == 0).all()
+
+    def test_reset_on_fresh_model_is_noop(self) -> None:
+        """Reset right after init (no optimizer state yet) does not raise and keeps rows zero."""
+        chunk = _make_fake_chunk(buffer_size=10)
+        optimizer = torch.optim.Adam(chunk.parameters(), lr=0.01)
+
+        reset_witness_state(model=[chunk], optimizer=optimizer)
+
+        assert (chunk.module.local_head_witness.witness.weight.data == 0).all()

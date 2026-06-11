@@ -28,6 +28,7 @@ from miles.utils.timer import Timer, inverse_timer, timer
 from miles.utils.tracking_utils import init_tracking
 from miles.utils.types import RolloutBatch
 from miles.utils.witness.allocator import WitnessInfo
+from miles.utils.witness.module import reset_witness_state
 
 from ...utils.profile_utils import TrainProfiler
 from ...utils.tensor_backper import TensorBackuper
@@ -162,6 +163,13 @@ class MegatronTrainRayActor(TrainRayActor):
         (self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id) = initialize_model_and_optimizer(
             args, role, checkpointing_context=checkpointing_context
         )
+
+        # Witness rows are per-run diagnostic state; a disk-checkpoint resume must not leak
+        # the previous run's rows (see reset_witness_state). The healing transfer path
+        # (recv_ckpt_src_rank set) keeps them: the healed cell must stay bitwise equal to
+        # the surviving cell.
+        if args.enable_witness and recv_ckpt_src_rank is None:
+            reset_witness_state(model=self.model, optimizer=self.optimizer)
 
         parallel_state = get_parallel_state()
         if parallel_state.cp.size > 1:

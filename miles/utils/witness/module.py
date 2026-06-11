@@ -31,6 +31,23 @@ def install_witness(
     model.local_tail_witness = _DataWitness(buffer_size=buffer_size, sequence_parallel=sequence_parallel)
 
 
+def reset_witness_state(*, model: Sequence[nn.Module], optimizer: torch.optim.Optimizer) -> None:
+    """Zero every witness row and its optimizer state.
+
+    Witness rows are per-run diagnostic state: the event analyzer only sees the current
+    run's events, so rows trained by a previous run and loaded back through a disk
+    checkpoint resume would read as "present" for witness ids the current run never
+    trained (the id allocator restarts from zero on resume and re-issues the same ids to
+    new samples). The Adam state of those rows survives a resume the same way and can
+    keep moving a row whose gradient is exactly zero. Call this after a disk-checkpoint
+    load. Do NOT call it on the healing in-memory transfer path: the received rows must
+    stay bitwise equal to the surviving cell's for the cross-replica weight checksum.
+    """
+    for witness in _get_all_witnesses_in_model(model):
+        idx = torch.arange(witness.buffer_size, dtype=torch.long, device=witness.witness.weight.device)
+        _zero_witness_rows(witness=witness, idx=idx, optimizer=optimizer)
+
+
 def witness_dump_and_clear_stale(
     *,
     model: Sequence[nn.Module],
