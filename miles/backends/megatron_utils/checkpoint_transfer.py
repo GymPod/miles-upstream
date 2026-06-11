@@ -12,6 +12,7 @@ except ImportError:
 from megatron.core.dist_checkpointing.tensor_aware_state_dict import MCoreTensorAwareStateDict
 
 from miles.backends.megatron_utils.in_memory_checkpoint import InMemoryCheckpointManager, save_to_memory
+from miles.backends.megatron_utils.indep_dp import _debug_membership_probe
 from miles.utils.process_group_utils import GroupInfo
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,12 @@ def send_ckpt(
     transport.disallow_checkpoint()
     logger.info(f"Sent checkpoint (iteration={iteration}) to alive_rank={dst_rank}")
 
+    # Symmetric with the post_recv_ckpt probe on the receiving cell (probes are collectives,
+    # so both sides of the comm must issue the same number of them).
+    _debug_membership_probe(
+        pg=indep_dp.group, expected_members=indep_dp.size, cell_rank=indep_dp.rank, where="post_send_ckpt"
+    )
+
 
 def recv_ckpt(
     *,
@@ -91,6 +98,11 @@ def recv_ckpt(
 
     iteration, state_dict = _TransportCodec.decode(payload)
     logger.info(f"Received checkpoint (iteration={iteration}) from alive_rank={src_rank}")
+
+    # Symmetric with the post_send_ckpt probe on the sending cell.
+    _debug_membership_probe(
+        pg=indep_dp.group, expected_members=indep_dp.size, cell_rank=indep_dp.rank, where="post_recv_ckpt"
+    )
 
     manager = InMemoryCheckpointManager()
     manager.save(state_dict, iteration=iteration)

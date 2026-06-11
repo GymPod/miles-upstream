@@ -126,6 +126,13 @@ def _allreduce_grads_across_replicas(args, model: Sequence["DDP"], parallel_stat
             e,
         )
 
+    _debug_membership_probe(
+        pg=pg,
+        expected_members=parallel_state.indep_dp.size,
+        cell_rank=parallel_state.indep_dp.rank,
+        where="post_grad_reduce",
+    )
+
     # Intra-cell consensus: if ANY rank's allreduce failed, ALL ranks discard.
     # get_gloo_group() is cell-local (created from the default world PG).
     return collective_bool_and(value=allreduce_success, group=get_gloo_group())

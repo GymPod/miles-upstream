@@ -1,3 +1,6 @@
+import logging
+import os
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -7,6 +10,36 @@ import torch.distributed as dist
 from torch.distributed.distributed_c10d import _object_to_tensor, _tensor_to_object
 
 from miles.utils.det_process_group import DET_NCCL_BACKEND_NAME, det_all_reduce
+
+logger = logging.getLogger(__name__)
+
+# Debug-only (env-gated, default off): label every collective issued on a torchft (cross-cell)
+# PG with its shape/dtype/op and the Python call site. Both cells of a comm must issue the SAME
+# sequence of collectives; a single unmatched call silently desynchronizes the comm. This trace
+# makes the per-cell sequences comparable so the desyncing call site can be identified.
+_DEBUG_PG_TRACE_ENV_VAR = "MILES_FT_DEBUG_PG_TRACE"
+
+
+def _debug_pg_trace(op_name: str, tensor: torch.Tensor, op: object = None) -> None:
+    if not bool(int(os.environ.get(_DEBUG_PG_TRACE_ENV_VAR, "0"))):
+        return
+
+    frames = []
+    frame = sys._getframe(2)
+    for _ in range(3):
+        if frame is None:
+            break
+        frames.append(f"{frame.f_code.co_filename.rsplit('/', 1)[-1]}:{frame.f_lineno}:{frame.f_code.co_name}")
+        frame = frame.f_back
+
+    logger.info(
+        "pg_trace %s numel=%d dtype=%s op=%s caller=%s",
+        op_name,
+        tensor.numel(),
+        tensor.dtype,
+        op,
+        " <- ".join(frames),
+    )
 
 
 def _is_det_world() -> bool:
@@ -160,6 +193,8 @@ class _RawPGUtil(GeneralPGUtil):
         return group.size()
 
     def all_reduce(self, tensor: torch.Tensor, group: dist.ProcessGroup, op: dist.ReduceOp) -> None:
+        _debug_pg_trace("all_reduce", tensor, op=op)
+
         if (op == dist.ReduceOp.SUM or op == dist.ReduceOp.AVG) and _is_det_world():
             det_all_reduce(tensor, group=group, reduce_op=op)
             return
@@ -177,6 +212,8 @@ class _RawPGUtil(GeneralPGUtil):
         self.all_reduce(tensor, group, op)
 
     def broadcast(self, tensor: torch.Tensor, group: dist.ProcessGroup) -> None:
+        _debug_pg_trace("broadcast", tensor)
+
         opts = dist.BroadcastOptions()
         opts.rootRank = 0
         _check_wait(group.broadcast([tensor], opts), "broadcast")
@@ -184,6 +221,8 @@ class _RawPGUtil(GeneralPGUtil):
     def all_gather(
         self, output_tensors: list[torch.Tensor], input_tensor: torch.Tensor, group: dist.ProcessGroup
     ) -> None:
+        _debug_pg_trace("all_gather", input_tensor)
+
         # AllgatherOptions is not re-exported by torch.distributed (unlike
         # AllreduceOptions, BroadcastOptions, GatherOptions). PyTorch omission.
         from torch._C._distributed_c10d import AllgatherOptions
