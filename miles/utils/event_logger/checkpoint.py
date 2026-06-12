@@ -56,10 +56,17 @@ def restore_events(args: Namespace) -> None:
     if not src.is_dir():
         return
 
+    # Write through the existing files instead of replacing the directory: processes that
+    # already opened their event file keep an O_APPEND handle, which stays valid across an
+    # in-place truncate (every append re-seeks to EOF) but not across an unlink.
     dst = Path(args.save_debug_event_data)
-    if dst.exists():
-        shutil.rmtree(dst)
-    shutil.copytree(src, dst)
+    dst.mkdir(parents=True, exist_ok=True)
+    snapshot_files = {p.name: p for p in src.iterdir() if p.is_file()}
+    live_files = {p.name for p in dst.iterdir() if p.is_file()}
+    for name, path in snapshot_files.items():
+        (dst / name).write_bytes(path.read_bytes())
+    for name in live_files - set(snapshot_files):
+        (dst / name).write_bytes(b"")
     logger.info("Restored event dir %s <- %s", dst, src)
 
 

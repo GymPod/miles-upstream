@@ -5,8 +5,6 @@ from miles.ray.placement_group import create_placement_groups, create_rollout_ma
 from miles.utils.arguments import parse_args
 from miles.utils.async_utils import eager_create_task
 from miles.utils.control_server.server import start_control_server
-from miles.utils.event_analyzer.analyzer import run_analysis_from_args
-from miles.utils.event_logger.checkpoint import restore_events, snapshot_events
 from miles.utils.logging_utils import configure_logger
 from miles.utils.mini_ft_controller import maybe_start_mini_ft_controller
 from miles.utils.misc import should_run_periodic_action
@@ -18,7 +16,6 @@ logger = logging.getLogger(__name__)
 
 # The framework supports other asynchronous approaches such as fully async (which is shown in examples/full_async).
 async def train(args):
-    restore_events(args)
     assert not args.colocate, "Colocation is not supported for async training."
     configure_logger(args, source=MainProcessIdentity())
     # allocate the GPUs
@@ -77,9 +74,7 @@ async def train(args):
                     rollout_id,
                     force_sync=rollout_id == args.num_rollout - 1,
                 )
-            if args.rollout_global_dataset:
-                await rollout_manager.save.remote(rollout_id)
-            snapshot_events(args, rollout_id)
+            await rollout_manager.save.remote(rollout_id)
 
         if (rollout_id + 1) % args.update_weights_interval == 0:
             # sync generate before update weights to prevent update weight in the middle of generation
@@ -101,7 +96,6 @@ async def train(args):
             )
             break
 
-    run_analysis_from_args(args)
     await rollout_manager.dispose.remote()
 
 
