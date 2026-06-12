@@ -23,9 +23,8 @@ from miles.rollout.base_types import (
     call_rollout_fn,
 )
 from miles.rollout.inference_rollout.compatibility import call_rollout_function, load_rollout_function
+from miles.utils import event_analyzer, event_logger
 from miles.utils.environ import enable_experimental_rollout_refactor
-from miles.utils.event_analyzer.analyzer import run_analysis_from_args
-from miles.utils.event_logger.checkpoint import restore_events, snapshot_events
 from miles.utils.health_monitor import RolloutHealthMonitor
 from miles.utils.http_utils import init_http_client
 from miles.utils.logging_utils import configure_logger
@@ -49,7 +48,7 @@ class RolloutManager:
 
     def __init__(self, args, pg):
         configure_logger(args, source=RolloutManagerProcessIdentity())
-        restore_events(args)
+        event_logger.restore(args)
 
         self.pg = pg
         self.args = args
@@ -103,7 +102,7 @@ class RolloutManager:
     def dispose(self):
         # The analysis at the start of each train() call only covers earlier rollouts, so
         # the final rollout would otherwise never be analyzed.
-        run_analysis_from_args(self.args)
+        event_analyzer.run_analysis_from_args(self.args)
         if self._metric_checker is not None:
             self._metric_checker.dispose()
         for monitor in self._health_monitors:
@@ -181,7 +180,7 @@ class RolloutManager:
     def save(self, rollout_id):
         if self.args.rollout_global_dataset:
             self.data_source.save(rollout_id)
-        snapshot_events(self.args, rollout_id)
+        event_logger.snapshot(self.args, rollout_id)
 
     def load(self, rollout_id=None):
         self.data_source.load(rollout_id)

@@ -12,8 +12,8 @@ from miles.backends.megatron_utils.types import TrainStepOutcome
 from miles.ray.train.actor_factory import allocate_gpus_for_actor
 from miles.ray.train.cell import RayTrainCell
 from miles.ray.train.cell_monitor import create_trainer_cell_health_checker
+from miles.utils import event_analyzer
 from miles.utils.async_utils import AsyncioGatherUtils
-from miles.utils.event_analyzer.analyzer import run_analysis_from_args
 from miles.utils.event_logger.logger import get_event_logger, is_event_logger_initialized
 from miles.utils.event_logger.models import TrainGroupStepEndEvent, WitnessAllocateIdEvent
 from miles.utils.health_checker import NoopHealthChecker, SimpleHealthCheckerConfig
@@ -125,7 +125,7 @@ class RayTrainGroup:
     async def train(self, rollout_id: int, rollout_data_pack):
         """Do one rollout training"""
 
-        run_analysis_from_args(self.args)
+        event_analyzer.run_analysis_from_args(self.args)
 
         async def _fn(attempt: int):
             witness_info = self._allocate_witness_info(

@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 _TRACKER_FILENAME = "latest_checkpointed_iteration.txt"
 
 
-def snapshot_events(args: Namespace, iteration: int) -> None:
+def snapshot(args: Namespace, iteration: int) -> None:
     """Copy the live event dir into the checkpoint tree. Called after a checkpoint save."""
     if args.save_debug_event_data is None or args.save is None:
         return
@@ -38,7 +38,7 @@ def snapshot_events(args: Namespace, iteration: int) -> None:
     logger.info("Snapshotted event dir %s -> %s", src, dst)
 
 
-def restore_events(args: Namespace) -> None:
+def restore(args: Namespace) -> None:
     """Replace the live event dir with the loaded checkpoint's snapshot.
 
     Must run before any process of the run opens an event file (event files are opened
