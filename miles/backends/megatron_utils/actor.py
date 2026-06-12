@@ -170,8 +170,8 @@ class MegatronTrainRayActor(TrainRayActor):
             args.no_load_rng = False
             args.finetune = False
         try:
-            (self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id) = (
-                initialize_model_and_optimizer(args, role, checkpointing_context=checkpointing_context)
+            (self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id) = initialize_model_and_optimizer(
+                args, role, checkpointing_context=checkpointing_context
             )
         finally:
             if recv_ckpt_src_rank is not None:
