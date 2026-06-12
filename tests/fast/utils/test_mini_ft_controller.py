@@ -34,6 +34,10 @@ HEALTHY = CellHealthStatus.HEALTHY
 UNHEALTHY = CellHealthStatus.UNHEALTHY
 NOT_APPLICABLE = CellHealthStatus.NOT_APPLICABLE
 
+# Most healing tests include a healthy peer: the controller refuses to suspend a cell
+# when no other healthy cell remains (last-recovery-source guard).
+HEALTHY_PEER = _make_cell(name="cell-peer", status=CellHealthStatus.HEALTHY)
+
 
 class _FakeClock:
     def __init__(self, start: float = 0.0) -> None:
@@ -211,7 +215,7 @@ class TestControllerHealing:
             suspend_cell=suspend_cell,
             resume_cell=resume_cell,
         )
-        _run_controller_for_n_polls(controller, get_cells, [[unhealthy_cell]])
+        _run_controller_for_n_polls(controller, get_cells, [[unhealthy_cell, HEALTHY_PEER]])
 
         await asyncio.wait_for(controller.run(), timeout=5.0)
 
@@ -240,10 +244,11 @@ class TestControllerHealing:
 
     @pytest.mark.asyncio
     async def test_heal_multiple_unhealthy_cells(self) -> None:
-        """Multiple unhealthy cells are each healed."""
+        """Multiple unhealthy cells are each healed while a healthy peer remains."""
         cells = [
             _make_cell(name="cell-0", status=UNHEALTHY),
             _make_cell(name="cell-1", status=UNHEALTHY),
+            HEALTHY_PEER,
         ]
         get_cells = AsyncMock()
         suspend_cell = AsyncMock()
@@ -303,7 +308,7 @@ class TestControllerBackoff:
             suspend_cell=suspend_cell,
             clock=clock,
         )
-        _run_controller_for_n_polls(controller, get_cells, [[unhealthy_cell]])
+        _run_controller_for_n_polls(controller, get_cells, [[unhealthy_cell, HEALTHY_PEER]])
 
         await asyncio.wait_for(controller.run(), timeout=5.0)
 
@@ -332,7 +337,7 @@ class TestControllerBackoff:
             if backoff:
                 clock.now = backoff.next_attempt_at
 
-            _run_controller_for_n_polls(controller, get_cells, [[unhealthy_cell]])
+            _run_controller_for_n_polls(controller, get_cells, [[unhealthy_cell, HEALTHY_PEER]])
             await asyncio.wait_for(controller.run(), timeout=5.0)
 
             backoff = controller._cell_backoffs["cell-0"]
@@ -353,19 +358,19 @@ class TestControllerBackoff:
         )
 
         # Step 1: First poll → heal attempt fails, sets next_attempt_at
-        _run_controller_for_n_polls(controller, get_cells, [[unhealthy_cell]])
+        _run_controller_for_n_polls(controller, get_cells, [[unhealthy_cell, HEALTHY_PEER]])
         await asyncio.wait_for(controller.run(), timeout=5.0)
         assert suspend_cell.call_count == 1
 
         # Step 2: Poll again without advancing clock → should skip heal
-        _run_controller_for_n_polls(controller, get_cells, [[unhealthy_cell]])
+        _run_controller_for_n_polls(controller, get_cells, [[unhealthy_cell, HEALTHY_PEER]])
         await asyncio.wait_for(controller.run(), timeout=5.0)
         assert suspend_cell.call_count == 1  # no new call
 
         # Step 3: Advance clock past backoff → should attempt heal again
         backoff = controller._cell_backoffs["cell-0"]
         clock.now = backoff.next_attempt_at
-        _run_controller_for_n_polls(controller, get_cells, [[unhealthy_cell]])
+        _run_controller_for_n_polls(controller, get_cells, [[unhealthy_cell, HEALTHY_PEER]])
         await asyncio.wait_for(controller.run(), timeout=5.0)
         assert suspend_cell.call_count == 2
 
@@ -392,7 +397,7 @@ class TestControllerBackoff:
         )
 
         # Step 1: First attempt fails
-        _run_controller_for_n_polls(controller, get_cells, [[unhealthy_cell]])
+        _run_controller_for_n_polls(controller, get_cells, [[unhealthy_cell, HEALTHY_PEER]])
         await asyncio.wait_for(controller.run(), timeout=5.0)
 
         backoff = controller._cell_backoffs["cell-0"]
@@ -400,7 +405,7 @@ class TestControllerBackoff:
 
         # Step 2: Advance clock past backoff, second attempt succeeds
         clock.now = backoff.next_attempt_at
-        _run_controller_for_n_polls(controller, get_cells, [[unhealthy_cell]])
+        _run_controller_for_n_polls(controller, get_cells, [[unhealthy_cell, HEALTHY_PEER]])
         await asyncio.wait_for(controller.run(), timeout=5.0)
 
         assert backoff.consecutive_failures == 0
@@ -469,7 +474,7 @@ class TestControllerNotApplicable:
         )
 
         # Step 1: Unhealthy → heal fails → backoff entry created
-        _run_controller_for_n_polls(controller, get_cells, [[unhealthy_cell]])
+        _run_controller_for_n_polls(controller, get_cells, [[unhealthy_cell, HEALTHY_PEER]])
         await asyncio.wait_for(controller.run(), timeout=5.0)
         assert "cell-0" in controller._cell_backoffs
 
@@ -495,7 +500,7 @@ class TestControllerNotApplicable:
         )
 
         # Step 1: Unhealthy → heal fails → backoff entry created
-        _run_controller_for_n_polls(controller, get_cells, [[unhealthy_cell]])
+        _run_controller_for_n_polls(controller, get_cells, [[unhealthy_cell, HEALTHY_PEER]])
         await asyncio.wait_for(controller.run(), timeout=5.0)
         assert "cell-0" in controller._cell_backoffs
 
@@ -503,6 +508,62 @@ class TestControllerNotApplicable:
         _run_controller_for_n_polls(controller, get_cells, [[healthy_cell]])
         await asyncio.wait_for(controller.run(), timeout=5.0)
         assert "cell-0" not in controller._cell_backoffs
+
+
+class TestControllerLastRecoverySourceGuard:
+    @pytest.mark.asyncio
+    async def test_sole_unhealthy_cell_is_not_suspended(self) -> None:
+        """A lone unhealthy cell is never suspended: it is the last recovery source."""
+        unhealthy_cell = _make_cell(name="cell-0", status=UNHEALTHY)
+        get_cells = AsyncMock()
+        suspend_cell = AsyncMock()
+
+        controller = _make_controller(get_cells=get_cells, suspend_cell=suspend_cell)
+        _run_controller_for_n_polls(controller, get_cells, [[unhealthy_cell]])
+
+        await asyncio.wait_for(controller.run(), timeout=5.0)
+
+        suspend_cell.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unhealthy_cell_with_only_pending_peer_is_not_suspended(self) -> None:
+        """Regression: cell blocked on a dead peer's collective goes heartbeat-stale while
+        the peer is still pending rejoin; suspending it would kill the whole group."""
+        cells = [
+            _make_cell(name="cell-0", status=NOT_APPLICABLE),
+            _make_cell(name="cell-1", status=UNHEALTHY),
+        ]
+        get_cells = AsyncMock()
+        suspend_cell = AsyncMock()
+
+        controller = _make_controller(get_cells=get_cells, suspend_cell=suspend_cell)
+        _run_controller_for_n_polls(controller, get_cells, [cells])
+
+        await asyncio.wait_for(controller.run(), timeout=5.0)
+
+        suspend_cell.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_heal_resumes_once_a_peer_turns_healthy(self) -> None:
+        """The skipped cell is healed on a later poll once another cell reports healthy."""
+        unhealthy_cell = _make_cell(name="cell-1", status=UNHEALTHY)
+        pending_peer = _make_cell(name="cell-0", status=NOT_APPLICABLE)
+        healthy_peer = _make_cell(name="cell-0", status=HEALTHY)
+        get_cells = AsyncMock()
+        suspend_cell = AsyncMock()
+        resume_cell = AsyncMock()
+
+        controller = _make_controller(get_cells=get_cells, suspend_cell=suspend_cell, resume_cell=resume_cell)
+        _run_controller_for_n_polls(
+            controller,
+            get_cells,
+            [[pending_peer, unhealthy_cell], [healthy_peer, unhealthy_cell]],
+        )
+
+        await asyncio.wait_for(controller.run(), timeout=5.0)
+
+        suspend_cell.assert_called_once_with("cell-1")
+        resume_cell.assert_called_once_with("cell-1")
 
 
 class TestControllerLifecycle:

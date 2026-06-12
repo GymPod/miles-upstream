@@ -292,7 +292,11 @@ Architecture (external fault injection, not inside training loop):
   3. The actor's inject_fault() runs in a dedicated ray concurrency group thread
      and kills the process immediately (SIGKILL, os._exit, or segfault)
   4. Health checker detects dead actor via heartbeat timeout
-  5. Mini FT controller auto-recovers (suspend → resume)
+  5. Mini FT controller auto-recovers (suspend → resume). Guard: it refuses to suspend
+     a cell when no other cell is healthy — a survivor blocked on the dead peer's
+     collective goes heartbeat-stale (90s) before the cross-cell PG abort (120s)
+     releases it, and suspending it too would destroy the last recovery source and
+     make the group unrecoverable ("Cannot recover when all cells are dead").
   6. Verify: training completes, no hangs, prod assertions pass
 
 CLI options: --seed (default 42), --num-steps (default 30), --crash-probability (default 0.1)
