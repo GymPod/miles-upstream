@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from megatron.core import tensor_parallel
 from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
-from megatron.core.optimizer.optimizer import ChainedOptimizer, MegatronOptimizer
+from megatron.core.optimizer.optimizer import ChainedOptimizer
 from megatron.core.transformer.utils import sharded_state_dict_default
 from torch import Tensor
 
@@ -187,13 +187,11 @@ def _zero_witness_rows(*, witness: _DataWitness, idx: Tensor, optimizer: torch.o
     model_weight.data[idx] = 0.0
 
     for inner_optimizer in _iter_inner_optimizers(optimizer):
-        if isinstance(inner_optimizer, DistributedOptimizer):
-            _zero_rows_in_distributed_optimizer(optimizer=inner_optimizer, model_param=model_weight, idx=idx)
-        elif isinstance(inner_optimizer, MegatronOptimizer):
-            # miles forces use_distributed_optimizer, so other Megatron wrappers are unreachable.
-            raise NotImplementedError(f"unsupported Megatron optimizer wrapper: {type(inner_optimizer).__name__}")
-        else:
-            _zero_rows_keyed_by_main_param(model_param=model_weight, idx=idx, state=inner_optimizer.state)
+        # miles forces use_distributed_optimizer, so anything else is unreachable.
+        assert isinstance(
+            inner_optimizer, DistributedOptimizer
+        ), f"unsupported optimizer: {type(inner_optimizer).__name__}"
+        _zero_rows_in_distributed_optimizer(optimizer=inner_optimizer, model_param=model_weight, idx=idx)
 
 
 def _iter_inner_optimizers(optimizer: torch.optim.Optimizer) -> list[torch.optim.Optimizer]:
@@ -222,36 +220,18 @@ def _zero_rows_in_distributed_optimizer(*, optimizer: DistributedOptimizer, mode
     main_param = optimizer.optimizer.param_groups[group_index]["params"][group_order]
     assert main_param.numel() == param_range.size
     main_param.data[local_idx] = 0.0
-    _zero_state_rows(state=optimizer.optimizer.state, optimizer_key=main_param, idx=local_idx)
 
-
-def _zero_rows_keyed_by_main_param(
-    *,
-    model_param: Tensor,
-    idx: Tensor,
-    state: dict[Tensor, dict[str, Tensor]],
-) -> None:
-    main_param = getattr(model_param, "main_param", None)
-    if main_param is not None:
-        assert main_param is not model_param
-        assert main_param.shape == model_param.shape, "expected a full fp32 copy, not a shard"
-        main_param.data[idx] = 0.0
-
-    optimizer_key = main_param if main_param is not None else model_param
-    _zero_state_rows(state=state, optimizer_key=optimizer_key, idx=idx)
-
-
-def _zero_state_rows(*, state: dict[Tensor, dict[str, Tensor]], optimizer_key: Tensor, idx: Tensor) -> None:
-    if optimizer_key not in state:
+    state = optimizer.optimizer.state
+    if main_param not in state:
         # An optimizer that never stepped has no per-param state yet; a populated state
         # missing the witness entry means we are clearing the wrong key — fail loudly.
-        assert len(state) == 0, f"witness param missing from optimizer state with {len(state)} entries"
+        assert len(state) == 0, f"witness main shard missing from optimizer state with {len(state)} entries"
         return
 
-    param_state = state[optimizer_key]
+    param_state = state[main_param]
     for key in ("exp_avg", "exp_avg_sq"):
         assert key in param_state, f"expected Adam state key {key!r}, got {sorted(param_state)}"
-        param_state[key][idx] = 0.0
+        param_state[key][local_idx] = 0.0
 
 
 def _record_and_log_witness_param(
