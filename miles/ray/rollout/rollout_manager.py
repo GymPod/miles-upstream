@@ -182,7 +182,7 @@ class RolloutManager:
                 generated_data = data
                 data, metadata = RolloutDataInjectionUtil.load(self.args, rollout_id=rollout_id)
                 RolloutDataInjectionUtil.assert_matches_generated(
-                    generated=generated_data, injected=data, rollout_id=rollout_id
+                    self.args, generated=generated_data, injected=data, rollout_id=rollout_id
                 )
                 metrics = None
 

@@ -99,6 +99,7 @@ def make_args(**overrides: Any) -> Namespace:
         load_debug_rollout_data_subsample=None,
         ci_inject_rollout_data_path=None,
         ci_inject_rollout_data_start_rollout_id=None,
+        ci_inject_rollout_data_min_match_ratio=0.9,
         # CI
         ci_test=False,
         # dumper (sglang debug dumper integration)

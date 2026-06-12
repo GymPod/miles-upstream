@@ -1550,6 +1550,14 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "--ci-inject-rollout-data-path recordings.",
             )
             parser.add_argument(
+                "--ci-inject-rollout-data-min-match-ratio",
+                type=float,
+                default=0.9,
+                help="Minimum mean response-token match ratio between the discarded generated "
+                "data and the injected recording. Below this the engine weights are considered "
+                "wrong (legitimate ulp-level drift only flips occasional sampled tokens).",
+            )
+            parser.add_argument(
                 "--env-report",
                 type=str,
                 default=os.environ.get("MILES_SCRIPT_ENV_REPORT", ""),

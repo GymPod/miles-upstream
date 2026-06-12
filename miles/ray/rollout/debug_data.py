@@ -41,8 +41,6 @@ def save_debug_rollout_data(args, data, rollout_id, evaluation: bool, metadata: 
 
 
 class RolloutDataInjectionUtil:
-    _MIN_RESPONSE_TOKEN_MATCH_RATIO: float = 0.9
-
     @classmethod
     def should_inject(cls, args, rollout_id: int) -> bool:
         if args.ci_inject_rollout_data_path is None:
@@ -68,7 +66,10 @@ class RolloutDataInjectionUtil:
         assert not missing, f"Recorded rollout data to inject is missing: {[str(p) for p in missing]}"
 
     @classmethod
-    def assert_matches_generated(cls, *, generated: list[Sample], injected: list[Sample], rollout_id: int) -> None:
+    def assert_matches_generated(
+        cls, args, *, generated: list[Sample], injected: list[Sample], rollout_id: int
+    ) -> None:
+        min_match_ratio: float = args.ci_inject_rollout_data_min_match_ratio
         assert len(generated) == len(
             injected
         ), f"rollout {rollout_id}: sample count mismatch, generated {len(generated)} vs injected {len(injected)}"
@@ -85,11 +86,11 @@ class RolloutDataInjectionUtil:
         logger.info(
             f"CI rollout-data injection match for rollout {rollout_id}: "
             f"mean response token match {mean_ratio:.4f} (min {min(ratios):.4f}, "
-            f"threshold {cls._MIN_RESPONSE_TOKEN_MATCH_RATIO}) over {len(ratios)} samples"
+            f"threshold {min_match_ratio}) over {len(ratios)} samples"
         )
-        assert mean_ratio > cls._MIN_RESPONSE_TOKEN_MATCH_RATIO, (
+        assert mean_ratio > min_match_ratio, (
             f"rollout {rollout_id}: generated responses match the injected recording at only "
-            f"{mean_ratio:.4f} (threshold {cls._MIN_RESPONSE_TOKEN_MATCH_RATIO}); the engine "
+            f"{mean_ratio:.4f} (threshold {min_match_ratio}); the engine "
             "weights likely diverged from the baseline beyond ulp-level drift"
         )
 
