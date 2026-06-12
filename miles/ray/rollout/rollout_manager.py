@@ -172,10 +172,6 @@ class RolloutManager:
                 self.args, data, train_parallel_config=self.train_parallel_config
             )
             if RolloutDataInjectionUtil.should_inject(self.args, rollout_id):
-                # CI comparison tests: generation above ran normally (keeping engines,
-                # update_weights and health monitoring real) but its output is discarded
-                # in favor of the recorded data, so both runs train on identical inputs.
-                logger.info(f"CI rollout-data injection: replacing generated data of rollout {rollout_id}")
                 generated_data = data
                 data, metadata = RolloutDataInjectionUtil.load(self.args, rollout_id=rollout_id)
                 RolloutDataInjectionUtil.assert_matches_generated(

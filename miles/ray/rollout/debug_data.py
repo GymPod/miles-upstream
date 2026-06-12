@@ -51,6 +51,7 @@ class RolloutDataInjectionUtil:
     def load(cls, args, rollout_id: int) -> tuple[list[Sample], dict]:
         path = Path(args.ci_inject_rollout_data_path.format(rollout_id=rollout_id))
         assert path.is_file(), f"Recorded rollout data to inject is missing: {path}"
+        logger.info(f"CI rollout-data injection: replacing generated data of rollout {rollout_id} with {path}")
         return _load_rollout_data_file(path)
 
     @classmethod
