@@ -43,20 +43,20 @@ def save_debug_rollout_data(args, data, rollout_id, evaluation: bool, metadata: 
 class RolloutDataInjectionUtil:
     _MIN_RESPONSE_TOKEN_MATCH_RATIO: float = 0.9
 
-    @staticmethod
-    def should_inject(args, rollout_id: int) -> bool:
+    @classmethod
+    def should_inject(cls, args, rollout_id: int) -> bool:
         if args.ci_inject_rollout_data_path is None:
             return False
         return rollout_id >= args.ci_inject_rollout_data_start_rollout_id
 
-    @staticmethod
-    def load(args, rollout_id: int) -> tuple[list[Sample], dict]:
+    @classmethod
+    def load(cls, args, rollout_id: int) -> tuple[list[Sample], dict]:
         path = Path(args.ci_inject_rollout_data_path.format(rollout_id=rollout_id))
         assert path.is_file(), f"Recorded rollout data to inject is missing: {path}"
         return _load_rollout_data_file(path)
 
-    @staticmethod
-    def assert_files_exist(args) -> None:
+    @classmethod
+    def assert_files_exist(cls, args) -> None:
         if args.num_rollout is None:
             return
 
@@ -103,12 +103,12 @@ class RolloutDataInjectionUtil:
         matched = sum(token_a == token_b for token_a, token_b in zip(response_a, response_b))
         return matched / denominator
 
-    @staticmethod
-    def _prompt_tokens(sample: Sample) -> list[int]:
+    @classmethod
+    def _prompt_tokens(cls, sample: Sample) -> list[int]:
         return sample.tokens[: len(sample.tokens) - sample.response_length]
 
-    @staticmethod
-    def _response_tokens(sample: Sample) -> list[int]:
+    @classmethod
+    def _response_tokens(cls, sample: Sample) -> list[int]:
         return sample.tokens[len(sample.tokens) - sample.response_length :]
 
 
