@@ -277,10 +277,10 @@ Recipe: Qwen2.5-0.5B, GRPO, 250 rollouts; parallelism mirrors dp2_cp2_real_rollo
 Faults: same external random injection loop as scenario_ft_random
         (train cells via control server)
 
-Assertion: --ci-metric-checker-key eval/gsm8k with a calibrated threshold
-  (provisional 0.45 until calibration runs land; the no-fault baseline asserts
-  0.55 at 250 steps). The checker passes if ANY eval reaches the threshold.
+Assertion: --ci-metric-checker-key eval/gsm8k with a threshold that must stay
+  identical to the no-fault baseline's (0.55): fault recovery must not cost
+  accuracy. The checker passes if ANY eval reaches the threshold.
 
 CLI options: --seed (default 42), --num-rollout (default 250),
-  --crash-probability (default 0.1), --metric-threshold (default 0.45)
+  --crash-probability (default 0.1), --metric-threshold (default 0.55)
 ```

@@ -20,10 +20,9 @@ _MODEL_TYPE: str = "qwen2.5-0.5B"
 # 4 training GPUs, plus 4 rollout engines x 1 GPU.
 _TRAIN_GPUS: int = 4
 _ROLLOUT_GPUS: int = 4
-# Provisional threshold pending calibration runs (the no-fault baseline
-# tests/e2e/long/test_qwen2.5_0.5B_gsm8k.py asserts 0.55 at 250 steps); update
-# after collecting the fault-run distribution.
-_DEFAULT_METRIC_THRESHOLD: float = 0.45
+# Must stay identical to the threshold asserted by the no-fault baseline
+# tests/e2e/long/test_qwen2.5_0.5B_gsm8k.py: fault recovery must not cost accuracy.
+_DEFAULT_METRIC_THRESHOLD: float = 0.55
 
 
 @app.command(name="run")
@@ -33,18 +32,6 @@ def run_ci(
     crash_probability: Annotated[float, typer.Option(help="Per-step crash probability per cell")] = 0.1,
     metric_threshold: Annotated[float, typer.Option(help="eval/gsm8k accuracy threshold")] = _DEFAULT_METRIC_THRESHOLD,
 ) -> None:
-    """Random failure soak on the real gsm8k RL recipe, asserting eval accuracy.
-
-    Same external fault injection as scenario_ft_random's soak, but the workload is the recipe of
-    tests/e2e/long/test_qwen2.5_0.5B_gsm8k.py (whose regular CI runs serve as the
-    no-fault reference wandb curves) with train-side fault tolerance. Besides
-    surviving the crashes, the run must reach the eval/gsm8k accuracy threshold —
-    i.e. fault recovery preserves end-to-end learning, which the comparison
-    scenarios cannot observe.
-
-    Doubles as the CI entry point: the CI file calls ``run_ci()`` (defaults);
-    manual smoke/calibration runs use the ``run`` CLI subcommand.
-    """
     mean_interval: float = MEAN_INTERVAL_SECONDS / max(crash_probability, 0.01)
     print(f"Seed: {seed}, Rollouts: {num_rollout}, Mean injection interval: {mean_interval:.1f}s")
 
