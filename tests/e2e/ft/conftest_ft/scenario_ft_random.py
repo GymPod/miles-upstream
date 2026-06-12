@@ -2,17 +2,10 @@
 # WARNING: Do NOT relax any assert logic in this file. All assertions must remain strict.
 
 
-
-
-
-
 from typing import Annotated
 
-
 import typer
-
 from tests.e2e.ft.conftest_ft.app import resolve_dump_dir
-from tests.e2e.ft.conftest_ft.fault_injection import CONTROL_SERVER_PORT, MEAN_INTERVAL_SECONDS, spawn_fault_injector
 from tests.e2e.ft.conftest_ft.execution import (
     get_common_train_args,
     get_ft_args,
@@ -20,12 +13,8 @@ from tests.e2e.ft.conftest_ft.execution import (
     prepare,
     run_training,
 )
+from tests.e2e.ft.conftest_ft.fault_injection import CONTROL_SERVER_PORT, MEAN_INTERVAL_SECONDS, spawn_fault_injector
 from tests.e2e.ft.conftest_ft.modes import FTTestMode, resolve_mode
-
-
-
-
-
 
 app: typer.Typer = typer.Typer()
 
@@ -75,6 +64,7 @@ def run_ci(
         injector_thread.join(timeout=5)
 
     print(f"Random failure soak test PASSED (seed={seed}, steps={num_steps})")
+
 
 if __name__ == "__main__":
     app()

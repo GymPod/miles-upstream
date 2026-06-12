@@ -104,4 +104,3 @@ def spawn_fault_injector(*, seed: int, mean_interval_seconds: float) -> tuple[th
     )
     injector_thread.start()
     return stop_event, injector_thread
-

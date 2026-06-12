@@ -6,7 +6,7 @@ from typing import Annotated
 
 import typer
 
-from tests.e2e.ft.conftest_ft.fault_injection import MEAN_INTERVAL_SECONDS, spawn_fault_injector
+from tests.e2e.ft.conftest_ft.fault_injection import CONTROL_SERVER_PORT, MEAN_INTERVAL_SECONDS, spawn_fault_injector
 
 import miles.utils.external_utils.command_utils as U
 
@@ -25,14 +25,13 @@ _ROLLOUT_GPUS: int = 4
 # after collecting the fault-run distribution.
 _DEFAULT_METRIC_THRESHOLD: float = 0.45
 
+
 @app.command(name="run")
 def run_ci(
     seed: Annotated[int, typer.Option(help="Random seed for fault injection")] = 42,
     num_rollout: Annotated[int, typer.Option(help="Number of rollouts")] = 250,
     crash_probability: Annotated[float, typer.Option(help="Per-step crash probability per cell")] = 0.1,
-    metric_threshold: Annotated[
-        float, typer.Option(help="eval/gsm8k accuracy threshold")
-    ] = _DEFAULT_METRIC_THRESHOLD,
+    metric_threshold: Annotated[float, typer.Option(help="eval/gsm8k accuracy threshold")] = _DEFAULT_METRIC_THRESHOLD,
 ) -> None:
     """Random failure soak on the real gsm8k RL recipe, asserting eval accuracy.
 
@@ -83,7 +82,6 @@ def _prepare_gsm8k() -> None:
     U.exec_command("mkdir -p /root/models /root/datasets")
     U.exec_command(f"hf download Qwen/{_MODEL_NAME} --local-dir /root/models/{_MODEL_NAME}")
     U.hf_download_dataset("zhuzilin/gsm8k")
-
 
 
 def _get_gsm8k_train_args(*, seed: int, num_rollout: int, metric_threshold: float) -> str:
