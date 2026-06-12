@@ -54,7 +54,6 @@ def witness_dump_and_clear_stale(
     _clear_witness_stale_rows(model=model, stale_ids=witness_info.stale_ids, optimizer=optimizer)
 
 
-
 # ---------------------------------------------------------------------------
 # Classes
 # ---------------------------------------------------------------------------

@@ -17,7 +17,9 @@ def _make_logger(log_dir: Path, file_name: str = "events.jsonl") -> EventLogger:
 
 
 _EVENT_CLS = WitnessAllocateIdEvent
-_EVENT_PARTIAL: dict = dict(rollout_id=0, attempt=0, witness_id_to_sample_index={10: 0, 11: 1, 12: 2}, counter_after=13)
+_EVENT_PARTIAL: dict = dict(
+    rollout_id=0, attempt=0, witness_id_to_sample_index={10: 0, 11: 1, 12: 2}, counter_after=13
+)
 
 
 class TestEventLoggerWritesJsonl:
@@ -25,7 +27,9 @@ class TestEventLoggerWritesJsonl:
         logger = _make_logger(tmp_path, file_name="test.jsonl")
 
         logger.log(_EVENT_CLS, _EVENT_PARTIAL)
-        logger.log(WitnessAllocateIdEvent, dict(rollout_id=1, attempt=0, witness_id_to_sample_index={0: 0}, counter_after=1))
+        logger.log(
+            WitnessAllocateIdEvent, dict(rollout_id=1, attempt=0, witness_id_to_sample_index={0: 0}, counter_after=1)
+        )
         logger.close()
 
         lines = (tmp_path / "test.jsonl").read_text().strip().split("\n")
