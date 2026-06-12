@@ -159,20 +159,3 @@ class TestDumperMegatronUtilConfigure:
         self._configure(args, phase=DumperPhase.FWD_ONLY, rollout_id=0)
 
         assert other_phase_file.exists()
-
-
-class TestBarrierAfterDumpDirCleanup:
-    def test_cross_cell_barrier_abort_does_not_raise(self) -> None:
-        """A peer death aborts the cross-cell PG mid-barrier; the survivor continues instead of erroring."""
-        group = MagicMock()
-        group.barrier.side_effect = RuntimeError("NCCL communicator was aborted on rank 1")
-        state = SimpleNamespace(indep_dp=SimpleNamespace(rank=1, group=group))
-
-        with (
-            patch("miles.utils.dumper_utils.get_parallel_state", return_value=state),
-            patch("miles.utils.dumper_utils.dist") as mock_dist,
-        ):
-            mock_dist.is_initialized.return_value = False
-            dumper_utils._barrier_after_dump_dir_cleanup()
-
-        group.barrier.assert_called_once()

@@ -7,7 +7,11 @@ import ray
 from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_WEIGHTS
 
 from miles.ray.rollout.addr_allocator import PortCursors
-from miles.ray.rollout.debug_data import RolloutDataInjectionUtil, load_debug_rollout_data, save_debug_rollout_data
+from miles.ray.rollout.debug_data import (
+    RolloutDataInjectionUtil,
+    load_debug_rollout_data,
+    save_debug_rollout_data,
+)
 from miles.ray.rollout.metrics import log_eval_rollout_data, log_rollout_data
 from miles.ray.rollout.rollout_data_conversion import postprocess_rollout_data
 from miles.ray.rollout.rollout_server import RolloutServer, start_rollout_servers
@@ -22,9 +26,8 @@ from miles.rollout.base_types import (
     call_rollout_fn,
 )
 from miles.rollout.inference_rollout.compatibility import call_rollout_function, load_rollout_function
+from miles.utils import event_analyzer, event_logger
 from miles.utils.environ import enable_experimental_rollout_refactor
-from miles.utils.event_analyzer import analyzer as event_analyzer
-from miles.utils.event_logger import checkpoint as event_logger_checkpoint
 from miles.utils.health_monitor import RolloutHealthMonitor
 from miles.utils.http_utils import init_http_client
 from miles.utils.logging_utils import configure_logger
@@ -46,7 +49,7 @@ class RolloutManager:
     """The class to run rollout and convert rollout data to training data."""
 
     def __init__(self, args, pg):
-        event_logger_checkpoint.restore(args)
+        event_logger.restore(args)
         configure_logger(args, source=RolloutManagerProcessIdentity())
 
         self.pg = pg
@@ -183,7 +186,7 @@ class RolloutManager:
     def save(self, rollout_id):
         if self.args.rollout_global_dataset:
             self.data_source.save(rollout_id)
-        event_logger_checkpoint.snapshot(self.args, rollout_id)
+        event_logger.snapshot(self.args, rollout_id)
 
     def load(self, rollout_id=None):
         self.data_source.load(rollout_id)

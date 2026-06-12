@@ -161,7 +161,6 @@ class _MiniFTController:
         try:
             cells = await self._get_cells()
 
-            healthy_names = {cell.name for cell in cells if cell.status == CellHealthStatus.HEALTHY}
             unhealthy_names: set[str] = set()
             for cell in cells:
                 if cell.status != CellHealthStatus.UNHEALTHY:
@@ -172,21 +171,6 @@ class _MiniFTController:
 
                 now = self._clock()
                 if now < backoff.next_attempt_at:
-                    continue
-
-                # Healing suspends (kills) the cell's actors. A cell that merely looks
-                # unhealthy may just be blocked on a dead peer's collective and will be
-                # released by the cross-cell PG abort timeout; if no other healthy cell
-                # remains, killing it would destroy the last recovery source and make
-                # the whole group unrecoverable.
-                if not (healthy_names - {cell.name}):
-                    logger.warning(
-                        "Skipping heal of cell %s: no other healthy cell remains, suspending it "
-                        "would destroy the last recovery source (cells: %s); waiting for the "
-                        "cross-cell PG abort or peer recovery to unblock it",
-                        cell.name,
-                        [(c.name, c.status.value) for c in cells],
-                    )
                     continue
 
                 await self._heal(cell_name=cell.name, backoff=backoff)

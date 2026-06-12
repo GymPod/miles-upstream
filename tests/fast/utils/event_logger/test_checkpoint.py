@@ -3,7 +3,7 @@
 from argparse import Namespace
 from pathlib import Path
 
-from miles.utils.event_logger import checkpoint as event_logger_checkpoint
+from miles.utils import event_logger
 
 
 def _args(*, event_dir: Path | None, save: Path | None = None, load: Path | None = None) -> Namespace:
@@ -26,13 +26,13 @@ class TestSnapshotRestoreRoundtrip:
         events = tmp_path / "events"
         events.mkdir()
         (events / "main.jsonl").write_text("committed\n")
-        event_logger_checkpoint.snapshot(_args(event_dir=events, save=ckpt), iteration=3)
+        event_logger.snapshot(_args(event_dir=events, save=ckpt), iteration=3)
 
         # Events written after the save (would be re-executed by the resumed run).
         (events / "main.jsonl").write_text("committed\nrewound-future\n")
         (events / "straggler.jsonl").write_text("late\n")
         _write_tracker(ckpt, "3")
-        event_logger_checkpoint.restore(_args(event_dir=events, load=ckpt))
+        event_logger.restore(_args(event_dir=events, load=ckpt))
 
         assert (events / "main.jsonl").read_text() == "committed\n"
         assert not (events / "straggler.jsonl").exists()
@@ -43,9 +43,9 @@ class TestSnapshotRestoreRoundtrip:
         events = tmp_path / "events"
         events.mkdir()
         (events / "main.jsonl").write_text("v1\n")
-        event_logger_checkpoint.snapshot(_args(event_dir=events, save=ckpt), iteration=1)
+        event_logger.snapshot(_args(event_dir=events, save=ckpt), iteration=1)
         (events / "main.jsonl").write_text("v2\n")
-        event_logger_checkpoint.snapshot(_args(event_dir=events, save=ckpt), iteration=1)
+        event_logger.snapshot(_args(event_dir=events, save=ckpt), iteration=1)
 
         assert (ckpt / "iter_0000001" / "debug_events" / "main.jsonl").read_text() == "v2\n"
 
@@ -57,7 +57,7 @@ class TestNoOpCases:
         events.mkdir()
         (events / "main.jsonl").write_text("keep\n")
 
-        event_logger_checkpoint.restore(_args(event_dir=events))
+        event_logger.restore(_args(event_dir=events))
 
         assert (events / "main.jsonl").read_text() == "keep\n"
 
@@ -69,7 +69,7 @@ class TestNoOpCases:
         events.mkdir()
         (events / "main.jsonl").write_text("keep\n")
 
-        event_logger_checkpoint.restore(_args(event_dir=events, load=ckpt))
+        event_logger.restore(_args(event_dir=events, load=ckpt))
 
         assert (events / "main.jsonl").read_text() == "keep\n"
 
@@ -81,7 +81,7 @@ class TestNoOpCases:
         events.mkdir()
         (events / "main.jsonl").write_text("keep\n")
 
-        event_logger_checkpoint.restore(_args(event_dir=events, load=ckpt))
+        event_logger.restore(_args(event_dir=events, load=ckpt))
 
         assert (events / "main.jsonl").read_text() == "keep\n"
 
@@ -90,7 +90,7 @@ class TestNoOpCases:
         events = tmp_path / "events"
         events.mkdir()
 
-        event_logger_checkpoint.snapshot(_args(event_dir=None, save=tmp_path / "ckpt"), iteration=1)
-        event_logger_checkpoint.snapshot(_args(event_dir=events), iteration=1)
+        event_logger.snapshot(_args(event_dir=None, save=tmp_path / "ckpt"), iteration=1)
+        event_logger.snapshot(_args(event_dir=events), iteration=1)
 
         assert not (tmp_path / "ckpt").exists()

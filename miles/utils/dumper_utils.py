@@ -278,19 +278,7 @@ def _barrier_after_dump_dir_cleanup() -> None:
 
     indep_dp = get_parallel_state().indep_dp
     if indep_dp.group is not None:
-        try:
-            indep_dp.group.barrier()
-        except Exception:
-            # A peer cell dying mid-step aborts the cross-cell PG, releasing this
-            # barrier with DistBackendError. The dead peer cannot dump, so proceeding
-            # is safe, and the cross-cell gradient allreduce later in the same step
-            # observes the abort and turns it into DISCARDED_SHOULD_RETRY. Raising
-            # here would instead mark this healthy survivor cell as errored — if it
-            # is the last one, the whole group becomes unrecoverable.
-            logger.error(
-                "cross-cell barrier after dump dir cleanup raised; continuing degraded",
-                exc_info=True,
-            )
+        indep_dp.group.barrier()
 
 
 def _get_phase_override_configs(args: Namespace, phase: DumperPhase) -> dict[str, Any]:

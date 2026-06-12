@@ -90,7 +90,7 @@ class RolloutDataInjectionUtil:
         denominator = max(len(response_a), len(response_b))
         if denominator == 0:
             return 1.0
-        matched = sum(token_a == token_b for token_a, token_b in zip(response_a, response_b, strict=False))
+        matched = sum(token_a == token_b for token_a, token_b in zip(response_a, response_b))
         return matched / denominator
 
     @classmethod

@@ -12,8 +12,8 @@ from miles.backends.megatron_utils.types import TrainStepOutcome
 from miles.ray.train.actor_factory import allocate_gpus_for_actor
 from miles.ray.train.cell import RayTrainCell
 from miles.ray.train.cell_monitor import create_trainer_cell_health_checker
+from miles.utils import event_analyzer
 from miles.utils.async_utils import AsyncioGatherUtils
-from miles.utils.event_analyzer import analyzer as event_analyzer
 from miles.utils.event_logger.logger import get_event_logger, is_event_logger_initialized
 from miles.utils.event_logger.models import TrainGroupStepEndEvent, WitnessAllocateIdEvent
 from miles.utils.health_checker import NoopHealthChecker, SimpleHealthCheckerConfig
