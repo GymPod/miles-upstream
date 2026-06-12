@@ -61,7 +61,7 @@ class EventLogger:
         with self._lock:
             # Opened per write so the file can be replaced (e.g. restored from a
             # checkpoint snapshot) at any point between events.
-            with open(self._path, "a", encoding="utf-8") as f:
+            with self._path.open("a", encoding="utf-8") as f:
                 f.write(line)
         if print_log:
             logger.info("Event logged: %s", getattr(event, "type", type(event).__name__))
