@@ -8,7 +8,7 @@ from tests.e2e.ft.conftest_ft.scenario_with_failure import run_ci
 
 register_cuda_ci(est_time=1500, suite="stage-c-8-gpu-h200", labels=["ft"])
 
-_MODE: str = "dp2_cp2_real_rollout_dense"
+_MODE: str = "dp2_cp2_real_rollout"
 
 if __name__ == "__main__":
     run_ci(_MODE)

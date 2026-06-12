@@ -62,6 +62,20 @@ def _build_phase_args(mode: FTTestMode, dump_dir: str, *, is_target: bool, enabl
         base += f"--load {phase_a_dir}/ckpt "
         if is_target:
             base += f"--ci-ft-test-actions '{json.dumps(_WITH_FAILURE_ACTIONS)}' "
+            if mode.has_real_rollout:
+                # Post-fault rollouts train on the baseline's recorded data: the
+                # degraded-quorum commit leaves ulp-level weight drift that real sampling
+                # amplifies into token divergence, so the strict vs-baseline comparison is
+                # only well-posed when post-fault training inputs are identical by
+                # construction. The crash rollout itself (NUM_PHASE_A_STEPS + 1) is not
+                # injected — its data was generated before the crash and the retry redrives
+                # the same data. Engines, update_weights and generation all stay real; only
+                # the generated samples of injected rollouts are discarded (see README).
+                baseline_dump_dir = dump_dir.replace("/target/", "/baseline/")
+                base += (
+                    f"--ci-inject-rollout-data-path {baseline_dump_dir}/rollout_data/{{rollout_id}}.pt "
+                    f"--ci-inject-rollout-data-start-rollout-id {NUM_PHASE_A_STEPS + 2} "
+                )
 
     return base
 

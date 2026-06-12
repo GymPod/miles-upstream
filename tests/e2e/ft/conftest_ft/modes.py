@@ -13,11 +13,6 @@ FULL_MODEL_NAME: str = "Qwen3-30B-A3B"
 FULL_MODEL_HF_REPO: str = f"Qwen/{FULL_MODEL_NAME}"
 FULL_MODEL_TYPE: str = "qwen3-30B-A3B"
 
-# Small real dense model for with_failure's real_rollout mode (see README mode table).
-DENSE_MODEL_NAME: str = "Qwen3-0.6B"
-DENSE_MODEL_HF_REPO: str = f"Qwen/{DENSE_MODEL_NAME}"
-DENSE_MODEL_TYPE: str = "qwen3-0.6B"
-
 
 @dataclass(frozen=True)
 class FTTestMode:
@@ -78,17 +73,6 @@ MODES: dict[str, FTTestMode] = {
         model_name=MODEL_NAME,
         model_hf_repo=MODEL_HF_REPO,
         megatron_model_type=MODEL_TYPE,
-        num_cells=2,
-        train_gpus_per_node=4,
-        rollout_num_engines=4,
-        rollout_gpus_per_engine=1,
-        parallel_args="--context-parallel-size 2",
-    ),
-    # Same topology as dp2_cp2_real_rollout but a small real dense model (see README).
-    "dp2_cp2_real_rollout_dense": FTTestMode(
-        model_name=DENSE_MODEL_NAME,
-        model_hf_repo=DENSE_MODEL_HF_REPO,
-        megatron_model_type=DENSE_MODEL_TYPE,
         num_cells=2,
         train_gpus_per_node=4,
         rollout_num_engines=4,
