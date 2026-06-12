@@ -141,12 +141,17 @@ class TestEventLoggerCreatesDirectory:
         assert (nested / "events.jsonl").exists()
 
 
-class TestEventLoggerClose:
-    def test_file_closed_after_close(self, tmp_path: Path) -> None:
+class TestEventLoggerFilePerWrite:
+    def test_log_after_events_file_removed_writes_to_fresh_file(self, tmp_path: Path) -> None:
+        """The file is opened per write, so a checkpoint restore can swap it between events."""
         logger = _make_logger(tmp_path)
         logger.log(_EVENT_CLS, _EVENT_PARTIAL)
-        logger.close()
-        assert logger._file.closed
+
+        path = tmp_path / "events.jsonl"
+        path.unlink()
+
+        logger.log(_EVENT_CLS, _EVENT_PARTIAL)
+        assert len(path.read_text().strip().split("\n")) == 1
 
 
 class TestReadEvents:
