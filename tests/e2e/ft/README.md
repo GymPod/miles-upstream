@@ -22,16 +22,18 @@ Each scenario runs with a `--mode`:
 
 All modes are **disaggregated** (training and rollout on separate nodes). Modes without rollout use debug rollout data.
 
-| Mode | Nodes | DP cells | Batch | Parallelism | Rollout | Model | Coverage |
-|------|-------|----------|-------|-------------|---------|-------|----------|
-| `dp2_cp2_tp2_ep2` | 1 | 2 | 3 | CP2 TP2 EP2 | debug data | 5-layer MoE | TP + EP |
-| `dp2_cp2_pp2` | 1 | 2 | 3 | CP2 PP2 | debug data | 5-layer MoE | PP |
-| `dp4_cp2` | 1 | 4 | 5 | CP2 | debug data | 5-layer MoE | Multi-replica (>=4 cells) |
-| `dp2_cp2_real_rollout` | 1 | 2 | 3 | CP2 | 4 engines × 1 GPU | 5-layer MoE | Real rollout engines + weight update path (no_failure, deterministic) |
-| `dp2_cp2_real_rollout_dense` | 1 | 2 | 3 | CP2 | 4 engines × 1 GPU | dense Qwen3-0.6B | Real rollout under a fault + injection match guard (with_failure) |
-| `6node_dp4_cp2_tp2_pp2_ep2_etp2` | 4+2 | 4 | 5 | CP2 TP2 PP2 EP2 ETP2 | 2 engines × 8 GPU | full MoE | Large-scale, all parallelism |
+| Mode | Nodes | DP cells | Parallelism | Rollout | Model | Coverage |
+|------|-------|----------|-------------|---------|-------|----------|
+| `dp2_cp2_tp2_ep2` | 1 | 2 | CP2 TP2 EP2 | debug data | 5-layer MoE | TP + EP |
+| `dp2_cp2_pp2` | 1 | 2 | CP2 PP2 | debug data | 5-layer MoE | PP |
+| `dp4_cp2` | 1 | 4 | CP2 | debug data | 5-layer MoE | Multi-replica (>=4 cells) |
+| `dp2_cp2_real_rollout` | 1 | 2 | CP2 | 4 engines × 1 GPU | 5-layer MoE | Real rollout engines + weight update path (no_failure, deterministic) |
+| `dp2_cp2_real_rollout_dense` | 1 | 2 | CP2 | 4 engines × 1 GPU | dense Qwen3-0.6B | Real rollout under a fault + injection match guard (with_failure) |
+| `6node_dp4_cp2_tp2_pp2_ep2_etp2` | 4+2 | 4 | CP2 TP2 PP2 EP2 ETP2 | 2 engines × 8 GPU | full MoE | Large-scale, all parallelism |
 
-Batch sizes are deliberately **not** divisible by num_cells to test uneven sample distribution across replicas (e.g. DP4 + batch 5 → 2,1,1,1).
+All scenarios use `--rollout-batch-size 32 --n-samples-per-prompt 8 --global-batch-size 256`
+(256 samples per rollout), which divides evenly across both 2 and 4 cells. Uneven sample
+distribution across replicas is **not** currently exercised by these tests.
 
 The 1-node modes use the truncated 5-layer MoE model (`Qwen3-30B-A3B-5layer`), except
 `dp2_cp2_real_rollout_dense`, which uses a small real dense model (`Qwen3-0.6B`) — see the
@@ -152,7 +154,8 @@ Multi-phase comparison test. Verifies indep_dp matches normal DP after fault + c
 
 ```
 Type: comparison, multi-phase (phase_a + phase_b)
-Phase A steps: 1, Phase B steps: 4, metrics rtol: 5e-2
+Phase A steps: 1, Phase B steps: 3 (rollouts 1..3; --num-rollout 4 resumed from the
+rollout-0 checkpoint), metrics rtol: 5e-2
 
 Phase A (both baseline and target):
   1. Run 1 step of training
@@ -160,7 +163,7 @@ Phase A (both baseline and target):
 
 Phase B — baseline:
   1. Resume from phase_a checkpoint
-  2. Run 4 normal steps
+  2. Run 3 normal steps (rollouts 1..3)
 
 Phase B — target:
   1. Resume from phase_a checkpoint
@@ -169,8 +172,7 @@ Phase B — target:
      → os._exit(1) → allreduce timeout → should_commit=false → retry
   4. Rollout 2, attempt 1: _refresh_cells() reconfigure → N-1 cells → commit
   5. After rollout 2: stop_cell_at_end(last) + start_cell_at_end(last)
-  6. Rollout 3: _refresh_cells() healing → N cells
-  7. Rollout 4: N cells stable
+  6. Rollout 3: _refresh_cells() healing → N cells, trains with the healed cell
 
 Compare: phase_b dumps per rollout (rel <= 0.0085; MoE expert grads and QK-norm grads
 also tolerate max_abs <= 1e-3; in the real_rollout mode the post-fault/injected rollouts'
@@ -197,7 +199,11 @@ strict grad/activation/metric comparison with zero threshold relaxation.
 What stays real on the target during injected rollouts: engines and generation itself (the
 generated samples are discarded after the fact), update_weights after the degraded commit
 and after healing, and health-monitor pause/resume — i.e. the whole
-crash→retry→heal→weight-sync path. Injected rollouts' dump comparison gives a
+crash→retry→heal→weight-sync path. Known gap: the update_weights that runs after the
+rollout-3 (post-healing) train step is executed but its output is not consumed by any
+later rollout, so a regression there is only caught by the generation match guard at
+rollout 3 (post-degraded-commit weights) and by `realistic_gsm8k` accuracy, not by this
+scenario's strict comparison. Injected rollouts' dump comparison gives a
 `max_abs <= 3e-3` floor to the **measured noisy grad families only** (decoder-layer
 QK-norms, folded `layer_norm_weight`s, and the attention/MLP weight matrices): the
 training data is bitwise-identical, but the target's weights carry the fault-inherent ulp
@@ -243,7 +249,8 @@ Multi-phase comparison test. Verifies healing state transfer is **bitwise** corr
 
 ```
 Type: comparison, multi-phase (phase_a + phase_b)
-Phase A steps: 1, Phase B steps: 3
+Phase A steps: 1, Phase B steps: 3 (rollouts 1..3; --num-rollout 4 resumed from the
+rollout-0 checkpoint — rollout 3 must exist, otherwise healing never executes)
 Comparison: dump rel <= 0 (bitwise), metrics rtol=0 / atol=0 (exact)
 
 Phase A: same as with_failure (1 step + save ckpt).

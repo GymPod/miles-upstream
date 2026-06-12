@@ -2,6 +2,7 @@
 # WARNING: Do NOT relax any assert logic in this file. All assertions must remain strict.
 
 import json
+from pathlib import Path
 
 from tests.e2e.ft.conftest_ft.app import create_comparison_app_and_run_ci
 from tests.e2e.ft.conftest_ft.execution import get_common_train_args, get_ft_args
@@ -15,7 +16,11 @@ from miles.utils.test_utils.comparisons import (
 )
 
 NUM_PHASE_A_STEPS: int = 1
-NUM_PHASE_B_STEPS: int = 3
+# --num-rollout value; phase_b resumes from the phase_a ckpt and executes rollouts
+# [NUM_PHASE_A_STEPS, NUM_PHASE_B_STEPS). With 4, rollouts 1..3 run: stop/start fires
+# at the end of rollout 2, so healing executes at the start of rollout 3 and rollout 3
+# trains with the healed cell. With 3, healing would never run (nothing after rollout 2).
+NUM_PHASE_B_STEPS: int = 4
 
 _DETERMINISTIC_ENV_VARS: str = (
     '--train-env-vars \'{"NCCL_ALGO": "Ring", '
@@ -92,6 +97,17 @@ def _compare(dump_dir: str, mode: FTTestMode) -> None:
         key_prefixes=[grad_norm_key],
         exclude_keys=[],
     )
+    phase_b_rollout_ids = range(NUM_PHASE_A_STEPS, NUM_PHASE_B_STEPS)
+    expected_leaves = {f"fwd_bwd/rollout_{rollout_id}" for rollout_id in phase_b_rollout_ids}
+    actual_leaves = {
+        str(p.parent.relative_to(Path(f"{dump_dir}/baseline/phase_b/dumps")))
+        for p in Path(f"{dump_dir}/baseline/phase_b/dumps").rglob("*.pt")
+    }
+    assert actual_leaves == expected_leaves, (
+        f"Dump leaves {actual_leaves} do not match the expected phase_b rollouts {expected_leaves}; "
+        f"the post-healing rollout must be present or healing was never exercised"
+    )
+
     compare_dumps(
         baseline_dir=f"{dump_dir}/baseline/phase_b",
         target_dir=f"{dump_dir}/target/phase_b",
