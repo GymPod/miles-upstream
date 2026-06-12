@@ -190,10 +190,17 @@ strict grad/activation/metric comparison with zero threshold relaxation.
 What stays real on the target during injected rollouts: engines and generation itself (the
 generated samples are discarded after the fact), update_weights after the degraded commit
 and after healing, and health-monitor pause/resume — i.e. the whole
-crash→retry→heal→weight-sync path. What this scenario deliberately does not assert: the
-content the engines generate post-fault (the injected data replaces it). Pre-fault rollouts
-(up to and including the crash rollout, whose data is generated before the crash and
-redriven by the retry) are not injected — they remain a real sampled-data comparison.
+crash→retry→heal→weight-sync path. The discarded generation is not wasted: each injected
+rollout asserts the generated responses match the recording at a mean per-token ratio
+> 0.9 with bitwise-identical prompts (`assert_injected_rollout_data_matches_generated`).
+ulp-level drift only flips occasional sampled tokens (then cascades within one response),
+keeping the ratio high, while grossly wrong post-fault engine weights (e.g. a broken
+update_weights) would drop it to near zero — so wrong-weights bugs still fail the test
+even though the injected data replaces the generated content for training. What the
+scenario does not assert is the exact post-fault sampled content beyond that ratio.
+Pre-fault rollouts (up to and including the crash rollout, whose data is generated before
+the crash and redriven by the retry) are not injected — they remain a real sampled-data
+comparison.
 
 ### `scenario_deterministic`
 

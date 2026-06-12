@@ -9,6 +9,7 @@ from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_
 from miles.ray.rollout.addr_allocator import PortCursors
 from miles.ray.rollout.debug_data import (
     assert_injected_rollout_data_files_exist,
+    assert_injected_rollout_data_matches_generated,
     load_debug_rollout_data,
     load_injected_rollout_data,
     save_debug_rollout_data,
@@ -181,7 +182,11 @@ class RolloutManager:
                 # update_weights and health monitoring real) but its output is discarded
                 # in favor of the recorded data, so both runs train on identical inputs.
                 logger.info(f"CI rollout-data injection: replacing generated data of rollout {rollout_id}")
+                generated_data = data
                 data, metadata = load_injected_rollout_data(self.args, rollout_id=rollout_id)
+                assert_injected_rollout_data_matches_generated(
+                    generated=generated_data, injected=data, rollout_id=rollout_id
+                )
                 metrics = None
 
         return data, metadata, metrics
