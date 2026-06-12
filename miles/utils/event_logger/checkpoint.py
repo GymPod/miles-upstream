@@ -2,6 +2,8 @@
 
 import logging
 import shutil
+import time
+import uuid
 from argparse import Namespace
 from pathlib import Path
 
@@ -40,7 +42,9 @@ def restore(args: Namespace) -> None:
 
     dst = Path(args.save_debug_event_data)
     if dst.exists():
-        shutil.rmtree(dst)
+        trash = dst.parent / f".trash_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        dst.rename(trash)
+        logger.info("Moved pre-restore event dir %s -> %s", dst, trash)
     shutil.copytree(src, dst)
     logger.info("Restored event dir %s <- %s", dst, src)
 
