@@ -55,13 +55,12 @@ def run_ci(
         + "--mini-ft-controller-enable "
     )
 
-    stop_event, injector_thread = spawn_fault_injector(seed=seed, mean_interval_seconds=mean_interval)
+    injector = spawn_fault_injector(seed=seed, mean_interval_seconds=mean_interval)
 
     try:
         run_training(train_args=train_args, mode=ft_mode)
     finally:
-        stop_event.set()
-        injector_thread.join(timeout=5)
+        injector.stop_and_join(timeout_seconds=5)
 
     print(f"Random failure soak test PASSED (seed={seed}, steps={num_steps})")
 
