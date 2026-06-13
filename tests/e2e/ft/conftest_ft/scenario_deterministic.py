@@ -12,6 +12,7 @@ from miles.utils.test_utils.comparisons import (
     INPUT_TENSORS_ALLOW_FAILED_PATTERN,
     INPUT_TENSORS_SKIP_PATTERN,
     compare_dumps,
+    compare_engine_checksums,
     compare_metrics,
 )
 from miles.utils.test_utils.reconfigure_assertions import ReconfigureInfo, assert_reconfigure_events
@@ -57,6 +58,12 @@ def _build_phase_args(mode: FTTestMode, dump_dir: str, *, is_target: bool, enabl
 
     if is_target:
         base += get_ft_args(mode)
+
+    # Real-rollout mode runs sglang engines, so capture per-engine weight checksums on
+    # both sides; _compare then asserts the target's update_weights (incl. post-heal)
+    # pushed bitwise-identical weights to what the baseline pushed.
+    if mode.has_real_rollout:
+        base += "--check-engine-weight-checksum "
 
     if is_phase_a:
         base += f"--save {dump_dir}/ckpt --save-interval 1 "
@@ -136,7 +143,21 @@ def _compare(dump_dir: str, mode: FTTestMode) -> None:
         allow_skipped_pattern=INPUT_TENSORS_SKIP_PATTERN,
         allow_failed_pattern=INPUT_TENSORS_ALLOW_FAILED_PATTERN,
     )
+
+    if mode.has_real_rollout:
+        _compare_engine_checksums_baseline_vs_target(dump_dir)
+
     print("Deterministic healing comparison test PASSED")
+
+
+def _compare_engine_checksums_baseline_vs_target(dump_dir: str) -> None:
+    # Per phase: assert the engines saw bitwise-identical weights on both sides. This is
+    # the only gate that consumes the target's post-heal update_weights output.
+    for phase in PHASES:
+        compare_engine_checksums(
+            baseline_dir=f"{dump_dir}/baseline/{phase}",
+            target_dir=f"{dump_dir}/target/{phase}",
+        )
 
 
 TEST_NAME: str = "trainer_ft_deterministic"
