@@ -68,11 +68,13 @@ def run_ci(
         injector.stop_and_join(timeout_seconds=5)
 
     # Healing witness: if the injector landed any fault, healing must have run, and the
-    # last reconfigure must have restored full cell membership.
+    # last reconfigure must have restored full cell membership (modulo one tolerated
+    # trailing shrink when a fault lands inside the final rollout's train()).
     assert_soak_reconfigure_events(
         Path(dump_dir) / "events",
         num_successful_injections=injector.num_successful_injections,
         num_cells=ft_mode.num_cells,
+        final_rollout_id=num_steps - 1,
     )
 
     print(f"Random failure soak test PASSED (seed={seed}, steps={num_steps})")

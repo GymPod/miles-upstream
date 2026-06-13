@@ -54,12 +54,20 @@ def assert_reconfigure_events(event_dir: Path, *, expected: list[ExpectedReconfi
     print(f"Reconfigure witness assertion passed: {len(actual)} event(s) in {event_dir} match {expected}")
 
 
-def assert_soak_reconfigure_events(event_dir: Path, *, num_successful_injections: int, num_cells: int) -> None:
+def assert_soak_reconfigure_events(
+    event_dir: Path, *, num_successful_injections: int, num_cells: int, final_rollout_id: int
+) -> None:
     """Soak-run healing witness: successful injections imply healings, and the run must end fully healed.
 
     Injection timing is random, so no exact sequence is pinned. Instead:
     - if the injector reported >=1 successful injection, at least one healing event must exist;
-    - the last reconfigure (if any) must restore full cell membership.
+    - the last reconfigure (if any) must restore full cell membership, with one structural
+      exception: healing only runs at the next train() call, so a fault that lands inside the
+      final rollout's train() emits a shrink that has no later train() to heal on. Exactly one
+      such trailing shrink is tolerated, and only when it is the very last event, is a pure
+      shrink (no healed cells), and carries final_rollout_id; the sequence before it must
+      still end fully healed. A shrink at any earlier rollout, or two trailing shrinks,
+      still fail.
     """
     events = load_reconfigure_events(event_dir)
     healings = [event for event in events if event.healed_cell_indices]
@@ -71,11 +79,19 @@ def assert_soak_reconfigure_events(event_dir: Path, *, num_successful_injections
             f"(reconfigure events: {[_shape_of(event) for event in events]})"
         )
 
-    if events:
-        full_membership = list(range(num_cells))
-        assert events[-1].alive_cell_indices_after == full_membership, (
-            f"Soak run must end fully healed: last reconfigure event in {event_dir} left alive cells "
-            f"{events[-1].alive_cell_indices_after}, expected {full_membership}"
+    full_membership = list(range(num_cells))
+    checked_events = list(events)
+    if checked_events and _is_tolerated_trailing_shrink(
+        checked_events[-1], full_membership=full_membership, final_rollout_id=final_rollout_id
+    ):
+        checked_events = checked_events[:-1]
+
+    if checked_events:
+        assert checked_events[-1].alive_cell_indices_after == full_membership, (
+            f"Soak run must end fully healed (modulo at most one trailing shrink at final rollout "
+            f"{final_rollout_id}): last checked reconfigure event in {event_dir} left alive cells "
+            f"{checked_events[-1].alive_cell_indices_after}, expected {full_membership} "
+            f"(full reconfigure sequence: {[_shape_of(event) for event in events]})"
         )
 
     print(
@@ -91,6 +107,16 @@ def load_reconfigure_events(event_dir: Path) -> list[CellReconfigureEvent]:
     is emission order.
     """
     return [event for event in read_events(event_dir) if isinstance(event, CellReconfigureEvent)]
+
+
+def _is_tolerated_trailing_shrink(
+    event: CellReconfigureEvent, *, full_membership: list[int], final_rollout_id: int
+) -> bool:
+    return (
+        event.alive_cell_indices_after != full_membership
+        and not event.healed_cell_indices
+        and event.rollout_id == final_rollout_id
+    )
 
 
 def _shape_of(event: CellReconfigureEvent) -> ExpectedReconfigure:

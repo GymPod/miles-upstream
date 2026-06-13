@@ -311,7 +311,13 @@ Architecture (external fault injection, not inside training loop):
   7. Healing witness: if the injector reports >=1 accepted injection, the event dir
      must contain >=1 healing CellReconfigureEvent (faults are random, so no exact
      sequence is pinned), and the last reconfigure event must restore full cell
-     membership — the soak must end fully healed, not silently degraded
+     membership — the soak must end fully healed, not silently degraded.
+     One structural exception: healing only runs at the next train() call, so a fault
+     landing inside the final rollout's train() emits a shrink with no later train()
+     to heal on. Exactly one such trailing shrink is tolerated, and only when it is
+     the very last event, is a pure shrink (no healed cells), and carries the final
+     rollout id (num_steps - 1); the sequence before it must still end fully healed.
+     A shrink at any earlier rollout, or two trailing shrinks, still fail.
 
 CLI options: --seed (default 42), --num-steps (default 30), --crash-probability (default 0.1)
 ```

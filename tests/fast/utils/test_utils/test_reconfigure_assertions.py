@@ -103,26 +103,67 @@ class TestAssertReconfigureEvents:
 
 
 class TestAssertSoakReconfigureEvents:
+    _FINAL_ROLLOUT_ID = 29
+
     def test_passes_when_injections_led_to_healing_and_full_membership(self, tmp_path: Path) -> None:
         """Injections with a healing that restores full membership pass."""
         _write_events(tmp_path, [_SHRINK_PARTIAL, _HEALING_PARTIAL])
 
-        assert_soak_reconfigure_events(tmp_path, num_successful_injections=1, num_cells=2)
+        assert_soak_reconfigure_events(
+            tmp_path, num_successful_injections=1, num_cells=2, final_rollout_id=self._FINAL_ROLLOUT_ID
+        )
 
     def test_passes_with_no_injections_and_no_events(self, tmp_path: Path) -> None:
         """Zero injections and zero events is a legitimate (quiet) soak outcome."""
-        assert_soak_reconfigure_events(tmp_path, num_successful_injections=0, num_cells=2)
+        assert_soak_reconfigure_events(
+            tmp_path, num_successful_injections=0, num_cells=2, final_rollout_id=self._FINAL_ROLLOUT_ID
+        )
+
+    def test_passes_with_single_trailing_shrink_at_final_rollout(self, tmp_path: Path) -> None:
+        """A fault inside the final rollout's train() leaves one trailing shrink, which is tolerated."""
+        trailing_shrink = dict(_SHRINK_PARTIAL, quorum_id=3, rollout_id=self._FINAL_ROLLOUT_ID)
+        _write_events(tmp_path, [_SHRINK_PARTIAL, _HEALING_PARTIAL, trailing_shrink])
+
+        assert_soak_reconfigure_events(
+            tmp_path, num_successful_injections=2, num_cells=2, final_rollout_id=self._FINAL_ROLLOUT_ID
+        )
 
     def test_fails_when_injections_but_no_healing(self, tmp_path: Path) -> None:
         """Successful injections without any healing event fail the witness."""
         _write_events(tmp_path, [_SHRINK_PARTIAL])
 
         with pytest.raises(AssertionError, match="no healing event"):
-            assert_soak_reconfigure_events(tmp_path, num_successful_injections=2, num_cells=2)
+            assert_soak_reconfigure_events(
+                tmp_path, num_successful_injections=2, num_cells=2, final_rollout_id=self._FINAL_ROLLOUT_ID
+            )
 
-    def test_fails_when_last_event_leaves_degraded_membership(self, tmp_path: Path) -> None:
-        """A soak whose last reconfigure leaves a degraded alive set fails."""
+    def test_fails_when_injections_but_no_healing_even_with_trailing_shrink_at_final_rollout(
+        self, tmp_path: Path
+    ) -> None:
+        """The trailing-shrink tolerance never excuses a run with injections but zero healings."""
+        _write_events(tmp_path, [dict(_SHRINK_PARTIAL, rollout_id=self._FINAL_ROLLOUT_ID)])
+
+        with pytest.raises(AssertionError, match="no healing event"):
+            assert_soak_reconfigure_events(
+                tmp_path, num_successful_injections=1, num_cells=2, final_rollout_id=self._FINAL_ROLLOUT_ID
+            )
+
+    def test_fails_when_trailing_shrink_is_not_at_final_rollout(self, tmp_path: Path) -> None:
+        """A trailing shrink at any rollout other than the final one fails the fully-healed check."""
         _write_events(tmp_path, [_HEALING_PARTIAL, dict(_SHRINK_PARTIAL, quorum_id=3, rollout_id=9)])
 
         with pytest.raises(AssertionError, match="end fully healed"):
-            assert_soak_reconfigure_events(tmp_path, num_successful_injections=1, num_cells=2)
+            assert_soak_reconfigure_events(
+                tmp_path, num_successful_injections=1, num_cells=2, final_rollout_id=self._FINAL_ROLLOUT_ID
+            )
+
+    def test_fails_with_two_trailing_shrinks_even_at_final_rollout(self, tmp_path: Path) -> None:
+        """Only one trailing shrink is tolerated; two in a row fail even when both carry the final rollout id."""
+        first_shrink = dict(_SHRINK_PARTIAL, quorum_id=3, rollout_id=self._FINAL_ROLLOUT_ID)
+        second_shrink = dict(_SHRINK_PARTIAL, quorum_id=4, rollout_id=self._FINAL_ROLLOUT_ID, alive_cell_indices_after=[])
+        _write_events(tmp_path, [_HEALING_PARTIAL, first_shrink, second_shrink])
+
+        with pytest.raises(AssertionError, match="end fully healed"):
+            assert_soak_reconfigure_events(
+                tmp_path, num_successful_injections=2, num_cells=2, final_rollout_id=self._FINAL_ROLLOUT_ID
+            )
