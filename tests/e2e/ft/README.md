@@ -179,11 +179,10 @@ also tolerate max_abs <= 1e-3; in the real_rollout mode the post-fault/injected 
 grads tolerate max_abs <= 3e-3 — see the dense-mode section below) and metrics (rtol=5e-2).
 
 Healing witness: the target phase_b event dir must contain exactly two
-CellReconfigureEvents, in order — a shrink at rollout 2 (alive N -> N-1, positive proof
-the fault injection fired) and a healing at rollout 3 (healed = last cell, ckpt src =
-cell 0, alive back to N). Baseline and phase_a event dirs must contain zero reconfigure
-events. This positively proves the crash -> shrink -> heal path executed; without it the
-comparison could silently degenerate to two fault-free runs.
+CellReconfigureEvents, in order — a shrink at rollout 2 (alive N -> N-1, proving the fault
+injection fired) and a healing at rollout 3 (healed = last cell, ckpt src = cell 0, alive
+back to N); baseline and phase_a event dirs must have zero. This proves the
+crash -> shrink -> heal path ran, so the comparison cannot degenerate to two fault-free runs.
 
 Fault injection via --ci-ft-test-actions JSON (data-driven, executed by RayTrainGroup).
 The JSON `at_rollout` field specifies which rollout_id triggers the action.
@@ -280,11 +279,11 @@ Bitwise verification: --use-fault-tolerance --ft-components train auto-enables
 cross_replica_weight_checksum rule checks cell-to-cell bitwise equality after healing.
 
 Healing witness: the target phase_b event dir must contain exactly one
-CellReconfigureEvent — a healing at rollout 3 (healed = last cell, ckpt src = cell 0,
-alive back to N; the stop+start pair is absorbed by a single _refresh_cells, so there is
-no standalone shrink). Baseline and phase_a event dirs must contain zero reconfigure
-events. This is the regression gate for the off-by-one class of bugs where healing
-silently never runs and the comparison passes on two fault-free runs.
+CellReconfigureEvent — a healing at rollout 3 (healed = last cell, ckpt src = cell 0, alive
+back to N; the stop+start pair is absorbed by a single _refresh_cells, so no standalone
+shrink); baseline and phase_a event dirs must have zero. This is the regression gate for
+the off-by-one bug class where healing silently never runs and the comparison passes on
+two fault-free runs.
 ```
 
 ### `scenario_ft_random`
