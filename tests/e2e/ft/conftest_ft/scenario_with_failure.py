@@ -131,6 +131,15 @@ def _build_target_args(mode: FTTestMode, dump_dir: str, enable_dumper: bool = Tr
     return _build_phase_args(mode, dump_dir, is_target=True, enable_dumper=enable_dumper)
 
 
+def _assert_dump_leaves(side_dir: str, side: str, phase: str, expected_leaves: set[str]) -> None:
+    dumps_root = Path(f"{side_dir}/dumps")
+    actual_leaves = {str(p.parent.relative_to(dumps_root)) for p in dumps_root.rglob("*.pt")}
+    assert actual_leaves == expected_leaves, (
+        f"{phase} {side}: dump leaves {actual_leaves} do not match the per-rollout comparison loop "
+        f"{expected_leaves}; an extra or missing leaf would silently skip comparison"
+    )
+
+
 def _compare(dump_dir: str, mode: FTTestMode) -> None:
     # Both phases are compared: phase_a exercises fault + healing on a cold-started run,
     # phase_b exercises the same timeline after resuming from phase_a's post-FT ckpt.
@@ -148,14 +157,8 @@ def _compare(dump_dir: str, mode: FTTestMode) -> None:
 
         phase_rollout_ids = range(phase_start_rollout_id, phase_start_rollout_id + NUM_ROLLOUTS_PER_PHASE)
         expected_leaves = {f"fwd_bwd/rollout_{rollout_id}" for rollout_id in phase_rollout_ids}
-        actual_leaves = {
-            str(p.parent.relative_to(Path(f"{baseline_dir}/dumps")))
-            for p in Path(f"{baseline_dir}/dumps").rglob("*.pt")
-        }
-        assert actual_leaves == expected_leaves, (
-            f"{phase}: dump leaves {actual_leaves} do not match the per-rollout comparison loop "
-            f"{expected_leaves}; a new leaf would silently skip comparison"
-        )
+        _assert_dump_leaves(side_dir=baseline_dir, side="baseline", phase=phase, expected_leaves=expected_leaves)
+        _assert_dump_leaves(side_dir=target_dir, side="target", phase=phase, expected_leaves=expected_leaves)
 
         for rollout_id in phase_rollout_ids:
             is_post_fault = mode.has_real_rollout and rollout_id >= _FIRST_POST_FAULT_ROLLOUT_ID
