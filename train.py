@@ -29,12 +29,14 @@ async def train(args):
     # create the actor and critic models
     actor_model, critic_model = await create_training_models(args, pgs, rollout_manager)
 
+    progress = None
     if args.control_server_port:
-        start_control_server(
+        progress = start_control_server(
             actor_model=actor_model,
             rollout_manager=rollout_manager,
             port=args.control_server_port,
             ft_components=args.ft_components,
+            num_rollout=args.num_rollout,
         )
 
     maybe_start_mini_ft_controller(args)
@@ -82,6 +84,9 @@ async def train(args):
     # train loop.
     # note that for async training, one can change the position of the sync operation(ray.get).
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
+        if progress is not None:
+            progress.current_rollout_id = rollout_id
+
         if args.eval_interval is not None and rollout_id == 0 and not args.skip_eval_before_train:
             await rollout_manager.eval.remote(rollout_id)
 

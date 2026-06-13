@@ -17,12 +17,17 @@ from miles.utils.control_server.models import (
     CellPatch,
     FaultInjection,
     K8sStatus,
-    Progress,
     _OkResponse,
 )
+from miles.utils.control_server.progress import TrainingProgress
 from miles.utils.control_server.registry import _CellRegistry
 
 logger = logging.getLogger(__name__)
+
+# Reject fault injection during the last this-many rollouts so the tail runs
+# fault-free, guaranteeing the soak ends at full cell membership. See
+# tests/e2e/ft/README.md (scenario_ft_random) for the race-free argument.
+COOLDOWN_ROLLOUTS: int = 3
 
 
 # -------------------------- entrypoint ------------------------------
@@ -34,7 +39,8 @@ def start_control_server(
     rollout_manager: object,
     port: int,
     ft_components: list[str],
-) -> None:
+    num_rollout: int,
+) -> TrainingProgress:
     registry = _CellRegistry()
 
     if "train" in ft_components:
@@ -52,11 +58,15 @@ def start_control_server(
                 )
             )
 
-    _start_control_server_raw(registry=registry, actor_model=actor_model, port=port)
+    progress = TrainingProgress()
+    _start_control_server_raw(registry=registry, progress=progress, num_rollout=num_rollout, port=port)
+    return progress
 
 
-def _start_control_server_raw(registry: _CellRegistry, actor_model: RayTrainGroup, port: int) -> None:
-    app = _create_control_app(registry, actor_model)
+def _start_control_server_raw(
+    *, registry: _CellRegistry, progress: TrainingProgress, num_rollout: int, port: int
+) -> None:
+    app = _create_control_app(registry=registry, progress=progress, num_rollout=num_rollout)
 
     def _run() -> None:
         uvicorn.run(app, host="0.0.0.0", port=port)
@@ -69,7 +79,7 @@ def _start_control_server_raw(registry: _CellRegistry, actor_model: RayTrainGrou
 # -------------------------- main app ------------------------------
 
 
-def _create_control_app(registry: _CellRegistry, actor_model: RayTrainGroup) -> FastAPI:
+def _create_control_app(*, registry: _CellRegistry, progress: TrainingProgress, num_rollout: int) -> FastAPI:
     app = FastAPI()
 
     # -------------------------- exceptions ------------------------------
@@ -86,10 +96,6 @@ def _create_control_app(registry: _CellRegistry, actor_model: RayTrainGroup) -> 
     @app.get("/api/v1/health")
     async def health() -> _OkResponse:
         return _OkResponse()
-
-    @app.get("/api/v1/progress")
-    async def get_progress() -> Progress:
-        return Progress(current_rollout_id=actor_model.current_rollout_id)
 
     @app.get("/api/v1/cells")
     async def get_cells() -> CellList:
@@ -122,6 +128,7 @@ def _create_control_app(registry: _CellRegistry, actor_model: RayTrainGroup) -> 
 
     @app.post("/api/v1/cells/{name}/inject-fault")
     async def inject_fault(name: str, body: FaultInjection) -> _OkResponse:
+        _reject_if_in_cooldown(name)
         handle = _get_handle(name)
         try:
             await handle.inject_fault(mode=body.mode, sub_index=body.sub_index)
@@ -141,6 +148,19 @@ def _create_control_app(registry: _CellRegistry, actor_model: RayTrainGroup) -> 
         return _OkResponse()
 
     # -------------------------- utils ------------------------------
+
+    def _reject_if_in_cooldown(name: str) -> None:
+        current_rollout_id = progress.current_rollout_id
+        if current_rollout_id is not None and current_rollout_id >= num_rollout - COOLDOWN_ROLLOUTS:
+            raise _K8sError(
+                status_code=409,
+                reason="Conflict",
+                message=(
+                    f"Refusing to inject fault into cell '{name}': rollout {current_rollout_id} is within the "
+                    f"final {COOLDOWN_ROLLOUTS} cooldown rollouts (num_rollout={num_rollout}), "
+                    f"so the tail stays fault-free and the soak ends at full membership"
+                ),
+            )
 
     def _get_handle(name: str) -> _CellHandle:
         try:
