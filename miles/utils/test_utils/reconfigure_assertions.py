@@ -87,7 +87,7 @@ def assert_soak_reconfigure_events(event_dir: Path, *, num_successful_injections
 def load_reconfigure_events(event_dir: Path) -> list[CellReconfigureEvent]:
     """Read all CellReconfigureEvents under event_dir, in emission order.
 
-    All reconfigure events come from the single driver-side events.jsonl, so file order
+    All reconfigure events come from the single driver-side JSONL file, so file order
     is emission order.
     """
     return [event for event in read_events(event_dir) if isinstance(event, CellReconfigureEvent)]
