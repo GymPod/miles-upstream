@@ -67,8 +67,6 @@ def run_ci(
 def _prepare_gsm8k() -> None:
     U.exec_command("mkdir -p /root/models /root/datasets")
     U.exec_command(f"hf download Qwen/{_MODEL_NAME} --local-dir /root/models/{_MODEL_NAME}")
-    # raw megatron-to-hf mode loads training weights from a megatron torch_dist
-    # checkpoint (not the HF dir), so convert once here.
     U.convert_checkpoint(
         model_name=_MODEL_NAME,
         megatron_model_type=_MODEL_TYPE,
