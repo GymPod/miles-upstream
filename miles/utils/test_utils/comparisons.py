@@ -351,7 +351,7 @@ def compare_engine_checksums(baseline_dir: str, target_dir: str) -> None:
                 f"rollout {rollout_id}: engine count differs (baseline={len(b_engines)} vs target={len(t_engines)})"
             )
             continue
-        for engine_index, (b_checksums, t_checksums) in enumerate(zip(b_engines, t_engines)):
+        for engine_index, (b_checksums, t_checksums) in enumerate(zip(b_engines, t_engines, strict=True)):
             if b_checksums.keys() != t_checksums.keys():
                 issues.append(
                     f"rollout {rollout_id} engine {engine_index}: tensor-name sets differ "
