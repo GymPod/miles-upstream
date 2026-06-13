@@ -6,6 +6,7 @@ from pydantic import TypeAdapter, ValidationError
 from miles.backends.megatron_utils.types import TrainStepOutcome
 from miles.utils.event_logger.models import (
     CellReconfigureEvent,
+    EngineWeightChecksumEvent,
     Event,
     TrainGroupStepEndEvent,
     WitnessAllocateIdEvent,
@@ -139,6 +140,23 @@ class TestCellReconfigureEvent:
         assert parsed.alive_cell_indices_after == [0]
 
 
+class TestEngineWeightChecksumEvent:
+    def test_json_roundtrip(self) -> None:
+        """An engine weight checksum event survives a JSON round-trip with its merged checksums intact."""
+        event = EngineWeightChecksumEvent(
+            timestamp=_FIXED_TS,
+            source=_FIXED_SOURCE,
+            rollout_id=4,
+            engine_index=2,
+            checksums={"rank0/embed.weight": "aaa", "rank1/embed.weight": "bbb"},
+        )
+        parsed = _event_adapter.validate_json(event.model_dump_json())
+        assert isinstance(parsed, EngineWeightChecksumEvent)
+        assert parsed.rollout_id == 4
+        assert parsed.engine_index == 2
+        assert parsed.checksums == {"rank0/embed.weight": "aaa", "rank1/embed.weight": "bbb"}
+
+
 class TestWitnessSnapshotParamEventWithStaleIds:
     def test_json_roundtrip(self) -> None:
         event = WitnessSnapshotParamEvent(
@@ -171,6 +189,13 @@ class TestDiscriminatedUnionParsesAllEvents:
                 source=_FIXED_SOURCE,
                 rollout_id=0,
                 cell_outcomes={0: [TrainStepOutcome.NORMAL]},
+            ),
+            EngineWeightChecksumEvent(
+                timestamp=_FIXED_TS,
+                source=_FIXED_SOURCE,
+                rollout_id=0,
+                engine_index=0,
+                checksums={"rank0/w": "aaa"},
             ),
         ]
         for event in events:
