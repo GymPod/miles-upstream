@@ -1,11 +1,4 @@
-"""Flatten the nested ``RolloutManager.check_weights("checksum")`` response into
-per-engine merged checksum dicts, ready to log as ``EngineWeightChecksumEvent``.
-
-The response is nested servers -> server_groups -> engines. Each engine returns
-the raw HTTP body ``{"success": bool, "message": str, "ranks": [ChecksumInfo...]}``;
-a multi-node engine's non-zero node ranks return ``None`` (the ``_make_request``
-early-return), which we drop before assigning a stable ``engine_index``.
-"""
+"""Flatten the nested check_weights("checksum") response into per-engine checksum dicts."""
 
 from typing import Any
 
@@ -13,12 +6,7 @@ EngineChecksums = dict[str, str]
 
 
 def flatten_engine_checksums(check_weights_result: Any) -> list[EngineChecksums]:
-    """Flatten servers->groups->engines, drop None engines, merge each engine's ranks.
-
-    Returns one merged ``{name: hash}`` dict per surviving engine, in flattened
-    order. Fails loud if every engine was filtered out (a None-only result means
-    the checksum action silently did nothing).
-    """
+    """One merged {name: hash} dict per surviving engine, in flattened order."""
     engine_bodies = _flatten_to_engine_bodies(check_weights_result)
     surviving = [body for body in engine_bodies if body is not None]
     assert surviving, (
@@ -29,7 +17,6 @@ def flatten_engine_checksums(check_weights_result: Any) -> list[EngineChecksums]
 
 
 def _flatten_to_engine_bodies(check_weights_result: Any) -> list[Any]:
-    """servers -> server_groups -> engines, yielding each engine's raw body (or None)."""
     engine_bodies: list[Any] = []
     for server in check_weights_result:
         for server_group in server:
@@ -39,12 +26,8 @@ def _flatten_to_engine_bodies(check_weights_result: Any) -> list[Any]:
 
 
 def _merge_engine_ranks(engine_body: dict[str, Any]) -> EngineChecksums:
-    """Merge one engine's per-rank ChecksumInfo dicts into a single flat dict.
-
-    Ranks arrive in non-deterministic (zmq) order under TP>1, so sort by
-    ``parallelism_info.rank`` and prefix each tensor name with ``rank{r}/`` to
-    keep distinct shards' identically-named tensors from clobbering one another.
-    """
+    # Ranks arrive in non-deterministic (zmq) order under TP>1; sort and prefix each tensor
+    # name with rank{r}/ so distinct shards' identically-named tensors never clobber.
     assert engine_body.get("success", False), f"check_weights engine reported failure: {engine_body!r}"
     ranks: list[dict[str, Any]] = engine_body.get("ranks", []) or []
     assert ranks, f"check_weights engine body has no ranks: {engine_body!r}"

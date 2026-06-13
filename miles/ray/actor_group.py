@@ -72,11 +72,7 @@ class RayTrainGroup:
         await self._broadcast("save_model", rollout_id, force_sync=force_sync)
 
     async def update_weights(self, rollout_id: int | None = None):
-        """Broadcast weights from rank 0 to all other ranks.
-
-        rollout_id is accepted for call-site parity with the FT RayTrainGroup
-        (which uses it for engine checksum events); the v1 path ignores it.
-        """
+        """Broadcast weights from rank 0 to all other ranks."""
         if self.args.debug_train_only or self.args.debug_rollout_only:
             return
 

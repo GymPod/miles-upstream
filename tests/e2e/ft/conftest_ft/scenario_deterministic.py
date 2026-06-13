@@ -151,10 +151,8 @@ def _compare(dump_dir: str, mode: FTTestMode) -> None:
             allow_failed_pattern=INPUT_TENSORS_ALLOW_FAILED_PATTERN,
         )
 
-        # Real-rollout mode runs sglang engines, so each phase emits its own engine weight
-        # checksums. Assert per phase that the engines saw bitwise-identical weights on both
-        # sides; this is the only gate that consumes the target's post-heal update_weights
-        # output, and it must cover every phase (phase_b heals from the phase_a ckpt).
+        # Per phase, assert both sides pushed bitwise-identical weights to every engine — the
+        # only gate consuming the target's post-heal update_weights (phase_b loads phase_a ckpt).
         if mode.has_real_rollout:
             compare_engine_checksums(
                 baseline_dir=baseline_dir,

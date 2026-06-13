@@ -230,11 +230,7 @@ class RayTrainGroup:
         await retry(lambda _: self._execute_first_alive("save_model", rollout_id, force_sync=force_sync))
 
     async def update_weights(self, rollout_id: int | None = None):
-        """Broadcast weights to rollout engines.
-
-        rollout_id is None for the initial out-of-loop sync (not tied to a rollout);
-        the engine checksum collection is skipped in that case.
-        """
+        """Broadcast weights to rollout engines."""
         # TODO: allow using all cells to update weights (instead of first alive cell)
         # Fetch the updatable engines + lock once (like V1 RayActorGroup) so all
         # ranks observe a consistent engine set; the actor releases the lock itself.
