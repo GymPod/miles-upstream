@@ -1,4 +1,4 @@
-"""Tests for test_utils.comparisons.compare_engine_checksums."""
+"""Tests for test_utils.comparisons.engine_checksums.compare_engine_checksums."""
 
 from pathlib import Path
 from typing import Any
@@ -8,7 +8,7 @@ import pytest
 from miles.utils.event_logger.logger import EventLogger
 from miles.utils.event_logger.models import EngineWeightChecksumEvent
 from miles.utils.process_identity import MainProcessIdentity
-from miles.utils.test_utils.comparisons import compare_engine_checksums
+from miles.utils.test_utils.comparisons.engine_checksums import compare_engine_checksums
 
 
 def _write_engine_events(side_dir: Path, partials: list[dict[str, Any]]) -> None:

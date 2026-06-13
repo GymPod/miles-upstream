@@ -8,13 +8,13 @@ from tests.e2e.ft.conftest_ft.app import create_comparison_app_and_run_ci
 from tests.e2e.ft.conftest_ft.execution import get_common_train_args, get_ft_args
 from tests.e2e.ft.conftest_ft.modes import FTTestMode
 
-from miles.utils.test_utils.comparisons import (
+from miles.utils.test_utils.comparisons.dumps import (
     INPUT_TENSORS_ALLOW_FAILED_PATTERN,
     INPUT_TENSORS_SKIP_PATTERN,
     compare_dumps,
-    compare_engine_checksums,
-    compare_metrics,
 )
+from miles.utils.test_utils.comparisons.engine_checksums import compare_engine_checksums
+from miles.utils.test_utils.comparisons.metrics import compare_metrics
 from miles.utils.test_utils.reconfigure_assertions import ReconfigureInfo, assert_reconfigure_events
 
 # --num-rollout is the exclusive global end id (TOTAL_NUM_ROLLOUTS); --debug-exit-after-rollout counts rollouts within the current run.
