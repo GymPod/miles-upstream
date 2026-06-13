@@ -69,12 +69,6 @@ def _build_phase_args(mode: FTTestMode, dump_dir: str, *, is_target: bool, enabl
     if is_target:
         base += get_ft_args(mode)
 
-    # Real-rollout mode runs sglang engines, so capture per-engine weight checksums on
-    # both sides; _compare then asserts the target's update_weights (incl. post-heal)
-    # pushed bitwise-identical weights to what the baseline pushed.
-    if mode.has_real_rollout:
-        base += "--check-engine-weight-checksum "
-
     base += f"--save {dump_dir}/ckpt --save-interval {NUM_ROLLOUTS_PER_PHASE} "
     base += f"--debug-exit-after-rollout {NUM_ROLLOUTS_PER_PHASE} "
     if phase_name != "phase_a":

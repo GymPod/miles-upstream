@@ -246,9 +246,9 @@ class RayTrainGroup:
         await self._maybe_log_engine_weight_checksums(rollout_id=rollout_id)
 
     async def _maybe_log_engine_weight_checksums(self, *, rollout_id: int | None) -> None:
-        if not self.args.check_engine_weight_checksum or rollout_id is None:
+        if rollout_id is None or not is_event_logger_initialized():
             return
-        if not is_event_logger_initialized():
+        if self.args.debug_train_only or self.args.debug_rollout_only:
             return
 
         check_weights_result = await self._rollout_manager.check_weights.remote("checksum")

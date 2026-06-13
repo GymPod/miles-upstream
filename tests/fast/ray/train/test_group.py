@@ -37,6 +37,8 @@ def _make_mock_args(
         trainer_heartbeat_checker_max_heartbeat_age=90.0,
         trainer_heartbeat_checker_first_wait=300.0,
         ci_ft_test_actions=None,
+        debug_train_only=False,
+        debug_rollout_only=False,
         # compute_megatron_world_size_except_dp(args) = TP * PP * CP. Set CP to
         # gpus_per_cell so RayTrainGroup computes num_cells correctly.
         tensor_model_parallel_size=1,
@@ -976,41 +978,45 @@ def _checksum_response(engine_checksums: list[dict[str, str]]) -> list:
 
 
 class TestMaybeLogEngineWeightChecksums:
-    def _make_group_with_args(self, *, check_flag: bool, rollout_manager: object | None) -> RayTrainGroup:
-        group = _make_group(num_cells=1, rollout_manager=rollout_manager)
-        group.args.check_engine_weight_checksum = check_flag
-        return group
-
-    async def test_disabled_does_not_call_check_weights(self):
-        """With the flag off, no check_weights request is issued and no event logged."""
+    async def test_no_event_logger_does_not_call_check_weights(self):
+        """Without an initialized event logger, no check_weights request is issued."""
         rollout_mgr = MagicMock()
         rollout_mgr.check_weights = MagicMock()
-        group = self._make_group_with_args(check_flag=False, rollout_manager=rollout_mgr)
+        group = _make_group(num_cells=1, rollout_manager=rollout_mgr)
 
-        with patch("miles.ray.train.group.is_event_logger_initialized", return_value=True), patch(
-            "miles.ray.train.group.get_event_logger"
-        ) as mock_get_logger:
+        with patch("miles.ray.train.group.is_event_logger_initialized", return_value=False):
             await group._maybe_log_engine_weight_checksums(rollout_id=0)
 
         rollout_mgr.check_weights.assert_not_called()
-        mock_get_logger.assert_not_called()
 
     async def test_none_rollout_id_skips_collection(self):
         """The initial out-of-loop sync (rollout_id=None) does not collect checksums."""
         rollout_mgr = MagicMock()
         rollout_mgr.check_weights = MagicMock()
-        group = self._make_group_with_args(check_flag=True, rollout_manager=rollout_mgr)
+        group = _make_group(num_cells=1, rollout_manager=rollout_mgr)
 
         with patch("miles.ray.train.group.is_event_logger_initialized", return_value=True):
             await group._maybe_log_engine_weight_checksums(rollout_id=None)
 
         rollout_mgr.check_weights.assert_not_called()
 
+    async def test_debug_train_only_skips_collection(self):
+        """Without real rollout engines (debug_train_only), no check_weights request is issued."""
+        rollout_mgr = MagicMock()
+        rollout_mgr.check_weights = MagicMock()
+        group = _make_group(num_cells=1, rollout_manager=rollout_mgr)
+        group.args.debug_train_only = True
+
+        with patch("miles.ray.train.group.is_event_logger_initialized", return_value=True):
+            await group._maybe_log_engine_weight_checksums(rollout_id=0)
+
+        rollout_mgr.check_weights.assert_not_called()
+
     async def test_enabled_logs_one_event_per_engine(self):
-        """With the flag on, each surviving engine produces one EngineWeightChecksumEvent."""
+        """With event logger on and real engines, each surviving engine produces one event."""
         rollout_mgr = MagicMock()
         rollout_mgr.check_weights.remote = AsyncMock(return_value=_checksum_response([{"w": "e0"}, {"w": "e1"}]))
-        group = self._make_group_with_args(check_flag=True, rollout_manager=rollout_mgr)
+        group = _make_group(num_cells=1, rollout_manager=rollout_mgr)
 
         with patch("miles.ray.train.group.is_event_logger_initialized", return_value=True), patch(
             "miles.ray.train.group.get_event_logger"

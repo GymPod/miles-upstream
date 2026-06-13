@@ -1512,13 +1512,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Enable event analyzer to run sanity checks (e.g. cross-replica checksum consistency) before each training step.",
             )
             parser.add_argument(
-                "--check-engine-weight-checksum",
-                action="store_true",
-                help="After each rollout's update_weights, checksum every rollout engine's weights and "
-                "log an EngineWeightChecksumEvent. The event_analyzer engine_weight_checksum_consistency "
-                "rule then verifies all engines of a rollout received identical weights.",
-            )
-            parser.add_argument(
                 "--enable-witness",
                 action="store_true",
                 help="Enable forward/backward pass witness.",

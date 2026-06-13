@@ -296,16 +296,16 @@ Bitwise verification: --use-fault-tolerance --ft-components train auto-enables
 --save-local-weight-checksum and --enable-event-analyzer. The event_analyzer
 cross_replica_weight_checksum rule checks cell-to-cell bitwise equality after healing.
 
-Engine weight checksum (real_rollout mode only): both sides pass
---check-engine-weight-checksum, so after every update_weights each rollout engine's
-weights are hashed into an EngineWeightChecksumEvent. _compare then asserts per phase that
-the baseline and target pushed bitwise-identical weights for every (rollout, engine) pair,
-covering both phases (phase_b's engines are loaded from the phase_a ckpt), which is what
-consumes the post-heal update_weights output (closing the gap noted under
-scenario_with_failure). Independently, the event_analyzer
-engine_weight_checksum_consistency rule checks that all engines of one rollout received
-the same weights — this is the production-facing check (function A), enabled by
---check-engine-weight-checksum on any run.
+Engine weight checksum (real_rollout mode only): whenever the event logger is on (these runs
+always pass --save-debug-event-data) and real rollout engines are present, every
+update_weights hashes each rollout engine's weights into one EngineWeightChecksumEvent per
+rollout (holding every engine). _compare then asserts per phase that the baseline and target
+pushed bitwise-identical weights for every (rollout, engine) pair, covering both phases
+(phase_b's engines are loaded from the phase_a ckpt), which is what consumes the post-heal
+update_weights output (closing the gap noted under scenario_with_failure). Independently, the
+event_analyzer engine_weight_checksum_consistency rule checks that all engines of one rollout
+received the same weights — this is the production-facing check (function A), on by default
+wherever event logging is enabled.
 
 Healing witness: each target phase heals once, so each target event dir must contain
 exactly one CellReconfigureEvent — a healing at rollout P+2 (healed = last cell, ckpt src =
