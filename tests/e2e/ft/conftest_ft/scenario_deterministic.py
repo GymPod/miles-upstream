@@ -14,7 +14,7 @@ from miles.utils.test_utils.comparisons import (
     compare_dumps,
     compare_metrics,
 )
-from miles.utils.test_utils.engine_checksums import compare_engine_checksum_dumps
+from miles.utils.test_utils.engine_checksums import INITIAL_DUMP_NAME, compare_engine_checksum_dumps
 
 NUM_PHASE_A_STEPS: int = 1
 # --num-rollout value; phase_b resumes from the phase_a ckpt and executes rollouts
@@ -139,9 +139,19 @@ def _compare_engine_checksums(dump_dir: str, mode: FTTestMode) -> None:
     # tensor's hash and fails with the rollout, engine, and tensor name.
     if not mode.has_real_rollout:
         return
+    # Pin the exact rollout-dir set and engine count so a *symmetric* loss on both
+    # sides (e.g. the rollout_id plumbing breaking and every dump landing in
+    # initial/, or fewer engines being checksummed) cannot pass silently: one
+    # initial/ dump for the pre-loop weight sync, then one rollout_<i>/ dump per
+    # phase_b rollout, each with exactly mode.rollout_num_engines engine files.
+    expected_rollout_names = {INITIAL_DUMP_NAME} | {
+        f"rollout_{rollout_id}" for rollout_id in range(NUM_PHASE_A_STEPS, NUM_PHASE_B_STEPS)
+    }
     compare_engine_checksum_dumps(
         baseline_dir=f"{dump_dir}/baseline/phase_b/engine_checksums",
         target_dir=f"{dump_dir}/target/phase_b/engine_checksums",
+        expected_rollout_names=expected_rollout_names,
+        expected_num_engines=mode.rollout_num_engines,
     )
 
 

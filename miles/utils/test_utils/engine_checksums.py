@@ -4,7 +4,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_INITIAL_DUMP_NAME = "initial"
+INITIAL_DUMP_NAME = "initial"
 
 
 class EngineChecksumDumper:
@@ -52,7 +52,7 @@ class EngineChecksumDumper:
         ]
         assert engine_responses, "check_weights('checksum') returned no engine responses"
 
-        rollout_dir = self._dump_dir / (f"rollout_{rollout_id}" if rollout_id is not None else _INITIAL_DUMP_NAME)
+        rollout_dir = self._dump_dir / (f"rollout_{rollout_id}" if rollout_id is not None else INITIAL_DUMP_NAME)
         rollout_dir.mkdir(parents=True, exist_ok=True)
         for engine_index, response in enumerate(engine_responses):
             path = rollout_dir / f"engine_{engine_index}.json"
@@ -64,36 +64,55 @@ class EngineChecksumDumper:
         )
 
 
-def compare_engine_checksum_dumps(*, baseline_dir: str, target_dir: str) -> None:
+def compare_engine_checksum_dumps(
+    *,
+    baseline_dir: str,
+    target_dir: str,
+    expected_rollout_names: set[str],
+    expected_num_engines: int,
+) -> None:
     """Assert two EngineChecksumDumper trees are identical per rollout / engine / tensor.
 
     Fail-closed: missing dirs, mismatched rollout-dir sets, mismatched engine-file sets,
     empty checksum maps, and any per-tensor hash difference are all hard failures.
+    Both trees must also match the caller-provided expectations exactly
+    (``expected_rollout_names`` rollout dirs, each with ``engine_0.json`` ..
+    ``engine_{expected_num_engines - 1}.json``), so a symmetric loss on both sides --
+    e.g. every dump landing in ``initial/`` or a shrunken engine set -- cannot pass.
     """
+    assert expected_rollout_names, "expected_rollout_names must not be empty"
+    assert expected_num_engines > 0, f"expected_num_engines must be positive, got {expected_num_engines}"
     baseline_root = Path(baseline_dir)
     target_root = Path(target_dir)
     assert baseline_root.is_dir(), f"Baseline engine checksum dir does not exist: {baseline_root}"
     assert target_root.is_dir(), f"Target engine checksum dir does not exist: {target_root}"
 
-    baseline_rollouts = _list_child_names(baseline_root)
-    target_rollouts = _list_child_names(target_root)
-    assert baseline_rollouts, f"No rollout dirs found under {baseline_root}"
-    assert baseline_rollouts == target_rollouts, (
-        f"Engine checksum rollout dirs mismatch: baseline={baseline_rollouts} vs target={target_rollouts} "
-        f"(under {baseline_root} vs {target_root})"
+    baseline_rollouts = set(_list_child_names(baseline_root))
+    target_rollouts = set(_list_child_names(target_root))
+    assert baseline_rollouts == expected_rollout_names, (
+        f"Engine checksum rollout dirs mismatch under {baseline_root}: "
+        f"baseline={sorted(baseline_rollouts)} vs expected={sorted(expected_rollout_names)}"
+    )
+    assert target_rollouts == expected_rollout_names, (
+        f"Engine checksum rollout dirs mismatch under {target_root}: "
+        f"target={sorted(target_rollouts)} vs expected={sorted(expected_rollout_names)}"
     )
 
+    expected_engine_files = {f"engine_{engine_index}.json" for engine_index in range(expected_num_engines)}
     num_tensor_checksums = 0
     num_engine_files = 0
-    for rollout_name in baseline_rollouts:
-        baseline_files = _list_child_names(baseline_root / rollout_name)
-        target_files = _list_child_names(target_root / rollout_name)
-        assert baseline_files, f"No engine checksum files under {baseline_root / rollout_name}"
-        assert baseline_files == target_files, (
+    for rollout_name in sorted(expected_rollout_names):
+        baseline_files = set(_list_child_names(baseline_root / rollout_name))
+        target_files = set(_list_child_names(target_root / rollout_name))
+        assert baseline_files == expected_engine_files, (
             f"Engine checksum files mismatch for {rollout_name}: "
-            f"baseline={baseline_files} vs target={target_files}"
+            f"baseline={sorted(baseline_files)} vs expected={sorted(expected_engine_files)}"
         )
-        for file_name in baseline_files:
+        assert target_files == expected_engine_files, (
+            f"Engine checksum files mismatch for {rollout_name}: "
+            f"target={sorted(target_files)} vs expected={sorted(expected_engine_files)}"
+        )
+        for file_name in sorted(expected_engine_files):
             num_engine_files += 1
             num_tensor_checksums += _compare_engine_checksum_file(
                 baseline_path=baseline_root / rollout_name / file_name,

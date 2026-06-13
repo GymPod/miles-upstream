@@ -117,7 +117,12 @@ class TestCompareEngineChecksumDumps:
         baseline = _write_dump(tmp_path, "baseline", rollouts=rollouts)
         target = _write_dump(tmp_path, "target", rollouts=rollouts)
 
-        compare_engine_checksum_dumps(baseline_dir=baseline, target_dir=target)
+        compare_engine_checksum_dumps(
+            baseline_dir=baseline,
+            target_dir=target,
+            expected_rollout_names={"initial", "rollout_1"},
+            expected_num_engines=2,
+        )
 
         out = capsys.readouterr().out
         assert "2 rollout(s), 4 engine file(s), 8 tensor checksum(s)" in out
@@ -132,7 +137,12 @@ class TestCompareEngineChecksumDumps:
         )
 
         with pytest.raises(AssertionError, match=r"(?s)rollout_1/engine_0\.json.*tensor 'model\.w2'") as exc_info:
-            compare_engine_checksum_dumps(baseline_dir=baseline, target_dir=target)
+            compare_engine_checksum_dumps(
+                baseline_dir=baseline,
+                target_dir=target,
+                expected_rollout_names={"rollout_1"},
+                expected_num_engines=1,
+            )
 
         assert "model.w1" not in str(exc_info.value)
 
@@ -146,7 +156,12 @@ class TestCompareEngineChecksumDumps:
         target = _write_dump(tmp_path, "target", rollouts={"rollout_1": [_make_engine_response(_CHECKSUMS)]})
 
         with pytest.raises(AssertionError, match="Engine checksum files mismatch"):
-            compare_engine_checksum_dumps(baseline_dir=baseline, target_dir=target)
+            compare_engine_checksum_dumps(
+                baseline_dir=baseline,
+                target_dir=target,
+                expected_rollout_names={"rollout_1"},
+                expected_num_engines=2,
+            )
 
     def test_fails_on_rollout_dir_set_mismatch(self, tmp_path: Path):
         """A rollout dir present on only one side is a hard failure (fail-closed)."""
@@ -161,22 +176,37 @@ class TestCompareEngineChecksumDumps:
         target = _write_dump(tmp_path, "target", rollouts={"rollout_1": [_make_engine_response(_CHECKSUMS)]})
 
         with pytest.raises(AssertionError, match="rollout dirs mismatch"):
-            compare_engine_checksum_dumps(baseline_dir=baseline, target_dir=target)
+            compare_engine_checksum_dumps(
+                baseline_dir=baseline,
+                target_dir=target,
+                expected_rollout_names={"rollout_1", "rollout_2"},
+                expected_num_engines=1,
+            )
 
     def test_fails_on_missing_baseline_dir(self, tmp_path: Path):
         """A missing dump dir fails instead of passing vacuously."""
         target = _write_dump(tmp_path, "target", rollouts={"rollout_1": [_make_engine_response(_CHECKSUMS)]})
 
         with pytest.raises(AssertionError, match="Baseline engine checksum dir does not exist"):
-            compare_engine_checksum_dumps(baseline_dir=str(tmp_path / "baseline"), target_dir=target)
+            compare_engine_checksum_dumps(
+                baseline_dir=str(tmp_path / "baseline"),
+                target_dir=target,
+                expected_rollout_names={"rollout_1"},
+                expected_num_engines=1,
+            )
 
     def test_fails_on_empty_baseline_dir(self, tmp_path: Path):
         """An empty dump dir (no rollout dirs) fails instead of passing vacuously."""
         (tmp_path / "baseline").mkdir()
         target = _write_dump(tmp_path, "target", rollouts={"rollout_1": [_make_engine_response(_CHECKSUMS)]})
 
-        with pytest.raises(AssertionError, match="No rollout dirs"):
-            compare_engine_checksum_dumps(baseline_dir=str(tmp_path / "baseline"), target_dir=target)
+        with pytest.raises(AssertionError, match="rollout dirs mismatch"):
+            compare_engine_checksum_dumps(
+                baseline_dir=str(tmp_path / "baseline"),
+                target_dir=target,
+                expected_rollout_names={"rollout_1"},
+                expected_num_engines=1,
+            )
 
     def test_fails_on_tensor_name_set_mismatch(self, tmp_path: Path):
         """Different tensor name sets (e.g. a tensor never pushed) are a hard failure."""
@@ -188,7 +218,12 @@ class TestCompareEngineChecksumDumps:
         )
 
         with pytest.raises(AssertionError, match="tensor name sets differ"):
-            compare_engine_checksum_dumps(baseline_dir=baseline, target_dir=target)
+            compare_engine_checksum_dumps(
+                baseline_dir=baseline,
+                target_dir=target,
+                expected_rollout_names={"rollout_1"},
+                expected_num_engines=1,
+            )
 
     def test_fails_on_empty_checksum_map(self, tmp_path: Path):
         """An engine reporting zero tensors fails instead of passing vacuously."""
@@ -196,7 +231,12 @@ class TestCompareEngineChecksumDumps:
         target = _write_dump(tmp_path, "target", rollouts={"rollout_1": [_make_engine_response({})]})
 
         with pytest.raises(AssertionError, match="no tensor checksums"):
-            compare_engine_checksum_dumps(baseline_dir=baseline, target_dir=target)
+            compare_engine_checksum_dumps(
+                baseline_dir=baseline,
+                target_dir=target,
+                expected_rollout_names={"rollout_1"},
+                expected_num_engines=1,
+            )
 
     def test_fails_on_unsuccessful_response(self, tmp_path: Path):
         """A response with success=False fails even if checksums happen to match."""
@@ -205,7 +245,12 @@ class TestCompareEngineChecksumDumps:
         target = _write_dump(tmp_path, "target", rollouts={"rollout_1": [failed]})
 
         with pytest.raises(AssertionError, match="not successful"):
-            compare_engine_checksum_dumps(baseline_dir=baseline, target_dir=target)
+            compare_engine_checksum_dumps(
+                baseline_dir=baseline,
+                target_dir=target,
+                expected_rollout_names={"rollout_1"},
+                expected_num_engines=1,
+            )
 
     def test_fails_on_rank_count_mismatch(self, tmp_path: Path):
         """Different per-engine rank counts are a hard failure."""
@@ -217,4 +262,53 @@ class TestCompareEngineChecksumDumps:
         )
 
         with pytest.raises(AssertionError, match="rank count mismatch"):
-            compare_engine_checksum_dumps(baseline_dir=baseline, target_dir=target)
+            compare_engine_checksum_dumps(
+                baseline_dir=baseline,
+                target_dir=target,
+                expected_rollout_names={"rollout_1"},
+                expected_num_engines=1,
+            )
+
+    def test_fails_when_both_sides_symmetrically_miss_expected_rollouts(self, tmp_path: Path):
+        """Identical trees that lack an expected rollout dir (e.g. all dumps in initial/) fail."""
+        rollouts = {"initial": [_make_engine_response(_CHECKSUMS)]}
+        baseline = _write_dump(tmp_path, "baseline", rollouts=rollouts)
+        target = _write_dump(tmp_path, "target", rollouts=rollouts)
+
+        with pytest.raises(AssertionError, match="rollout dirs mismatch"):
+            compare_engine_checksum_dumps(
+                baseline_dir=baseline,
+                target_dir=target,
+                expected_rollout_names={"initial", "rollout_1"},
+                expected_num_engines=1,
+            )
+
+    def test_fails_when_both_sides_symmetrically_shrink_engine_set(self, tmp_path: Path):
+        """Identical trees with fewer engine files than expected_num_engines fail."""
+        rollouts = {"rollout_1": [_make_engine_response(_CHECKSUMS)]}
+        baseline = _write_dump(tmp_path, "baseline", rollouts=rollouts)
+        target = _write_dump(tmp_path, "target", rollouts=rollouts)
+
+        with pytest.raises(AssertionError, match="Engine checksum files mismatch"):
+            compare_engine_checksum_dumps(
+                baseline_dir=baseline,
+                target_dir=target,
+                expected_rollout_names={"rollout_1"},
+                expected_num_engines=2,
+            )
+
+    def test_fails_on_unexpected_engine_file_name(self, tmp_path: Path):
+        """Engine files not named engine_0..engine_{n-1} fail even when both sides agree."""
+        rollouts = {"rollout_1": [_make_engine_response(_CHECKSUMS)]}
+        baseline = Path(_write_dump(tmp_path, "baseline", rollouts=rollouts))
+        target = Path(_write_dump(tmp_path, "target", rollouts=rollouts))
+        for side_dir in (baseline, target):
+            (side_dir / "rollout_1" / "engine_0.json").rename(side_dir / "rollout_1" / "engine_9.json")
+
+        with pytest.raises(AssertionError, match="Engine checksum files mismatch"):
+            compare_engine_checksum_dumps(
+                baseline_dir=str(baseline),
+                target_dir=str(target),
+                expected_rollout_names={"rollout_1"},
+                expected_num_engines=1,
+            )
