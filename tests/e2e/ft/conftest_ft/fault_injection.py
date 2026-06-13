@@ -139,7 +139,9 @@ class FaultInjectorHandle:
         self.num_successful_injections += 1
 
 
-def spawn_fault_injector(*, seed: int, mean_interval_seconds: float, stop_at_rollout_id: int) -> FaultInjectorHandle:
+def spawn_fault_injector(
+    *, seed: int, mean_interval_seconds: float, stop_at_rollout_id: int
+) -> FaultInjectorHandle:
     base_url = f"http://localhost:{CONTROL_SERVER_PORT}"
     handle = FaultInjectorHandle(
         base_url=base_url,
