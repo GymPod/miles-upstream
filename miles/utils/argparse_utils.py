@@ -142,5 +142,10 @@ def inplace_modify_args(args: argparse.Namespace, overrides: dict[str, object]) 
     try:
         yield
     finally:
-        for key, value in old_values.items():
-            setattr(args, key, value)
+        for key, old_value in old_values.items():
+            current = getattr(args, key)
+            assert current == overrides[key], (
+                f"args.{key} was modified inside the inplace_modify_args block "
+                f"(expected {overrides[key]!r}, found {current!r}); restoring would clobber it"
+            )
+            setattr(args, key, old_value)

@@ -303,3 +303,11 @@ class TestInplaceModifyArgs:
         with pytest.raises(AttributeError):
             with inplace_modify_args(args, dict(missing=1)):
                 pass
+
+    def test_mutation_inside_block_fails_on_exit(self) -> None:
+        """An attribute mutated inside the block is detected instead of silently clobbered."""
+        args = argparse.Namespace(flag=True)
+
+        with pytest.raises(AssertionError, match="modified inside"):
+            with inplace_modify_args(args, dict(flag=False)):
+                args.flag = True
