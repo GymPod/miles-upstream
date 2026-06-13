@@ -33,6 +33,7 @@ def _make_mock_args(
         trainer_heartbeat_checker_max_heartbeat_age=90.0,
         trainer_heartbeat_checker_first_wait=300.0,
         ci_ft_test_actions=None,
+        ci_dump_engine_weight_checksums=None,
         # compute_megatron_world_size_except_dp(args) = TP * PP * CP. Set CP to
         # gpus_per_cell so RayTrainGroup computes num_cells correctly.
         tensor_model_parallel_size=1,

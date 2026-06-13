@@ -20,6 +20,7 @@ from miles.utils.health_checker import NoopHealthChecker, SimpleHealthCheckerCon
 from miles.utils.indep_dp import IndepDPInfo
 from miles.utils.megatron_args_utils import compute_megatron_world_size_except_dp
 from miles.utils.retry_utils import retry
+from miles.utils.test_utils.engine_checksums import EngineChecksumDumper
 from miles.utils.test_utils.ft_test_actions import FTTestActionGroupExecutor
 from miles.utils.witness.allocator import WitnessIdAllocator, read_persisted_witness_counter
 
@@ -119,6 +120,7 @@ class RayTrainGroup:
             self._witness_allocator.resume(read_persisted_witness_counter(Path(args.save_debug_event_data)))
 
         self._test_action_executor = FTTestActionGroupExecutor.from_args(args, group=self)
+        self._engine_checksum_dumper = EngineChecksumDumper.from_args(args, rollout_manager=rollout_manager)
 
     # ------------------------ API :: train ------------------------
 
@@ -223,7 +225,7 @@ class RayTrainGroup:
         # Catch with vanilla retry: cells w/ exceptions are auto marked errored, thus retry will find the next one
         await retry(lambda _: self._execute_first_alive("save_model", rollout_id, force_sync=force_sync))
 
-    async def update_weights(self):
+    async def update_weights(self, rollout_id: int | None = None):
         """Broadcast weights to rollout engines."""
         # TODO: allow using all cells to update weights (instead of first alive cell)
         # Fetch the updatable engines + lock once (like V1 RayActorGroup) so all
@@ -232,6 +234,10 @@ class RayTrainGroup:
         await self._rollout_manager.health_monitoring_pause.remote()
         # Catch with vanilla retry: cells w/ exceptions are auto marked errored, thus retry will find the next one
         await retry(lambda _: self._execute_first_alive("update_weights", info=info))
+
+        if self._engine_checksum_dumper is not None:
+            # Only after the await above have all ranks finished pushing weights.
+            await self._engine_checksum_dumper.dump(rollout_id=rollout_id)
 
     async def onload(self):
         # Catch *without* retry: cells w/ exceptions are auto marked errored, and will not be used
