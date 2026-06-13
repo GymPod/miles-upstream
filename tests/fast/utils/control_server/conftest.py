@@ -147,14 +147,13 @@ class MockRayTrainCell:
         )
 
 
-def make_mock_group(cells: list[MockRayTrainCell], *, current_rollout_id: int | None = None) -> object:
+def make_mock_group(cells: list[MockRayTrainCell]) -> object:
     from miles.ray.train.group import RayTrainGroup
 
     group = object.__new__(RayTrainGroup)
     group._cells = cells
     group._indep_dp_quorum_id = 0
     group._alive_cell_ids = frozenset()
-    group.current_rollout_id = current_rollout_id
     return group
 
 
@@ -164,12 +163,7 @@ def registry() -> _CellRegistry:
 
 
 @pytest.fixture
-def actor_model() -> object:
-    return make_mock_group([])
-
-
-@pytest.fixture
-def async_client(registry: _CellRegistry, actor_model: object) -> httpx.AsyncClient:
-    app = _create_control_app(registry, actor_model)
+def async_client(registry: _CellRegistry) -> httpx.AsyncClient:
+    app = _create_control_app(registry)
     transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://test")

@@ -4,9 +4,8 @@ import httpx
 import pytest
 
 from miles.utils.control_server.registry import _CellRegistry
-from miles.utils.control_server.server import _create_control_app
 
-from .conftest import MockHandle, make_mock_group
+from .conftest import MockHandle
 
 
 class TestGetHealth:
@@ -15,32 +14,6 @@ class TestGetHealth:
         resp = await async_client.get("/api/v1/health")
         assert resp.status_code == 200
         assert resp.json() == {"status": "ok"}
-
-
-class TestGetProgress:
-    @pytest.mark.asyncio
-    async def test_progress_reflects_group_current_rollout_id(self) -> None:
-        """GET /api/v1/progress returns the group's current_rollout_id."""
-        group = make_mock_group([], current_rollout_id=7)
-        app = _create_control_app(_CellRegistry(), group)
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.get("/api/v1/progress")
-
-        assert resp.status_code == 200
-        assert resp.json() == {"current_rollout_id": 7}
-
-    @pytest.mark.asyncio
-    async def test_progress_is_null_before_first_train(self) -> None:
-        """GET /api/v1/progress returns null before any train() set the rollout id."""
-        group = make_mock_group([], current_rollout_id=None)
-        app = _create_control_app(_CellRegistry(), group)
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.get("/api/v1/progress")
-
-        assert resp.status_code == 200
-        assert resp.json() == {"current_rollout_id": None}
 
 
 class TestGetCells:
