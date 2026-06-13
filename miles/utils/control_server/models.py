@@ -19,6 +19,10 @@ class _OkResponse(StrictBaseModel):
     status: str = "ok"
 
 
+class Progress(StrictBaseModel):
+    current_rollout_id: int | None = None
+
+
 class CellCondition(StrictBaseModel):
     type: Literal["Allocated", "Healthy"]
     status: TriState

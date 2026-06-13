@@ -29,14 +29,12 @@ async def train(args):
     # create the actor and critic models
     actor_model, critic_model = await create_training_models(args, pgs, rollout_manager)
 
-    progress = None
     if args.control_server_port:
-        progress = start_control_server(
+        start_control_server(
             actor_model=actor_model,
             rollout_manager=rollout_manager,
             port=args.control_server_port,
             ft_components=args.ft_components,
-            num_rollout=args.num_rollout,
         )
 
     maybe_start_mini_ft_controller(args)
@@ -50,9 +48,6 @@ async def train(args):
     # async train loop.
     rollout_data_next_future = rollout_manager.generate.remote(args.start_rollout_id)
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
-        if progress is not None:
-            progress.current_rollout_id = rollout_id
-
         # Sync the last generation
         if rollout_data_next_future is not None:
             rollout_data_curr_ref = await rollout_data_next_future

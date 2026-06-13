@@ -62,6 +62,7 @@ class RayTrainGroup:
     ) -> None:
         self.args = args
         self._rollout_manager = rollout_manager
+        self.current_rollout_id: int | None = None
 
         total_gpus = num_nodes * num_gpus_per_node
         num_cells = (total_gpus // compute_megatron_world_size_except_dp(args)) if args.indep_dp else 1
@@ -124,6 +125,8 @@ class RayTrainGroup:
 
     async def train(self, rollout_id: int, rollout_data_pack):
         """Do one rollout training"""
+
+        self.current_rollout_id = rollout_id
 
         event_analyzer.run_analysis_from_args(self.args)
 
