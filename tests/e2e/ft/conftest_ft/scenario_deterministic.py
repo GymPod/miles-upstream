@@ -36,17 +36,13 @@ _DETERMINISTIC_ACTIONS: list[dict] = [
 ]
 
 
-# Healing-witness expectations: the exact CellReconfigureEvent sequence per run, pinned
-# to the CURRENT phase timeline (FT actions only run on the target side, in phase_b).
-# The stop+start pair at the end of rollout NUM_PHASE_A_STEPS+1 is absorbed by a single
-# _refresh_cells at the start of the next rollout, so the run performs exactly one
-# healing and no standalone shrink. If the phase timeline changes (e.g. phase_a starts
-# running the same FT actions), update this table.
+# Pinned to the current phase timeline (FT actions only run on target/phase_b); update if
+# it changes. The stop+start is absorbed by one _refresh_cells, so exactly one healing and
+# no standalone shrink.
 def _expected_reconfigures(*, is_target: bool, phase: str, num_cells: int) -> list[ExpectedReconfigure]:
     if not (is_target and phase == "phase_b"):
         return []
     return [
-        # Healing of the stop+start'ed last cell, with cell 0 as the ckpt source.
         ExpectedReconfigure(
             rollout_id=NUM_PHASE_A_STEPS + 2,
             src_cell_index=0,
@@ -101,9 +97,7 @@ def _compare(dump_dir: str, mode: FTTestMode) -> None:
     # This requires the run to be fully deterministic on both sides.
     # Any divergence is a real bug and must be fixed at the source, never hidden by
     # loosening these thresholds.
-    # Healing witness first: positively prove the FT path executed (exactly the expected
-    # reconfigure sequence on the target's phase_b, zero events everywhere else) before
-    # comparing numerics — comparing two fault-free runs must never pass again.
+    # Witness the FT path executed before comparing numerics, so two fault-free runs cannot pass.
     for side in ["baseline", "target"]:
         for phase in PHASES:
             assert_reconfigure_events(

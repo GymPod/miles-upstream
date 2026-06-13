@@ -66,23 +66,19 @@ _WITH_FAILURE_ACTIONS: list[dict] = [
 ]
 
 
-# Healing-witness expectations: the exact CellReconfigureEvent sequence per run, pinned
-# to the CURRENT phase timeline (FT actions only run on the target side, in phase_b).
-# If the phase timeline changes (e.g. phase_a starts running the same FT actions),
-# update this table.
+# Pinned to the current phase timeline (FT actions only run on target/phase_b); update if
+# it changes.
 def _expected_reconfigures(*, is_target: bool, phase: str, num_cells: int) -> list[ExpectedReconfigure]:
     if not (is_target and phase == "phase_b"):
         return []
     return [
-        # Shrink on the retry of the crashed rollout: the errored last cell is dropped.
-        # This is also the positive proof that the fault injection actually fired.
+        # Shrink dropping the errored last cell on retry; also proves the fault injection fired.
         ExpectedReconfigure(
             rollout_id=NUM_PHASE_A_STEPS + 1,
             src_cell_index=None,
             healed_cell_indices=[],
             alive_cell_indices_after=list(range(num_cells - 1)),
         ),
-        # Healing of the stop+start'ed last cell, with cell 0 as the ckpt source.
         ExpectedReconfigure(
             rollout_id=NUM_PHASE_A_STEPS + 2,
             src_cell_index=0,
@@ -128,9 +124,8 @@ def _build_target_args(mode: FTTestMode, dump_dir: str, enable_dumper: bool = Tr
 
 
 def _compare(dump_dir: str, mode: FTTestMode) -> None:
-    # Healing witness first: positively prove the fault fired (shrink) and healing ran
-    # (healing event) before comparing numerics — comparing two fault-free runs must
-    # never pass again.
+    # Witness the fault fired (shrink) and healing ran before comparing numerics, so two
+    # fault-free runs cannot pass.
     for side in ["baseline", "target"]:
         for phase in PHASES:
             assert_reconfigure_events(

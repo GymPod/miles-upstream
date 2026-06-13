@@ -1,9 +1,7 @@
 """Healing-witness assertions over CellReconfigureEvent for the FT e2e scenarios.
 
-These provide positive proof that cell reconfigures (shrinks and healings) actually
-executed during a run, at the expected rollouts and on the expected cells -- so any
-future change that makes healing silently disappear turns the e2e tests red instead
-of green-by-comparing-two-fault-free-runs.
+Positive proof that shrinks and healings actually executed, so a regression that silently
+drops healing fails instead of passing by comparing two fault-free runs.
 """
 
 from pathlib import Path
@@ -25,10 +23,8 @@ class ExpectedReconfigure(FrozenStrictBaseModel):
 def assert_reconfigure_events(event_dir: Path, *, expected: list[ExpectedReconfigure]) -> None:
     """Assert event_dir contains exactly the expected ordered CellReconfigureEvent sequence.
 
-    Healing counts are compared first so a missing healing fails with an explicit
-    "expected N healing event(s), got M" message. Quorum ids must additionally be the
-    contiguous sequence 1..len(events): a gap means a reconfigure attempt failed and
-    was retried, which the strictly-scripted scenarios never expect.
+    Healing counts are checked first for an explicit message. Quorum ids must be the
+    contiguous sequence 1..len(events); a gap means a reconfigure attempt failed and retried.
     """
     actual_events = load_reconfigure_events(event_dir)
     actual = [_shape_of(event) for event in actual_events]
@@ -59,15 +55,11 @@ def assert_soak_reconfigure_events(
 ) -> None:
     """Soak-run healing witness: successful injections imply healings, and the run must end fully healed.
 
-    Injection timing is random, so no exact sequence is pinned. Instead:
-    - if the injector reported >=1 successful injection, at least one healing event must exist;
-    - the last reconfigure (if any) must restore full cell membership, with one structural
-      exception: healing only runs at the next train() call, so a fault that lands inside the
-      final rollout's train() emits a shrink that has no later train() to heal on. Exactly one
-      such trailing shrink is tolerated, and only when it is the very last event, is a pure
-      shrink (no healed cells), and carries final_rollout_id; the sequence before it must
-      still end fully healed. A shrink at any earlier rollout, or two trailing shrinks,
-      still fail.
+    Injection timing is random, so no exact sequence is pinned: >=1 injection requires >=1
+    healing, and the last reconfigure must restore full membership. Structural exception:
+    healing only runs at the next train(), so a fault inside the final rollout's train() leaves
+    a trailing shrink with nowhere to heal. Exactly one such trailing shrink is tolerated (last
+    event, pure shrink, at final_rollout_id); the sequence before it must still end fully healed.
     """
     events = load_reconfigure_events(event_dir)
     healings = [event for event in events if event.healed_cell_indices]
@@ -101,10 +93,9 @@ def assert_soak_reconfigure_events(
 
 
 def load_reconfigure_events(event_dir: Path) -> list[CellReconfigureEvent]:
-    """Read all CellReconfigureEvents under event_dir, in emission order.
+    """Read all CellReconfigureEvents under event_dir in emission order.
 
-    All reconfigure events come from the single driver-side JSONL file, so file order
-    is emission order.
+    They all come from the single driver-side JSONL file, so file order is emission order.
     """
     return [event for event in read_events(event_dir) if isinstance(event, CellReconfigureEvent)]
 

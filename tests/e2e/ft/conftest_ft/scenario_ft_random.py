@@ -61,15 +61,11 @@ def run_ci(
     injector = spawn_fault_injector(seed=seed, mean_interval_seconds=mean_interval)
 
     try:
-        # Pass dump_dir so run_training clears it: stale events from a previous run
-        # would corrupt the healing-witness assertion below.
+        # Pass dump_dir so run_training clears stale events that would corrupt the witness below.
         run_training(train_args=train_args, mode=ft_mode, dump_dir=dump_dir)
     finally:
         injector.stop_and_join(timeout_seconds=5)
 
-    # Healing witness: if the injector landed any fault, healing must have run, and the
-    # last reconfigure must have restored full cell membership (modulo one tolerated
-    # trailing shrink when a fault lands inside the final rollout's train()).
     assert_soak_reconfigure_events(
         Path(dump_dir) / "events",
         num_successful_injections=injector.num_successful_injections,
