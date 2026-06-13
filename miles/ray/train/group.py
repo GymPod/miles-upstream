@@ -252,12 +252,11 @@ class RayTrainGroup:
             return
 
         check_weights_result = await self._rollout_manager.check_weights.remote("checksum")
-        per_engine_checksums = flatten_engine_checksums(check_weights_result)
-        for engine_index, checksums in enumerate(per_engine_checksums):
-            get_event_logger().log(
-                EngineWeightChecksumEvent,
-                dict(rollout_id=rollout_id, engine_index=engine_index, checksums=checksums),
-            )
+        engine_checksums = flatten_engine_checksums(check_weights_result)
+        get_event_logger().log(
+            EngineWeightChecksumEvent,
+            dict(rollout_id=rollout_id, engine_checksums=engine_checksums),
+        )
 
     async def onload(self):
         # Catch *without* retry: cells w/ exceptions are auto marked errored, and will not be used

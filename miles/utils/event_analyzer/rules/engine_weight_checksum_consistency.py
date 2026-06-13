@@ -1,9 +1,4 @@
-"""Rule: every rollout engine must receive identical weights for a given rollout.
-
-Functional sibling of cross_replica_weight_checksum, but rollout-side: it groups
-EngineWeightChecksumEvents by rollout_id and compares each engine's merged
-checksums against engine 0 of the same rollout.
-"""
+"""Rule: all rollout engines of a given rollout must hold identical weights."""
 
 from collections.abc import Iterable
 
@@ -15,35 +10,22 @@ __all__ = ["check"]
 
 def check(events: list[Event]) -> list[ChecksumMismatchIssue]:
     """Check: all engines of one rollout must hold exactly the same weights."""
-
-    checksum_events = [e for e in events if isinstance(e, EngineWeightChecksumEvent)]
-    if not checksum_events:
-        return []
-
-    events_by_rollout: dict[int, list[EngineWeightChecksumEvent]] = {}
-    for event in checksum_events:
-        events_by_rollout.setdefault(event.rollout_id, []).append(event)
-
-    all_mismatches: list[ChecksumMismatchIssue] = []
-    for rollout_id in sorted(events_by_rollout.keys()):
-        all_mismatches += list(_check_one_rollout(events=events_by_rollout[rollout_id]))
-
-    return all_mismatches
+    issues: list[ChecksumMismatchIssue] = []
+    for event in events:
+        if isinstance(event, EngineWeightChecksumEvent):
+            issues += list(_check_one_rollout(event))
+    return issues
 
 
-def _check_one_rollout(events: list[EngineWeightChecksumEvent]) -> Iterable[ChecksumMismatchIssue]:
-    # Assumes the engine set is constant within a rollout; if engine-side fault injection ever
-    # changes it, align by parallelism_info instead of engine_index.
-    by_engine = sorted(events, key=lambda e: e.engine_index)
-    baseline = by_engine[0]
-    for other in by_engine[1:]:
+def _check_one_rollout(event: EngineWeightChecksumEvent) -> Iterable[ChecksumMismatchIssue]:
+    engines = event.engine_checksums
+    if len(engines) < 2:
+        return
+    baseline = engines[0]
+    for engine_index in range(1, len(engines)):
         yield from compare_flat_dicts(
-            a=baseline.checksums,
-            b=other.checksums,
-            label_a=_compute_label(baseline),
-            label_b=_compute_label(other),
+            a=baseline,
+            b=engines[engine_index],
+            label_a=f"rollout_{event.rollout_id}/engine_0",
+            label_b=f"rollout_{event.rollout_id}/engine_{engine_index}",
         )
-
-
-def _compute_label(event: EngineWeightChecksumEvent) -> str:
-    return f"rollout_{event.rollout_id}/engine_{event.engine_index}"

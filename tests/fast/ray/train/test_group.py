@@ -1012,8 +1012,8 @@ class TestMaybeLogEngineWeightChecksums:
 
         rollout_mgr.check_weights.assert_not_called()
 
-    async def test_enabled_logs_one_event_per_engine(self):
-        """With event logger on and real engines, each surviving engine produces one event."""
+    async def test_enabled_logs_one_event_per_rollout(self):
+        """With event logger on and real engines, one event holds every engine's checksums."""
         rollout_mgr = MagicMock()
         rollout_mgr.check_weights.remote = AsyncMock(return_value=_checksum_response([{"w": "e0"}, {"w": "e1"}]))
         group = _make_group(num_cells=1, rollout_manager=rollout_mgr)
@@ -1027,7 +1027,6 @@ class TestMaybeLogEngineWeightChecksums:
             await group._maybe_log_engine_weight_checksums(rollout_id=3)
 
         rollout_mgr.check_weights.remote.assert_awaited_once_with("checksum")
-        assert mock_logger.log.call_count == 2
-        logged = [call.args[1] for call in mock_logger.log.call_args_list]
-        assert logged[0] == dict(rollout_id=3, engine_index=0, checksums={"rank0/w": "e0"})
-        assert logged[1] == dict(rollout_id=3, engine_index=1, checksums={"rank0/w": "e1"})
+        mock_logger.log.assert_called_once()
+        logged = mock_logger.log.call_args.args[1]
+        assert logged == dict(rollout_id=3, engine_checksums=[{"rank0/w": "e0"}, {"rank0/w": "e1"}])

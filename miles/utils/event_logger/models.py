@@ -73,13 +73,10 @@ class CellReconfigureEvent(EventBase):
 class EngineWeightChecksumEvent(EventBase):
     type: Literal["engine_weight_checksum"] = "engine_weight_checksum"
     rollout_id: int
-    # Stable index of the engine in the flattened servers->groups->engines order
-    # (None-payload entries from non-zero node ranks dropped before enumerating).
-    engine_index: int
-    # tensor name -> hash. A multi-rank (e.g. TP>1) engine merges every rank's
-    # checksums here, prefixing each key with rank{r}/ so shards with the same
-    # tensor name never clobber one another.
-    checksums: dict[str, str]
+    # One {tensor name -> hash} dict per rollout engine, in flattened
+    # servers->groups->engines order. A TP>1 engine's ranks merge with a rank{r}/
+    # key prefix so same-named shards never clobber.
+    engine_checksums: list[dict[str, str]]
 
 
 class TrainAdvantageComputationEvent(_ActorTrainEventBase):

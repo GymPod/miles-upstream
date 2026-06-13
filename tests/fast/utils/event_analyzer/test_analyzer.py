@@ -60,12 +60,11 @@ def _log_engine_checksum_event(
     event_logger: EventLogger,
     *,
     rollout_id: int,
-    engine_index: int,
-    checksums: dict[str, str],
+    engine_checksums: list[dict[str, str]],
 ) -> None:
     event_logger.log(
         EngineWeightChecksumEvent,
-        dict(rollout_id=rollout_id, engine_index=engine_index, checksums=checksums),
+        dict(rollout_id=rollout_id, engine_checksums=engine_checksums),
     )
 
 
@@ -73,8 +72,9 @@ class TestEngineChecksumRuleWiredIn:
     def test_engine_inconsistency_reported(self, tmp_path: Path) -> None:
         """run_analysis surfaces engine-to-engine checksum mismatches via the registered rule."""
         event_logger = EventLogger(log_dir=tmp_path, file_name="e.jsonl", source=MainProcessIdentity())
-        _log_engine_checksum_event(event_logger, rollout_id=0, engine_index=0, checksums={"rank0/w": "aaa"})
-        _log_engine_checksum_event(event_logger, rollout_id=0, engine_index=1, checksums={"rank0/w": "zzz"})
+        _log_engine_checksum_event(
+            event_logger, rollout_id=0, engine_checksums=[{"rank0/w": "aaa"}, {"rank0/w": "zzz"}]
+        )
         event_logger.close()
 
         issues = run_analysis(event_dir=tmp_path)
@@ -83,8 +83,9 @@ class TestEngineChecksumRuleWiredIn:
     def test_consistent_engines_no_issue(self, tmp_path: Path) -> None:
         """Identical engine checksums produce no issue."""
         event_logger = EventLogger(log_dir=tmp_path, file_name="e.jsonl", source=MainProcessIdentity())
-        _log_engine_checksum_event(event_logger, rollout_id=0, engine_index=0, checksums={"rank0/w": "aaa"})
-        _log_engine_checksum_event(event_logger, rollout_id=0, engine_index=1, checksums={"rank0/w": "aaa"})
+        _log_engine_checksum_event(
+            event_logger, rollout_id=0, engine_checksums=[{"rank0/w": "aaa"}, {"rank0/w": "aaa"}]
+        )
         event_logger.close()
 
         assert run_analysis(event_dir=tmp_path) == []
