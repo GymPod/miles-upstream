@@ -1,6 +1,9 @@
+import argparse
 import json
 import logging
 from pathlib import Path
+
+from ray.actor import ActorHandle
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +24,14 @@ class EngineChecksumDumper:
     ``parallelism_info`` instead of the flat index.
     """
 
-    def __init__(self, *, dump_dir: Path, rollout_manager: object) -> None:
+    def __init__(self, *, dump_dir: Path, rollout_manager: ActorHandle) -> None:
         self._dump_dir = dump_dir
         self._rollout_manager = rollout_manager
 
     @staticmethod
-    def from_args(args: object, *, rollout_manager: object | None) -> "EngineChecksumDumper | None":
+    def from_args(
+        args: argparse.Namespace, *, rollout_manager: ActorHandle | None
+    ) -> "EngineChecksumDumper | None":
         if args.ci_dump_engine_weight_checksums is None or rollout_manager is None:
             return None
         return EngineChecksumDumper(
@@ -42,7 +47,7 @@ class EngineChecksumDumper:
         """
         # Nesting: servers -> server groups -> engines. Multi-node engines return None
         # from non-zero node ranks (no HTTP server there); drop those entries.
-        nested = await self._rollout_manager.check_weights.remote(action="checksum")
+        nested: list[list[list[dict | None]]] = await self._rollout_manager.check_weights.remote(action="checksum")
         engine_responses: list[dict] = [
             response
             for per_server in nested
