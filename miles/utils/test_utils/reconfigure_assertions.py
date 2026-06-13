@@ -1,9 +1,3 @@
-"""Healing-witness assertions over CellReconfigureEvent for the FT e2e scenarios.
-
-Positive proof that shrinks and healings actually executed, so a regression that silently
-drops healing fails instead of passing by comparing two fault-free runs.
-"""
-
 from pathlib import Path
 
 from miles.utils.event_logger.logger import read_events
@@ -12,8 +6,6 @@ from miles.utils.pydantic_utils import FrozenStrictBaseModel
 
 
 class ExpectedReconfigure(FrozenStrictBaseModel):
-    """Expected shape of one CellReconfigureEvent (healing iff healed_cell_indices non-empty)."""
-
     rollout_id: int
     src_cell_index: int | None
     healed_cell_indices: list[int]
@@ -21,7 +13,6 @@ class ExpectedReconfigure(FrozenStrictBaseModel):
 
 
 def assert_reconfigure_events(event_dir: Path, *, expected: list[ExpectedReconfigure]) -> None:
-    """Assert event_dir holds exactly the expected ordered CellReconfigureEvent sequence."""
     actual = [_shape_of(event) for event in load_reconfigure_events(event_dir)]
     assert actual == expected, (
         f"CellReconfigureEvent sequence mismatch in {event_dir}:\n" f"  expected: {expected}\n" f"  actual:   {actual}"
@@ -31,14 +22,6 @@ def assert_reconfigure_events(event_dir: Path, *, expected: list[ExpectedReconfi
 def assert_soak_reconfigure_events(
     event_dir: Path, *, num_successful_injections: int, num_cells: int, final_rollout_id: int
 ) -> None:
-    """Soak-run healing witness: successful injections imply healings, and the run must end fully healed.
-
-    Injection timing is random, so no exact sequence is pinned: >=1 injection requires >=1
-    healing, and the last reconfigure must restore full membership. Structural exception:
-    healing only runs at the next train(), so a fault inside the final rollout's train() leaves
-    a trailing shrink with nowhere to heal. Exactly one such trailing shrink is tolerated (last
-    event, pure shrink, at final_rollout_id); the sequence before it must still end fully healed.
-    """
     events = load_reconfigure_events(event_dir)
     healings = [event for event in events if event.healed_cell_indices]
 
@@ -71,10 +54,6 @@ def assert_soak_reconfigure_events(
 
 
 def load_reconfigure_events(event_dir: Path) -> list[CellReconfigureEvent]:
-    """Read all CellReconfigureEvents under event_dir in emission order.
-
-    They all come from the single driver-side JSONL file, so file order is emission order.
-    """
     return [event for event in read_events(event_dir) if isinstance(event, CellReconfigureEvent)]
 
 

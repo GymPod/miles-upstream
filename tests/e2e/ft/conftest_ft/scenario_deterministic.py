@@ -36,9 +36,6 @@ _DETERMINISTIC_ACTIONS: list[dict] = [
 ]
 
 
-# Pinned to the current phase timeline (FT actions only run on target/phase_b); update if
-# it changes. The stop+start is absorbed by one _refresh_cells, so exactly one healing and
-# no standalone shrink.
 def _expected_reconfigures(*, is_target: bool, phase: str, num_cells: int) -> list[ExpectedReconfigure]:
     if not (is_target and phase == "phase_b"):
         return []
@@ -97,7 +94,6 @@ def _compare(dump_dir: str, mode: FTTestMode) -> None:
     # This requires the run to be fully deterministic on both sides.
     # Any divergence is a real bug and must be fixed at the source, never hidden by
     # loosening these thresholds.
-    # Witness the FT path executed before comparing numerics, so two fault-free runs cannot pass.
     for side in ["baseline", "target"]:
         for phase in PHASES:
             assert_reconfigure_events(

@@ -66,13 +66,10 @@ _WITH_FAILURE_ACTIONS: list[dict] = [
 ]
 
 
-# Pinned to the current phase timeline (FT actions only run on target/phase_b); update if
-# it changes.
 def _expected_reconfigures(*, is_target: bool, phase: str, num_cells: int) -> list[ExpectedReconfigure]:
     if not (is_target and phase == "phase_b"):
         return []
     return [
-        # Shrink dropping the errored last cell on retry; also proves the fault injection fired.
         ExpectedReconfigure(
             rollout_id=NUM_PHASE_A_STEPS + 1,
             src_cell_index=None,
@@ -124,8 +121,6 @@ def _build_target_args(mode: FTTestMode, dump_dir: str, enable_dumper: bool = Tr
 
 
 def _compare(dump_dir: str, mode: FTTestMode) -> None:
-    # Witness the fault fired (shrink) and healing ran before comparing numerics, so two
-    # fault-free runs cannot pass.
     for side in ["baseline", "target"]:
         for phase in PHASES:
             assert_reconfigure_events(

@@ -61,7 +61,6 @@ def run_ci(
     injector = spawn_fault_injector(seed=seed, mean_interval_seconds=mean_interval)
 
     try:
-        # Pass dump_dir so run_training clears stale events that would corrupt the witness below.
         run_training(train_args=train_args, mode=ft_mode, dump_dir=dump_dir)
     finally:
         injector.stop_and_join(timeout_seconds=5)

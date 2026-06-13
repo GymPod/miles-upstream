@@ -61,14 +61,11 @@ class TrainGroupStepEndEvent(EventBase):
 
 
 class CellReconfigureEvent(EventBase):
-    """Witness that a cell-topology reconfigure (shrink or healing) actually executed."""
-
     type: Literal["cell_reconfigure"] = "cell_reconfigure"
     rollout_id: int
     quorum_id: int
-    # Checkpoint-source cell for healing; None for a pure shrink (no pending cells).
     src_cell_index: int | None
-    # Cells pulled back from pending in this reconfigure; healing happened iff non-empty.
+    # healing happened iff non-empty
     healed_cell_indices: list[int]
     alive_cell_indices_after: list[int]
 

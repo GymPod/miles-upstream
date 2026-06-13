@@ -92,12 +92,6 @@ def run_fault_injection_loop(
 
 
 class FaultInjectorHandle:
-    """Owns the background injector thread and counts injections the control server accepted.
-
-    The count is incremented from the injector thread and read by the test after
-    stop_and_join, so the healing-witness assertion knows whether faults were injected.
-    """
-
     def __init__(self, *, base_url: str, seed: int, mean_interval_seconds: float) -> None:
         self.num_successful_injections: int = 0
         self._stop_event = threading.Event()
