@@ -237,8 +237,18 @@ class RayTrainGroup:
         # ranks observe a consistent engine set; the actor releases the lock itself.
         info = await self._rollout_manager.get_updatable_engines_and_lock.remote()
         await self._rollout_manager.health_monitoring_pause.remote()
-        # Catch with vanilla retry: cells w/ exceptions are auto marked errored, thus retry will find the next one
-        await retry(lambda _: self._execute_first_alive("update_weights", info=info))
+
+        # Catch with vanilla retry: cells w/ exceptions are auto marked errored, thus retry will find the next one.
+        async def _fn(attempt: int):
+            # Promote any healed/pending cells before picking the executor (mirrors train's
+            # retry). Without this, a cell that errored mid update_weights and was then healed
+            # comes back as pending, and _execute_first_alive asserts "No alive cells" forever
+            # (the pending->alive promotion lives in _refresh_cells, not in the retry itself).
+            if rollout_id is not None:
+                await self._refresh_cells(rollout_id=rollout_id)
+            await self._execute_first_alive("update_weights", info=info)
+
+        await retry(_fn)
 
         await self._maybe_log_inference_engine_weight_checksums(rollout_id=rollout_id)
 
