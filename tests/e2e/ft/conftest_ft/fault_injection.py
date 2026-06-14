@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 
 CONTROL_SERVER_PORT: int = 18080
 MEAN_INTERVAL_SECONDS: float = 60.0
+# Poll cell liveness this often so the gate tracks a crash->detect->heal cycle even when it
+# happens entirely between two (much sparser) injections; injections still fire on the long
+# random interval above.
+POLL_INTERVAL_SECONDS: float = 2.0
 FAILURE_MODES: list[FailureMode] = [FailureMode.SIGKILL, FailureMode.EXIT, FailureMode.SEGFAULT]
 
 
@@ -52,13 +56,14 @@ def run_fault_injection_loop(
     mean_interval_seconds: float,
     stop_event: threading.Event,
     on_successful_injection: Callable[[], None],
+    poll_interval_seconds: float = POLL_INTERVAL_SECONDS,
 ) -> None:
     rng = random.Random(seed)
     gate = RecoveryGate()
+    seconds_until_injection = rng.expovariate(1.0 / mean_interval_seconds)
 
     while not stop_event.is_set():
-        delay = rng.expovariate(1.0 / mean_interval_seconds)
-        if stop_event.wait(timeout=delay):
+        if stop_event.wait(timeout=poll_interval_seconds):
             break
 
         try:
@@ -69,17 +74,24 @@ def run_fault_injection_loop(
             logger.info("Failed to list cells from control server", exc_info=True)
             continue
 
-        # Keep >=1 cell genuinely alive (excludes cells still recovering from our own injection).
+        # Track recovery on every poll so a crash->detect->heal cycle that completes between two
+        # sparse injections is seen, not missed (which would exclude the cell from the live set forever).
         gate.observe({c["metadata"]["name"]: c for c in cells})
+
+        seconds_until_injection -= poll_interval_seconds
+        if seconds_until_injection > 0:
+            continue
+
+        # Keep >=1 cell genuinely alive: if a prior injection has not recovered yet, wait and retry
+        # on a later poll rather than killing the last live replica.
         alive = gate.genuinely_alive(cells)
         if len(alive) <= 1:
-            logger.info("Skipping injection: %d genuinely-alive cell(s), need >1 to keep a live replica", len(alive))
+            logger.info("Deferring injection: %d genuinely-alive cell(s), need >1 to keep a live replica", len(alive))
             continue
 
         target = rng.choice(alive)
         cell_name = target["metadata"]["name"]
         mode = rng.choice(FAILURE_MODES)
-
         try:
             resp = requests.post(
                 f"{base_url}/api/v1/cells/{cell_name}/inject-fault",
@@ -89,6 +101,7 @@ def run_fault_injection_loop(
             resp.raise_for_status()
             gate.note_injected(cell_name)
             on_successful_injection()
+            seconds_until_injection = rng.expovariate(1.0 / mean_interval_seconds)
         except Exception:
             logger.info("Failed to inject fault into %s", cell_name, exc_info=True)
 
