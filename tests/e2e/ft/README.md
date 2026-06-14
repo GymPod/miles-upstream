@@ -318,7 +318,7 @@ Steps: 30 (default), configurable via --num-steps
 Architecture (external fault injection, not inside training loop):
   1. Start training with indep_dp + control server (port 18080) + mini FT controller
   2. Start a background daemon thread that:
-     a. Sleeps a random interval (exponential distribution, mean ~60s / crash_probability)
+     a. Sleeps a random interval (exponential, mean = 60s / crash_probability ≈ 120s at the default)
      b. GET /api/v1/cells — read each cell's Healthy condition
      c. Count the genuinely-alive cells — reported Healthy, minus cells we injected that have
         not finished a down->up recovery (RecoveryGate) — and skip if injecting would leave
@@ -333,11 +333,12 @@ Architecture (external fault injection, not inside training loop):
   5. Mini FT controller auto-recovers (suspend → resume)
   6. Verify: training completes, no hangs, prod assertions pass
   7. Healing witness: the injector must report >=2 accepted injections (a single heal could
-     be a fluke) and the event dir must contain >=2 healing CellReconfigureEvents. Faults are
+     be a fluke) and the event dir must contain >=2 healing CellReconfigureEvents. The default
+     --crash-probability is set high enough that the soak reliably clears this floor. Faults are
      random, so neither an exact sequence nor the end-state membership is asserted — the
      witness only proves repeated faults were injected and healing actually ran.
 
-CLI options: --seed (default 42), --num-steps (default 30), --crash-probability (default 0.1)
+CLI options: --seed (default 42), --num-steps (default 30), --crash-probability (default 0.5)
 ```
 
 ### `scenario_realistic_gsm8k`

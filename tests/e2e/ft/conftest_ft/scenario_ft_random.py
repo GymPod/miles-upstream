@@ -29,7 +29,7 @@ def run_ci(
     mode: Annotated[str, typer.Option(help="Test mode variant")],
     seed: Annotated[int, typer.Option(help="Random seed for fault injection")] = 42,
     num_steps: Annotated[int, typer.Option(help="Number of train() calls")] = 30,
-    crash_probability: Annotated[float, typer.Option(help="Per-step crash probability per cell")] = 0.1,
+    crash_probability: Annotated[float, typer.Option(help="Per-step crash probability per cell")] = 0.5,
 ) -> None:
     """Random failure soak test.
 
