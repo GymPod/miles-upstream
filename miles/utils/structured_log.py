@@ -1,14 +1,12 @@
 import json
-import logging
+from collections.abc import Callable
 from typing import Any
-
-_logger = logging.getLogger(__name__)
 
 _PRUNE_CAP = 160
 
 
-def log_structured(*, level: int = logging.INFO, **fields: Any) -> None:
-    _logger.log(level, "ft " + _to_logfmt(fields), stacklevel=2)
+def log_structured(log_fn: Callable[..., None], *, exc_info: bool = False, **fields: Any) -> None:
+    log_fn("ft " + _to_logfmt(fields), stacklevel=2, exc_info=exc_info)
 
 
 def _to_logfmt(fields: dict[str, Any]) -> str:

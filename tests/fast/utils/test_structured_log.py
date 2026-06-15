@@ -39,8 +39,9 @@ class TestPruneForLog:
 
 
 class TestLogStructured:
-    def test_emits_ft_prefixed_logfmt_line(self, caplog):
-        """log_structured emits one 'ft '-prefixed logfmt line at INFO."""
-        with caplog.at_level(logging.INFO):
-            log_structured(op="execute", phase="start", cell=1, fn="train")
+    def test_emits_ft_prefixed_logfmt_line_via_given_log_fn(self, caplog):
+        """log_structured emits one 'ft '-prefixed logfmt line through the passed logger method."""
+        logger = logging.getLogger("test_structured_log")
+        with caplog.at_level(logging.INFO, logger="test_structured_log"):
+            log_structured(logger.info, op="execute", phase="start", cell=1, fn="train")
         assert caplog.messages == ["ft op=execute phase=start cell=1 fn=train"]
