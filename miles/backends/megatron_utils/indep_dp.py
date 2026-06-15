@@ -64,12 +64,6 @@ def reconfigure_indep_dp_group(
 ) -> None:
     """Shut down old indep_dp PGs and create new ones with a fresh quorum_id."""
     old = parallel_state.indep_dp
-    # Tear the old PGs down with shutdown() (drops the wrapper's _pg ref), NOT abort(). torchft's
-    # abort runs on its single TimeoutManager event-loop thread and can block in CudaEventDestroy;
-    # a second abort here would contend on the c10d mutex / wedge that thread, after which no FT
-    # timeout ever fires again and the next cell death hangs 600s until the NCCL watchdog SIGABRTs
-    # the survivor. In the failure path the in-flight comm was already aborted by the failed wait();
-    # in the heal path the last collective succeeded. See tests/e2e/external/torchft_process_group_reference.py.
     for g in [old.group, old.gloo_group]:
         if g is not None:
             g.shutdown()
