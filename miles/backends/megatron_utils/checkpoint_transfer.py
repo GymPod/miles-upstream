@@ -62,7 +62,9 @@ def send_ckpt(
         timeout=timeout,
     )
     transport.disallow_checkpoint()
-    log_structured(logger.info, op="cross_cell", phase="end", kind="ckpt_send", iteration=iteration, to_alive_rank=dst_rank)
+    log_structured(
+        logger.info, op="cross_cell", phase="end", kind="ckpt_send", iteration=iteration, to_alive_rank=dst_rank
+    )
 
 
 def recv_ckpt(
