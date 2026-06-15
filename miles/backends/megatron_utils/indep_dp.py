@@ -143,6 +143,22 @@ def _allreduce_grads_and_losses_across_replicas(
             exc_info=True,
         )
 
+    loss_reduced: dict[str, float] = {}
+    if allreduce_success and mpu.is_pipeline_last_stage(ignore_virtual=True):
+        try:
+            loss_reduced = aggregate_train_losses(losses_reduced)
+        except Exception:
+            allreduce_success = False
+            log_structured(
+                logger.error,
+                op="cross_cell",
+                phase="fail",
+                kind="loss_allreduce",
+                cell_rank=parallel_state.indep_dp.rank,
+                members=parallel_state.indep_dp.size,
+                exc_info=True,
+            )
+
     # pg.errored() can force a CUDA/stream sync, so call it exactly once per step here -- do NOT
     # sprinkle extra errored() probes. When it does report an async error it MUST be logged loudly:
     # a swallowed cross-cell error means an un-reduced (wrong) gradient would be applied silently.
@@ -158,29 +174,9 @@ def _allreduce_grads_and_losses_across_replicas(
             error=str(e),
         )
 
-    # Intra-cell consensus: if ANY rank's allreduce failed, ALL ranks discard. get_gloo_group() is
-    # cell-local (created from the default world PG). The cross-cell loss reduce below is gated on
-    # this consensus, NOT per-rank allreduce_success: a peer can die at slightly different times for
-    # each intra-cell rank, so per-rank success diverges and one rank would enter the cross-cell loss
-    # reduce (hanging on the dead peer) while the other skips straight to here -- an intra-cell desync
-    # that wedges until the NCCL watchdog. Keying both off the consensus keeps the ranks in lockstep.
+    # Intra-cell consensus: if ANY rank's allreduce failed, ALL ranks discard.
+    # get_gloo_group() is cell-local (created from the default world PG).
     consensus = collective_bool_and(value=allreduce_success, group=get_gloo_group())
-
-    loss_reduced: dict[str, float] = {}
-    if consensus and mpu.is_pipeline_last_stage(ignore_virtual=True):
-        try:
-            loss_reduced = aggregate_train_losses(losses_reduced)
-        except Exception:
-            log_structured(
-                logger.error,
-                op="cross_cell",
-                phase="fail",
-                kind="loss_allreduce",
-                cell_rank=parallel_state.indep_dp.rank,
-                members=parallel_state.indep_dp.size,
-                exc_info=True,
-            )
-
     log_structured(
         logger.info,
         op="cross_cell",
