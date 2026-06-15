@@ -28,6 +28,7 @@ from miles.backends.megatron_utils.local_weight_checksum import dump_local_weigh
 from miles.backends.megatron_utils.types import TrainStepOutcome
 from miles.utils.dumper_utils import DumperMegatronUtil, DumperPhase
 from miles.utils.memory_utils import clear_memory
+from miles.utils.structured_log import log_structured
 from miles.utils.test_utils.ft_test_actions import FTTestActionActorExecutor
 from miles.utils.witness.allocator import WitnessInfo
 from miles.utils.witness.module import witness_dump_and_clear_stale
@@ -535,6 +536,17 @@ def train_one_step(
         model_chunk.zero_grad_buffer()
     if not disable_optimizer:
         optimizer.zero_grad()
+
+    log_structured(
+        logger.info,
+        op="train_step",
+        rollout=rollout_id,
+        step=step_id,
+        attempt=attempt,
+        outcome=outcome.name,
+        valid_step=valid_step,
+        grad_norm=round(float(grad_norm), 4),
+    )
 
     if outcome == TrainStepOutcome.NORMAL:
         dump_local_weight_checksums(args=args, model=model, optimizer=optimizer)
