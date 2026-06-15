@@ -66,6 +66,7 @@ def run_ci(
                 # Same as run_training: a cell respawned after a crash cold-recompiles
                 # its first forward, which is slow and memory-heavy enough to OOM.
                 "TORCHDYNAMO_DISABLE": "1",
+                "RAY_DEDUP_LOGS": "0",
             },
         )
     finally:

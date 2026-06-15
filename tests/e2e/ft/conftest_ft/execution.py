@@ -197,6 +197,7 @@ def run_training(
         # keeping torch.compile under FT respawn (warm/shared Inductor cache survivor->respawn, or
         # bounded recompile) so the tests can exercise the compiled path again.
         "TORCHDYNAMO_DISABLE": "1",
+        "RAY_DEDUP_LOGS": "0",
         **(extra_env_vars or {}),
     }
     U.execute_train(
