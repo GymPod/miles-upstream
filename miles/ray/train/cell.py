@@ -130,7 +130,10 @@ class RayTrainCell:
         handles = self._get_actor_handles() if self.is_allocated else []
         self.stop()
 
+        logger.info(f"FT/confirm_dead start cell={self.cell_index} n_actors={len(handles)}")
+        start = time.monotonic()
         await asyncio.gather(*[_confirm_actor_dead(handle) for handle in handles])
+        logger.info(f"FT/confirm_dead end cell={self.cell_index} elapsed={time.monotonic() - start:.1f}s")
 
     def mark_as_pending(self) -> None:
         if self.is_pending or self.is_allocated:
@@ -204,9 +207,6 @@ class RayTrainCell:
         mark_errored_on_failure: bool = True,
     ) -> list:
         handles = self._get_actor_handles()
-        # FT timeline: bracket every actor RPC so a hung call shows a `start` with no
-        # matching `end` (the orchestrator-side hang signature). This is the single
-        # chokepoint all cell.execute() calls pass through.
         logger.info(f"FT/execute start cell={self.cell_index} fn={fn_name} n_actors={len(handles)}")
         start = time.monotonic()
         try:

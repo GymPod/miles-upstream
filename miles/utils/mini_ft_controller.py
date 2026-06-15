@@ -162,6 +162,7 @@ class _MiniFTController:
     async def _poll_and_heal(self) -> None:
         try:
             cells = await self._get_cells()
+            logger.info("FT/controller poll cells=%s", {c.name: c.status.value for c in cells})
 
             unhealthy_names: set[str] = set()
             for cell in cells:
