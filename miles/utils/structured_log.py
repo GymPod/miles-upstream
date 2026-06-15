@@ -13,60 +13,50 @@ def log_structured(log_fn: Callable[..., None], *, exc_info: bool = False, **fie
     log_fn("ft " + _to_logfmt(fields), stacklevel=2, exc_info=exc_info)
 
 
-def with_logs(name: str | None = None) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Bracket a method with one `ft op=actor phase=start` and one `phase=end` line.
+def with_logs(func: Callable[..., Any]) -> Callable[..., Any]:
+    fn_name = func.__name__
+    method_logger = logging.getLogger(func.__module__)
 
-    The end line carries elapsed_s and ok; on exception ok=false and the traceback is
-    logged before re-raising. Per-rank entry/exit lines make a hang visible as a
-    phase=start with no matching phase=end (e.g. a cell wedged inside train). The
-    function's own module logger is used so each rank's identity tag is preserved.
-    """
+    def log_start(args: tuple[Any, ...]) -> tuple[str, float]:
+        cls = type(args[0]).__name__ if args else ""
+        log_structured(method_logger.info, cls=cls, fn=fn_name, phase="start")
+        return cls, time.monotonic()
 
-    def decorate(func: Callable[..., Any]) -> Callable[..., Any]:
-        fn_name = name or func.__name__
-        method_logger = logging.getLogger(func.__module__)
+    def log_end(cls: str, start: float) -> None:
+        log_structured(method_logger.info, cls=cls, fn=fn_name, phase="end", ok=True, elapsed_s=_elapsed(start))
 
-        def log_start() -> float:
-            log_structured(method_logger.info, op="actor", phase="start", fn=fn_name)
-            return time.monotonic()
+    def log_fail(cls: str, start: float) -> None:
+        log_structured(
+            method_logger.error, cls=cls, fn=fn_name, phase="end", ok=False, elapsed_s=_elapsed(start), exc_info=True
+        )
 
-        def log_end(start: float) -> None:
-            log_structured(method_logger.info, op="actor", phase="end", fn=fn_name, ok=True, elapsed_s=_elapsed(start))
-
-        def log_fail(start: float) -> None:
-            log_structured(
-                method_logger.error, op="actor", phase="end", fn=fn_name, ok=False, elapsed_s=_elapsed(start), exc_info=True
-            )
-
-        if inspect.iscoroutinefunction(func):
-
-            @functools.wraps(func)
-            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                start = log_start()
-                try:
-                    result = await func(*args, **kwargs)
-                except BaseException:
-                    log_fail(start)
-                    raise
-                log_end(start)
-                return result
-
-            return async_wrapper
+    if inspect.iscoroutinefunction(func):
 
         @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            start = log_start()
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            cls, start = log_start(args)
             try:
-                result = func(*args, **kwargs)
+                result = await func(*args, **kwargs)
             except BaseException:
-                log_fail(start)
+                log_fail(cls, start)
                 raise
-            log_end(start)
+            log_end(cls, start)
             return result
 
-        return wrapper
+        return async_wrapper
 
-    return decorate
+    @functools.wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        cls, start = log_start(args)
+        try:
+            result = func(*args, **kwargs)
+        except BaseException:
+            log_fail(cls, start)
+            raise
+        log_end(cls, start)
+        return result
+
+    return wrapper
 
 
 def _elapsed(start: float) -> float:
