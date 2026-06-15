@@ -487,6 +487,7 @@ def train_one_step(
     outcome = TrainStepOutcome.NORMAL
     grad_norm = 0.0
     valid_step = True
+    indep_dp_loss_reduced: dict[str, float] = {}
 
     if parallel_state.indep_dp.size > 1:
         assert step_id == 0, "indep-dp does not support multi step per train yet"
@@ -494,7 +495,9 @@ def train_one_step(
         if ft_actor_executor is not None:
             ft_actor_executor.maybe_crash(rollout_id=rollout_id, attempt=attempt)
 
-        ok = _allreduce_grads_across_replicas(args, model, parallel_state)
+        ok, indep_dp_loss_reduced = _allreduce_grads_across_replicas(
+            args, model, parallel_state, losses_reduced=losses_reduced
+        )
         if not ok:
             outcome = TrainStepOutcome.DISCARDED_SHOULD_RETRY
             valid_step = False
@@ -553,7 +556,11 @@ def train_one_step(
             witness_dump_and_clear_stale(model=model, witness_info=witness_info, optimizer=optimizer)
 
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
-            loss_reduced = aggregate_train_losses(losses_reduced)
+            # indep_dp mode already aggregated losses inside the guarded grad all-reduce (so a peer
+            # death there discards the step instead of being swallowed); otherwise aggregate here.
+            loss_reduced = (
+                indep_dp_loss_reduced if parallel_state.indep_dp.size > 1 else aggregate_train_losses(losses_reduced)
+            )
             return loss_reduced, grad_norm, outcome
 
     return {}, grad_norm, outcome

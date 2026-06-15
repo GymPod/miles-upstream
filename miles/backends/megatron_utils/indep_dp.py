@@ -4,6 +4,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import torch.distributed as dist
+from megatron.core import mpu
 
 from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.indep_dp import IndepDPInfo
@@ -101,7 +102,9 @@ def reconfigure_indep_dp_group(
     )
 
 
-def _allreduce_grads_across_replicas(args, model: Sequence["DDP"], parallel_state: ParallelState) -> bool:
+def _allreduce_grads_across_replicas(
+    args, model: Sequence["DDP"], parallel_state: ParallelState, losses_reduced: list
+) -> tuple[bool, dict[str, float]]:
     assert not args.calculate_per_token_loss, "calculate_per_token_loss is not supported with indep_dp yet"
     assert parallel_state.intra_dp.size == 1, (
         f"indep_dp requires intra_dp.size == 1, got {parallel_state.intra_dp.size}. "
@@ -139,8 +142,32 @@ def _allreduce_grads_across_replicas(args, model: Sequence["DDP"], parallel_stat
             exc_info=True,
         )
 
+    # Loss aggregation also all-reduces across cells (effective_dp_cp spans indep_dp). Run it
+    # inside this guarded region so a peer death during it is caught by the errored() probe below
+    # (-> consensus=False -> DISCARDED -> reconfigure), instead of being swallowed later in the
+    # train-step tail (where its failure is ignored and the step is wrongly kept NORMAL). Skipped
+    # when the grad all-reduce already failed (the step will be discarded regardless).
+    loss_reduced: dict[str, float] = {}
+    if allreduce_success and mpu.is_pipeline_last_stage(ignore_virtual=True):
+        from ..training_utils.log_utils import aggregate_train_losses
+
+        try:
+            loss_reduced = aggregate_train_losses(losses_reduced)
+        except Exception:
+            allreduce_success = False
+            log_structured(
+                logger.error,
+                op="cross_cell",
+                phase="fail",
+                kind="loss_allreduce",
+                cell_rank=parallel_state.indep_dp.rank,
+                members=parallel_state.indep_dp.size,
+                exc_info=True,
+            )
+
     # pg.errored() can force a CUDA/stream sync, so call it exactly once per step here -- do NOT
-    # sprinkle extra errored() probes. When it does report an async error it MUST be logged loudly:
+    # sprinkle extra errored() probes. It covers the async failure of BOTH the grad and the loss
+    # all-reduce above. When it does report an async error it MUST be logged loudly:
     # a swallowed cross-cell error means an un-reduced (wrong) gradient would be applied silently.
     if (e := pg.errored()) is not None:
         allreduce_success = False
@@ -168,4 +195,4 @@ def _allreduce_grads_across_replicas(args, model: Sequence["DDP"], parallel_stat
         this_rank_ok=allreduce_success,
         consensus_ok=consensus,
     )
-    return consensus
+    return consensus, loss_reduced
