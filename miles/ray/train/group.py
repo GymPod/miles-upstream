@@ -255,8 +255,21 @@ class RayTrainGroup:
         # ranks observe a consistent engine set; the actor releases the lock itself.
         info = await self._rollout_manager.get_updatable_engines_and_lock.remote()
         await self._rollout_manager.health_monitoring_pause.remote()
+
+        async def _fn(attempt: int):
+            # Mirror train's _fn: refresh before executing. A cell that died around this rollout
+            # -- including after a NORMAL train step (decision=no_retry, so train() never
+            # refreshed) -- aborted the survivor's cross-cell NCCL comm and left its device state
+            # unsafe for further collectives. _refresh_cells kills+confirms the dead cell and
+            # reconfigures; without it update_weights' native (un-timeout-protected) all_gather
+            # hangs until the 600s NCCL watchdog kills the survivor. Also promotes a healed
+            # pending cell back to alive.
+            if rollout_id is not None:
+                await self._refresh_cells(rollout_id=rollout_id)
+            await self._execute_first_alive("update_weights", info=info)
+
         # Catch with vanilla retry: cells w/ exceptions are auto marked errored, thus retry will find the next one
-        await retry(lambda _: self._execute_first_alive("update_weights", info=info))
+        await retry(_fn)
 
         await self._maybe_log_inference_engine_weight_checksums(rollout_id=rollout_id)
 

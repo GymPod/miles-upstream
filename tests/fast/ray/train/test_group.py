@@ -193,6 +193,40 @@ class TestExecuteFirstAlive:
             assert any(c[0] == "update_weights" for c in calls)
 
 
+class TestUpdateWeightsRefreshes:
+    @staticmethod
+    def _mock_rollout_manager() -> MagicMock:
+        rm = MagicMock()
+        rm.get_updatable_engines_and_lock.remote = AsyncMock(return_value=MagicMock())
+        rm.health_monitoring_pause.remote = AsyncMock()
+        return rm
+
+    @patch("miles.ray.train.group.is_event_logger_initialized", return_value=False)
+    async def test_refreshes_before_executing_when_rollout_id_given(self, _ev) -> None:
+        """update_weights(rollout_id=N) refreshes first, so a cell that died around the rollout
+        is reconfigured away before update_weights' collectives run (else the survivor's stale
+        cross-cell NCCL state hangs its native all_gather until the 600s watchdog)."""
+        group = await _make_alive_group(num_cells=2, rollout_manager=self._mock_rollout_manager())
+        group.stop_cell(1)  # alive config changed -> _refresh_cells must reconfigure
+
+        await group.update_weights(rollout_id=0)
+
+        assert group._indep_dp_quorum_id == 1  # _refresh_cells ran (quorum bumped)
+        names = [c[0] for handle in group._cells[0]._get_actor_handles() for c in ray.get(handle.get_calls.remote())]
+        assert "reconfigure_indep_dp" in names  # refreshed before...
+        assert "update_weights" in names  # ...executing
+
+    @patch("miles.ray.train.group.is_event_logger_initialized", return_value=False)
+    async def test_no_refresh_when_rollout_id_none(self, _ev) -> None:
+        """The initial out-of-loop weight sync (rollout_id=None) skips refresh: no cell can be pending yet."""
+        group = await _make_alive_group(num_cells=2, rollout_manager=self._mock_rollout_manager())
+        group.stop_cell(1)
+
+        await group.update_weights(rollout_id=None)
+
+        assert group._indep_dp_quorum_id == 0  # no refresh
+
+
 class TestComputeIndepDPInfo:
     def test_all_alive(self):
         group = _make_group(num_cells=3)
