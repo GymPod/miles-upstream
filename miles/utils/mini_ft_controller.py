@@ -90,15 +90,8 @@ class _MiniFTControllerRunner:
 def _compute_cell_snapshot(cell: Cell) -> _CellSnapshot:
     healthy_conditions = [c for c in cell.status.conditions if c.type == "Healthy"]
     if any(c.status == TriState.FALSE for c in healthy_conditions):
-        # Allocated but failed its health check (e.g. heartbeat went stale) -> needs heal.
         status = CellHealthStatus.UNHEALTHY
     elif cell.status.phase == "Suspended":
-        # The train side already detected this cell's death and shrank it out of the quorum
-        # (cell.stop() -> StateStopped -> phase "Suspended"). The controller must bring it back, so
-        # treat it as needing heal. Note a Suspended cell carries no Healthy condition, so without
-        # this it would fall through to NOT_APPLICABLE and never be resumed -> the cell is lost
-        # forever (permanent capacity loss after the first train-detected crash). Pending cells
-        # (also no Healthy condition, phase "Pending") are mid-heal and intentionally left alone.
         status = CellHealthStatus.UNHEALTHY
     elif not healthy_conditions:
         status = CellHealthStatus.NOT_APPLICABLE
