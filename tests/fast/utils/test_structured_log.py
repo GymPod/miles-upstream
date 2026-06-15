@@ -1,6 +1,9 @@
+import asyncio
 import logging
 
-from miles.utils.structured_log import _format_value, _to_logfmt, log_structured, prune_for_log
+import pytest
+
+from miles.utils.structured_log import _format_value, _to_logfmt, log_structured, prune_for_log, with_logs
 
 
 class TestFormatValue:
@@ -145,3 +148,65 @@ class TestLogStructured:
         with caplog.at_level(logging.INFO, logger="t_stack"):
             log_structured(logger.info, op="x")
         assert caplog.records[0].filename == "test_structured_log.py"
+
+
+class TestWithLogs:
+    def test_sync_method_emits_start_then_end_ok(self, caplog):
+        """A sync call emits phase=start then phase=end with ok=true and elapsed_s."""
+
+        @with_logs()
+        def train(self):
+            return 42
+
+        with caplog.at_level(logging.INFO):
+            assert train(object()) == 42
+        assert caplog.messages[0] == "ft op=actor phase=start fn=train"
+        assert caplog.messages[1].startswith("ft op=actor phase=end fn=train ok=true elapsed_s=")
+
+    def test_explicit_name_overrides_function_name(self, caplog):
+        """An explicit name argument is used for the fn field instead of __name__."""
+
+        @with_logs("custom_label")
+        def train(self):
+            return None
+
+        with caplog.at_level(logging.INFO):
+            train(object())
+        assert caplog.messages[0] == "ft op=actor phase=start fn=custom_label"
+
+    def test_exception_logs_end_not_ok_with_exc_info_and_reraises(self, caplog):
+        """On exception the end line is ok=false with the traceback, and the error propagates."""
+
+        @with_logs()
+        def update_weights(self):
+            raise ValueError("boom")
+
+        with caplog.at_level(logging.INFO):
+            with pytest.raises(ValueError, match="boom"):
+                update_weights(object())
+        assert caplog.messages[0] == "ft op=actor phase=start fn=update_weights"
+        end = caplog.records[1]
+        assert end.getMessage().startswith("ft op=actor phase=end fn=update_weights ok=false elapsed_s=")
+        assert end.levelno == logging.ERROR
+        assert end.exc_info[0] is ValueError
+
+    def test_async_method_emits_start_then_end_ok(self, caplog):
+        """An async call emits the same start/end pair after the coroutine completes."""
+
+        @with_logs()
+        async def send_ckpt(self):
+            return "done"
+
+        with caplog.at_level(logging.INFO):
+            assert asyncio.run(send_ckpt(object())) == "done"
+        assert caplog.messages[0] == "ft op=actor phase=start fn=send_ckpt"
+        assert caplog.messages[1].startswith("ft op=actor phase=end fn=send_ckpt ok=true elapsed_s=")
+
+    def test_preserves_wrapped_function_metadata(self):
+        """functools.wraps keeps the original __name__ so Ray/introspection still sees it."""
+
+        @with_logs()
+        def reconfigure_indep_dp(self):
+            return None
+
+        assert reconfigure_indep_dp.__name__ == "reconfigure_indep_dp"

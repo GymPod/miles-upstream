@@ -1,4 +1,8 @@
+import functools
+import inspect
 import json
+import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -7,6 +11,66 @@ _PRUNE_CAP = 160
 
 def log_structured(log_fn: Callable[..., None], *, exc_info: bool = False, **fields: Any) -> None:
     log_fn("ft " + _to_logfmt(fields), stacklevel=2, exc_info=exc_info)
+
+
+def with_logs(name: str | None = None) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Bracket a method with one `ft op=actor phase=start` and one `phase=end` line.
+
+    The end line carries elapsed_s and ok; on exception ok=false and the traceback is
+    logged before re-raising. Per-rank entry/exit lines make a hang visible as a
+    phase=start with no matching phase=end (e.g. a cell wedged inside train). The
+    function's own module logger is used so each rank's identity tag is preserved.
+    """
+
+    def decorate(func: Callable[..., Any]) -> Callable[..., Any]:
+        fn_name = name or func.__name__
+        method_logger = logging.getLogger(func.__module__)
+
+        def log_start() -> float:
+            log_structured(method_logger.info, op="actor", phase="start", fn=fn_name)
+            return time.monotonic()
+
+        def log_end(start: float) -> None:
+            log_structured(method_logger.info, op="actor", phase="end", fn=fn_name, ok=True, elapsed_s=_elapsed(start))
+
+        def log_fail(start: float) -> None:
+            log_structured(
+                method_logger.error, op="actor", phase="end", fn=fn_name, ok=False, elapsed_s=_elapsed(start), exc_info=True
+            )
+
+        if inspect.iscoroutinefunction(func):
+
+            @functools.wraps(func)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                start = log_start()
+                try:
+                    result = await func(*args, **kwargs)
+                except BaseException:
+                    log_fail(start)
+                    raise
+                log_end(start)
+                return result
+
+            return async_wrapper
+
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            start = log_start()
+            try:
+                result = func(*args, **kwargs)
+            except BaseException:
+                log_fail(start)
+                raise
+            log_end(start)
+            return result
+
+        return wrapper
+
+    return decorate
+
+
+def _elapsed(start: float) -> float:
+    return round(time.monotonic() - start, 1)
 
 
 def _to_logfmt(fields: dict[str, Any]) -> str:
