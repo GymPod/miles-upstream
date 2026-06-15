@@ -111,36 +111,6 @@ Where to look:
 * `WorkerCrashed` / `RaySystemError` — ranks died.
 * `forward_logp_max_diff` — FP8 train/inference alignment.
 
-### FT structured logs (`ft op=…`)
-
-Fault-tolerance lifecycle events are logged as one-line logfmt through a single
-funnel, `miles/utils/structured_log.py::log_structured`:
-
-```
-ft op=<area> phase=<start|end|fail|decision|poll|…> k=v k=v …
-```
-
-`op` covers the FT timeline: `execute` (each cell RPC), `state` (cell state
-transitions), `refresh` (reconfigure decision), `check` (retry decision),
-`train` / `update_weights`, `confirm_dead`, `xcell` (cross-cell collective —
-`kind=grad_allreduce|dump_barrier|log_gather|ckpt_send|ckpt_recv`), `reconfig`,
-`kill_errored`, `heal`, `controller` / `health` (per poll), and `event` (the
-event-logger echo; oversized fields are summarized to `<list len=N>`). Lists are
-comma-joined with no spaces (`alive=0,1`), bools are lowercase, and values with
-spaces are double-quoted, so any `key=value` parser reads every line.
-
-Useful greps:
-
-* `grep ' ft op=' run.log` — the whole FT timeline; filter further by `op=` / `phase=`.
-* A `phase=start` with **no matching `phase=end`** for the same op (especially
-  `op=execute fn=train` or `op=xcell`) is the hang signature: that RPC / collective
-  never returned.
-* `op=refresh` / `op=reconfig` show whether the cross-cell quorum was rebuilt; their
-  absence after a cell death means recovery never ran.
-
-New FT logs must go through `log_structured` (not a hand-written f-string) so the
-format stays parseable.
-
 ## When all else fails
 
 * Drop to a tiny model (Qwen2.5-0.5B) on a known-good recipe (Reproducibility) to
