@@ -71,20 +71,7 @@ def compute_cell_status(state: CellState, health_checker_status: TriState) -> Ce
             return CellStatus(phase="Pending", conditions=[CellCondition.allocated(TriState.FALSE)])
 
         case StateStopped():
-            # A cell reaches StateStopped only via cell.stop(), i.e. the train side detected its
-            # death and shrank it out of the quorum. That is a cell that still needs healing, so it
-            # MUST report Healthy=FALSE -> UNHEALTHY, otherwise the mini FT controller (which only
-            # heals UNHEALTHY cells) never resumes it and the cell is lost forever. Without this, a
-            # cell injected a second time races the controller poll: if _refresh_cells shrinks it to
-            # StateStopped before the next poll, it strands as Suspended/NOT_APPLICABLE and never
-            # heals back (permanently halving alive capacity after a train-detected crash).
-            return CellStatus(
-                phase="Suspended",
-                conditions=[
-                    CellCondition.allocated(TriState.FALSE),
-                    CellCondition.healthy(TriState.FALSE, reason="Stopped"),
-                ],
-            )
+            return CellStatus(phase="Suspended", conditions=[CellCondition.allocated(TriState.FALSE)])
 
         case _:
             raise NotImplementedError(f"Unknown state: {state}")
