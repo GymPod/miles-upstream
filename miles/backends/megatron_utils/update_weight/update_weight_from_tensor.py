@@ -83,6 +83,7 @@ class UpdateWeightFromTensor:
         self.rollout_engines: Sequence[ActorHandle] | None = None
         self._connection_stale: bool = False
 
+    # TODO: avoid dup code during yueming's refactor (temp write this to avoid introducing potentially conflicting base class)
     def is_rollout_engines_fresh(self) -> bool:
         return self.rollout_engines is not None and not self._connection_stale
 
