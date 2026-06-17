@@ -29,6 +29,67 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+# transformers >= 5.6 stores MoE experts as batched params (experts.gate_up_proj /
+# experts.down_proj), but SGLang's qwen3_moe loader expects per-expert names
+# (experts.{i}.{gate,up,down}_proj.weight, as on disk). Streaming the batched names
+# verbatim leaves the rollout MoE weights unmapped -> garbage generations. Split them
+# back, but only for model types whose SGLang loader expects per-expert (qwen3_5_moe
+# consumes the batched layout, so leave it alone).
+_PER_EXPERT_MOE_MODEL_TYPES = {"qwen3_moe"}
+
+
+def _is_batched_expert_param(name, param, model_type):
+    """True for a transformers>=5.6 batched MoE expert param that SGLang needs split."""
+    return (
+        model_type in _PER_EXPERT_MOE_MODEL_TYPES
+        and getattr(param, "dim", lambda: 0)() == 3
+        and (name.endswith(".experts.gate_up_proj") or name.endswith(".experts.down_proj"))
+    )
+
+
+def _split_batched_moe_expert(name, full):
+    """Split a materialized batched expert tensor into per-expert named weights.
+
+    Pure tensor logic (no device / DTensor handling) so it is unit-testable on CPU.
+      experts.gate_up_proj [E, 2I, H] -> experts.{i}.gate_proj.weight [I, H] (rows :I)
+                                         experts.{i}.up_proj.weight   [I, H] (rows I:)
+      experts.down_proj    [E, H, I]  -> experts.{i}.down_proj.weight  [H, I]
+    """
+    prefix = name.rsplit(".", 1)[0]  # ...mlp.experts
+    num_experts = full.shape[0]
+    if name.endswith(".gate_up_proj"):
+        half = full.shape[1] // 2  # fused rows are [gate | up]
+        for i in range(num_experts):
+            yield f"{prefix}.{i}.gate_proj.weight", full[i, :half, :].contiguous()
+            yield f"{prefix}.{i}.up_proj.weight", full[i, half:, :].contiguous()
+    else:  # .down_proj
+        for i in range(num_experts):
+            yield f"{prefix}.{i}.down_proj.weight", full[i].contiguous()
+
+
+def _iter_sync_named_params(name, param, model_type):
+    """Yield (name, tensor) pairs to stream to the rollout engine, splitting
+    batched MoE expert params into per-expert names where SGLang requires it.
+
+    For non-expert params (or model types that consume the batched layout) the
+    original (name, param) is yielded unchanged so the caller's existing
+    DTensor/async path is preserved.
+    """
+    if not _is_batched_expert_param(name, param, model_type):
+        yield name, param
+        return
+
+    # Materialize the full (unsharded) tensor before slicing per expert. Mirror the
+    # caller's proven path: move to CUDA first, then all-gather via redistribute
+    # (calling full_tensor() on a CPU DTensor picks the wrong collective backend).
+    full = param.cuda()
+    if isinstance(full, DTensor):
+        full = full.redistribute(
+            placements=[Replicate()] * full.device_mesh.ndim,
+        ).to_local()
+    yield from _split_batched_moe_expert(name, full)
+
+
 class UpdateWeight(abc.ABC):
     def __init__(self, args: Namespace, model: torch.nn.Module) -> None:
         self.args = args
@@ -56,23 +117,25 @@ class UpdateWeight(abc.ABC):
 
         bucket = []
         bucket_size = 0
-        for name, param in self.model.state_dict().items():
-            param_size = param.numel() * param.element_size()
-            if bucket and bucket_size + param_size >= self.args.update_weight_buffer_size:
-                self.wait_and_update_bucket_weights(bucket)
-                del bucket
-                bucket = []
-                bucket_size = 0
+        model_type = getattr(getattr(self.model, "config", None), "model_type", "")
+        for raw_name, raw_param in self.model.state_dict().items():
+            for name, param in _iter_sync_named_params(raw_name, raw_param, model_type):
+                param_size = param.numel() * param.element_size()
+                if bucket and bucket_size + param_size >= self.args.update_weight_buffer_size:
+                    self.wait_and_update_bucket_weights(bucket)
+                    del bucket
+                    bucket = []
+                    bucket_size = 0
 
-            param = param.cuda()
-            if isinstance(param, DTensor):
-                # async version of param.full_tensor
-                param = param.redistribute(
-                    placements=[Replicate()] * param.device_mesh.ndim,
-                    async_op=True,
-                ).to_local()
-            bucket.append((name, param))
-            bucket_size += param_size
+                param = param.cuda()
+                if isinstance(param, DTensor):
+                    # async version of param.full_tensor
+                    param = param.redistribute(
+                        placements=[Replicate()] * param.device_mesh.ndim,
+                        async_op=True,
+                    ).to_local()
+                bucket.append((name, param))
+                bucket_size += param_size
 
         if bucket:
             self.wait_and_update_bucket_weights(bucket)
