@@ -181,13 +181,61 @@ def _is_gated_deltanet(hf_config) -> bool:
     return (layer_types is not None and "linear_attention" in layer_types) or "qwen3_5" in model_type
 
 
-def apply_hf_compat_patches(hf_config=None) -> None:
-    """Apply all FSDP HF-compat patches. Safe to call once at actor init."""
-    apply_flash_attn_saux_guard()
-    if hf_config is not None:
-        check_fp8_checkpoint(hf_config)
-        check_train_infer_consistency(hf_config)
-        if _is_gated_deltanet(hf_config):
-            from .models.qwen3_5_moe import apply_gateddeltanet_packing_patch
+def _apply_gated_deltanet_packing(hf_config) -> None:
+    from .models.qwen3_5_moe import apply_gateddeltanet_packing_patch
 
-            apply_gateddeltanet_packing_patch()
+    apply_gateddeltanet_packing_patch()
+
+
+class ModelPatchHook:
+    """A config-time HF-compat patch: an ``applies_to`` predicate + an ``apply`` action.
+
+    Makes the per-arch dispatch a first-class registry (DESIGN_NOTES ModelPatchRegistry / v2-FIX-4)
+    instead of a hardcoded ``if _is_gated_deltanet(...)`` chain. New archs register a hook rather than
+    editing ``apply_hf_compat_patches``. ``applies_to``/``apply`` both take the hf_config (or None);
+    self-gating checks (fp8 fail-fast, DSA warn) use ``applies_to=_has_config`` and gate internally.
+    """
+
+    def __init__(self, name, applies_to, apply):
+        self.name = name
+        self.applies_to = applies_to
+        self.apply = apply
+
+
+_MODEL_PATCH_HOOKS: list[ModelPatchHook] = []
+
+
+def register_model_patch(hook: ModelPatchHook) -> None:
+    _MODEL_PATCH_HOOKS.append(hook)
+
+
+def _always(hf_config) -> bool:
+    return True
+
+
+def _has_config(hf_config) -> bool:
+    return hf_config is not None
+
+
+# Order preserved from the original hardcoded sequence (s_aux guard, fp8 guard, DSA warn, GDN packing).
+register_model_patch(ModelPatchHook("flash_attn_saux_guard", _always, lambda cfg: apply_flash_attn_saux_guard()))
+register_model_patch(ModelPatchHook("fp8_checkpoint_guard", _has_config, check_fp8_checkpoint))
+register_model_patch(ModelPatchHook("dsa_train_infer_warn", _has_config, check_train_infer_consistency))
+register_model_patch(
+    ModelPatchHook(
+        "gated_deltanet_packing",
+        lambda cfg: _has_config(cfg) and _is_gated_deltanet(cfg),
+        _apply_gated_deltanet_packing,
+    )
+)
+
+
+def apply_hf_compat_patches(hf_config=None) -> None:
+    """Apply all registered FSDP HF-compat patches. Safe to call once at actor init.
+
+    (The post-load Mamba clobber-reload is applied separately in the actor, since it needs the
+    instantiated model, not just the config — see ``reload_clobbered_checkpoint_params``.)
+    """
+    for hook in _MODEL_PATCH_HOOKS:
+        if hook.applies_to(hf_config):
+            hook.apply(hf_config)

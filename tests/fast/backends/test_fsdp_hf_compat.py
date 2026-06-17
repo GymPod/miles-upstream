@@ -128,3 +128,29 @@ def test_weight_bridge_registry():
     fn = get_param_transform("x.foo", g, "_test_arch")
     assert fn is not None and list(fn("x.foo", g))[0][0] == "x.bar"
     assert get_param_transform("x.baz", g, "_test_arch") is None
+
+
+def test_model_patch_registry_gating():
+    # The ModelPatchHook registry replaces the hardcoded per-arch dispatch in apply_hf_compat_patches.
+    # Verify the predicates gate correctly (s_aux always; config-checks need a config; GDN needs gated-deltanet).
+    from types import SimpleNamespace
+
+    from miles.backends.experimental.fsdp_utils.hf_compat_patches import _MODEL_PATCH_HOOKS
+
+    by_name = {h.name: h for h in _MODEL_PATCH_HOOKS}
+    # the four expected hooks are registered, in order
+    assert [h.name for h in _MODEL_PATCH_HOOKS][:4] == [
+        "flash_attn_saux_guard",
+        "fp8_checkpoint_guard",
+        "dsa_train_infer_warn",
+        "gated_deltanet_packing",
+    ]
+    # s_aux guard runs even without a config; the others don't
+    assert by_name["flash_attn_saux_guard"].applies_to(None)
+    assert not by_name["fp8_checkpoint_guard"].applies_to(None)
+    assert not by_name["gated_deltanet_packing"].applies_to(None)
+    # GDN packing fires for a gated-deltanet arch, not for a dense one
+    gdn = SimpleNamespace(model_type="qwen3_5_moe", layer_types=["linear_attention", "full_attention"])
+    dense = SimpleNamespace(model_type="qwen3", layer_types=["full_attention"])
+    assert by_name["gated_deltanet_packing"].applies_to(gdn)
+    assert not by_name["gated_deltanet_packing"].applies_to(dense)
