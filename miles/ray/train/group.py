@@ -336,8 +336,10 @@ class RayTrainGroup:
     async def _refresh_cells(self, *, rollout_id: int) -> None:
         snapshotted_pending_indices = [c.cell_index for c in self._cells if c.is_pending]
         snapshotted_alive_indices = [c.cell_index for c in self._cells if c.is_alive]
-        snapshotted_errored_indices = [c.cell_index for c in self._cells if c.is_errored]
         will_alive_indices = sorted(list(set(snapshotted_pending_indices + snapshotted_alive_indices)))
+        cells_by_state: dict[str, list[int]] = {}
+        for c in self._cells:
+            cells_by_state.setdefault(c.state_name, []).append(c.cell_index)
         log_structured(
             logger.info,
             op="refresh",
@@ -345,7 +347,7 @@ class RayTrainGroup:
             rollout=rollout_id,
             alive=snapshotted_alive_indices,
             pending=snapshotted_pending_indices,
-            errored=snapshotted_errored_indices,
+            by_state=cells_by_state,
             quorum=self._indep_dp_quorum_id,
         )
         assert len(snapshotted_alive_indices) > 0, "Cannot recover when all cells are dead"

@@ -291,6 +291,10 @@ class RayTrainCell:
     def is_stopped(self) -> bool:
         return isinstance(self._state, StateStopped)
 
+    @property
+    def state_name(self) -> str:
+        return type(self._state).__name__
+
     def cell_status(self) -> CellStatus:
         return compute_cell_status(self._state, self.health_checker.status)
 
