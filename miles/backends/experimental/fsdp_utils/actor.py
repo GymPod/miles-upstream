@@ -39,6 +39,7 @@ from .update_weight_utils import UpdateWeightFromDistributed, UpdateWeightFromTe
 
 if TYPE_CHECKING:
     from miles.ray.rollout.rollout_manager import EnginesAndLock
+    from miles.utils.witness.allocator import WitnessInfo
 
 logger = logging.getLogger(__name__)
 
@@ -408,7 +409,13 @@ class FSDPTrainRayActor(TrainRayActor):
                     self.model.cuda()
                     dist.barrier(group=get_gloo_group())
 
-    def train(self, rollout_id: int, rollout_data_ref: Box) -> None:
+    def train(
+        self,
+        rollout_id: int,
+        rollout_data_ref: Box,
+        witness_info: "WitnessInfo | None" = None,
+        attempt: int = 0,
+    ) -> None:
         """Run one training update over a rollout batch.
 
         Parameters:
@@ -419,6 +426,9 @@ class FSDPTrainRayActor(TrainRayActor):
                 `rollout_log_probs`, etc.). It will be fetched and partitioned
                 by `process_rollout_data` based on data-parallel rank/size.
         """
+        assert witness_info is None
+        assert attempt == 0
+
         self._heartbeat.bump()
 
         if self.args.offload_train:
