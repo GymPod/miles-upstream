@@ -102,3 +102,29 @@ def test_is_mamba_hybrid_gating():
     assert not _is_mamba_hybrid(SimpleNamespace(model_type="qwen3"))
     assert not _is_mamba_hybrid(SimpleNamespace(model_type="qwen3_moe"))
     assert not _is_mamba_hybrid(SimpleNamespace(model_type="llama", layer_types=["attention"]))
+
+
+def test_weight_bridge_registry():
+    # The WeightBridge registry is the train->rollout param-name/shape contract: a model type with
+    # a registered transform gets its params rewritten; unregistered types stream verbatim.
+    import torch
+
+    from miles.backends.experimental.fsdp_utils.weight_bridge import (
+        get_param_transform,
+        register_param_transform,
+    )
+
+    # qwen3_moe is registered (batched experts -> per-expert); a 3D experts param matches.
+    g = torch.zeros(2, 6, 4)
+    assert get_param_transform("model.layers.0.mlp.experts.gate_up_proj", g, "qwen3_moe") is not None
+    # unregistered model type -> no transform (passthrough)
+    assert get_param_transform("model.layers.0.mlp.experts.gate_up_proj", g, "qwen3_5_moe") is None
+    # registering a new transform routes matching params through it
+    register_param_transform(
+        "_test_arch",
+        matches=lambda name, p: name.endswith(".foo"),
+        expand=lambda name, full: [(name.replace(".foo", ".bar"), full)],
+    )
+    fn = get_param_transform("x.foo", g, "_test_arch")
+    assert fn is not None and list(fn("x.foo", g))[0][0] == "x.bar"
+    assert get_param_transform("x.baz", g, "_test_arch") is None

@@ -29,65 +29,47 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-# transformers >= 5.6 stores MoE experts as batched params (experts.gate_up_proj /
-# experts.down_proj), but SGLang's qwen3_moe loader expects per-expert names
-# (experts.{i}.{gate,up,down}_proj.weight, as on disk). Streaming the batched names
-# verbatim leaves the rollout MoE weights unmapped -> garbage generations. Split them
-# back, but only for model types whose SGLang loader expects per-expert (qwen3_5_moe
-# consumes the batched layout, so leave it alone).
-_PER_EXPERT_MOE_MODEL_TYPES = {"qwen3_moe"}
+# The train->rollout param-name/shape contract is owned by the WeightBridge registry
+# (weight_bridge.py): per-model-type transforms rewrite the streamed (name, tensor) into what
+# the SGLang loader expects. E.g. transformers>=5.6 stores qwen3_moe experts as one batched
+# tensor but SGLang wants per-expert names; qwen3_5_moe consumes the batched layout as-is, so it
+# registers no transform and streams verbatim. See DESIGN_NOTES "WeightBridge" for the rationale.
+from .weight_bridge import _qwen3_moe_expand, get_param_transform
 
 
 def _is_batched_expert_param(name, param, model_type):
-    """True for a transformers>=5.6 batched MoE expert param that SGLang needs split."""
-    return (
-        model_type in _PER_EXPERT_MOE_MODEL_TYPES
-        and getattr(param, "dim", lambda: 0)() == 3
-        and (name.endswith(".experts.gate_up_proj") or name.endswith(".experts.down_proj"))
-    )
+    """True when a registered WeightBridge transform applies to this (name, param, model_type)."""
+    return get_param_transform(name, param, model_type) is not None
 
 
 def _split_batched_moe_expert(name, full):
-    """Split a materialized batched expert tensor into per-expert named weights.
+    """Split a materialized batched qwen3_moe expert tensor into per-expert named weights.
 
-    Pure tensor logic (no device / DTensor handling) so it is unit-testable on CPU.
-      experts.gate_up_proj [E, 2I, H] -> experts.{i}.gate_proj.weight [I, H] (rows :I)
-                                         experts.{i}.up_proj.weight   [I, H] (rows I:)
-      experts.down_proj    [E, H, I]  -> experts.{i}.down_proj.weight  [H, I]
+    Thin wrapper over the WeightBridge transform; pure tensor logic, unit-testable on CPU.
     """
-    prefix = name.rsplit(".", 1)[0]  # ...mlp.experts
-    num_experts = full.shape[0]
-    if name.endswith(".gate_up_proj"):
-        half = full.shape[1] // 2  # fused rows are [gate | up]
-        for i in range(num_experts):
-            yield f"{prefix}.{i}.gate_proj.weight", full[i, :half, :].contiguous()
-            yield f"{prefix}.{i}.up_proj.weight", full[i, half:, :].contiguous()
-    else:  # .down_proj
-        for i in range(num_experts):
-            yield f"{prefix}.{i}.down_proj.weight", full[i].contiguous()
+    yield from _qwen3_moe_expand(name, full)
 
 
 def _iter_sync_named_params(name, param, model_type):
-    """Yield (name, tensor) pairs to stream to the rollout engine, splitting
-    batched MoE expert params into per-expert names where SGLang requires it.
-
-    For non-expert params (or model types that consume the batched layout) the
-    original (name, param) is yielded unchanged so the caller's existing
-    DTensor/async path is preserved.
+    """Yield (name, tensor) pairs to stream to the rollout engine, applying the registered
+    WeightBridge transform for this model type (e.g. splitting batched MoE experts into the
+    per-expert names SGLang requires). Params with no matching transform stream unchanged so the
+    caller's existing DTensor/async path is preserved.
     """
-    if not _is_batched_expert_param(name, param, model_type):
+    expand = get_param_transform(name, param, model_type)
+    if expand is None:
         yield name, param
         return
 
-    # Materialize the full (unsharded) tensor before slicing per expert. Mirror the
-    # caller's proven path: move to CUDA first, then all-gather via redistribute
-    # (calling full_tensor() on a CPU DTensor picks the wrong collective backend).
+    # Materialize the full (unsharded) tensor before the transform slices it. Mirror the caller's
+    # proven path: move to CUDA first, then all-gather via redistribute (calling full_tensor() on a
+    # CPU DTensor picks the wrong collective backend).
     full = param.cuda()
     if isinstance(full, DTensor):
         full = full.redistribute(
             placements=[Replicate()] * full.device_mesh.ndim,
         ).to_local()
-    yield from _split_batched_moe_expert(name, full)
+    yield from expand(name, full)
 
 
 class UpdateWeight(abc.ABC):
