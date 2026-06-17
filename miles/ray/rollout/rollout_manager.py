@@ -47,7 +47,6 @@ class RolloutManager:
         self.pg = pg
         self.args = args
         # TODO make args immutable
-        init_tracking(args, primary=False, router_addr=f"http://{args.sglang_router_ip}:{args.sglang_router_port}")
 
         data_source_cls = load_function(self.args.data_source_path)
         self.data_source = data_source_cls(args)
@@ -75,6 +74,16 @@ class RolloutManager:
             init_http_client(args)
             self.servers = start_rollout_servers(args, pg)
             start_session_server(args)
+
+        # Initialise tracking only AFTER the router and session-server subprocesses
+        # have been forked. wandb.init() spins up service-backed objects whose
+        # weakref finalizers call into a background service thread; a forked child
+        # inherits those objects but not the thread, so finalizing one inside the
+        # child's single uvicorn event-loop thread blocks it forever and the server
+        # stops accepting connections. Forking before wandb.init() avoids inheriting
+        # that state entirely.
+        init_tracking(args, primary=False, router_addr=f"http://{args.sglang_router_ip}:{args.sglang_router_port}")
+
         self.rollout_engine_lock = Lock.options(num_cpus=1, num_gpus=0).remote()
         self.rollout_id = -1
 
