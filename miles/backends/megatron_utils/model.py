@@ -296,7 +296,7 @@ def forward_only(
             labels=None,
             packed_seq_params=packed_seq_params,
             loss_mask=batch["full_loss_masks"],
-            **filter_keys(batch, ["witness_ids"]),
+            **(filter_keys(batch, ["witness_ids"]) if args.enable_witness else {}),
             **(batch["multimodal_train_inputs"] if batch["multimodal_train_inputs"] is not None else {}),
         )
 
@@ -468,7 +468,7 @@ def train_one_step(
                 "labels": None,
                 "packed_seq_params": get_packed_seq_params(batch, args),
                 "loss_mask": batch["full_loss_masks"],
-                **filter_keys(batch, ["witness_ids"]),
+                **(filter_keys(batch, ["witness_ids"]) if args.enable_witness else {}),
             }
 
             if args.enable_mtp_training:
