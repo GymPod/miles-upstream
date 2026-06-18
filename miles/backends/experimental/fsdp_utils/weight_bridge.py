@@ -63,3 +63,8 @@ def _qwen3_moe_expand(name: str, full: torch.Tensor) -> Iterable[tuple[str, torc
 
 
 register_param_transform("qwen3_moe", _qwen3_moe_matches, _qwen3_moe_expand)
+
+# glm4_moe_lite (GLM-4.7-Flash) uses the IDENTICAL batched-expert layout — Glm4MoeLiteNaiveMoe stores
+# experts.gate_up_proj [E, 2I, H] (rows [gate|up]) + experts.down_proj [E, H, I] — while sglang's loader
+# expects per-expert names (as on disk). Reuse the same split transform.
+register_param_transform("glm4_moe_lite", _qwen3_moe_matches, _qwen3_moe_expand)
