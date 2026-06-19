@@ -8,8 +8,7 @@ but SGLang's qwen3_moe loader expects per-expert ``experts.{i}.{gate,up,down}_pr
 
 This module makes that contract a first-class, registered object instead of a hardcoded
 ``if model_type == ...`` branch. It is the FSDP analogue of the Megatron ``megatron_to_hf``
-converter registry, and the seam the backend refactor (DESIGN_NOTES §4 / v2-FIX of the WeightBridge)
-generalizes: a new arch registers a ``ParamTransform`` rather than editing the sync loop.
+converter registry: a new arch registers a ``ParamTransform`` rather than editing the sync loop.
 
 A transform is a pair of callables:
   * ``matches(name, param) -> bool`` — does this transform apply to this param?

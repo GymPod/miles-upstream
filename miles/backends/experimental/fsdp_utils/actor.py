@@ -119,14 +119,11 @@ class FSDPTrainRayActor(TrainRayActor):
             )
 
         # GLM-4.7-Flash (glm4_moe_lite): keep an fp32 master copy of the weights. The FSDP2 bf16
-        # reshard/load perturbs stored weights ~1 bf16 ULP vs a clean disk load; glm's routing-sensitive
-        # MLA + 64-expert MoE amplifies that through rollout decode (train_rollout_logprob_abs_diff 0.11
-        # vs Megatron 0.03). An fp32 master is bit-exact under the FSDP2 reshard, so the weight sync can
-        # downcast it back to each param's on-disk dtype and stream sglang exactly what a clean disk load
-        # produces; compute stays bf16 via MixedPrecisionPolicy (standard mixed precision, as Megatron).
-        # We record the on-disk dtype per param so the sync restores it (weights -> bf16, while params
-        # HF keeps in fp32 like e_score_correction_bias stay fp32 — casting those to bf16 would flip MoE
-        # routing). update_weight_utils reads model._fsdp_sync_orig_dtypes.
+        # reshard perturbs stored weights ~1 bf16 ULP vs a clean disk load; an fp32 master is bit-exact,
+        # so the weight sync downcasts it back to each param's on-disk dtype and streams sglang exactly
+        # what a clean disk load produces (compute stays bf16 via MixedPrecisionPolicy). Per-param on-disk
+        # dtype is recorded so fp32 params (e.g. e_score_correction_bias) stay fp32 — casting those to
+        # bf16 would flip MoE routing. update_weight_utils reads model._fsdp_sync_orig_dtypes.
         if "glm4_moe_lite" in str(getattr(self.hf_config, "model_type", "") or "").lower():
             orig_dtypes = {name: p.dtype for name, p in model.state_dict().items()}
             model = model.to(torch.float32)

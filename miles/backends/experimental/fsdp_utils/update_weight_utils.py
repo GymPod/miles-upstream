@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # (weight_bridge.py): per-model-type transforms rewrite the streamed (name, tensor) into what
 # the SGLang loader expects. E.g. transformers>=5.6 stores qwen3_moe experts as one batched
 # tensor but SGLang wants per-expert names; qwen3_5_moe consumes the batched layout as-is, so it
-# registers no transform and streams verbatim. See DESIGN_NOTES "WeightBridge" for the rationale.
+# registers no transform and streams verbatim.
 from .weight_bridge import _qwen3_moe_expand, get_param_transform
 
 

@@ -184,7 +184,7 @@ def _is_gated_deltanet(hf_config) -> bool:
 class ModelPatchHook:
     """A config-time HF-compat patch: an ``applies_to`` predicate + an ``apply`` action.
 
-    Makes the per-arch dispatch a first-class registry (DESIGN_NOTES ModelPatchRegistry / v2-FIX-4)
+    Makes the per-arch dispatch a first-class registry
     instead of a hardcoded ``if _is_gated_deltanet(...)`` chain. New archs register a hook rather than
     editing ``apply_hf_compat_patches``. ``applies_to``/``apply`` both take the hf_config (or None);
     self-gating checks (fp8 fail-fast, DSA warn) use ``applies_to=_has_config`` and gate internally.

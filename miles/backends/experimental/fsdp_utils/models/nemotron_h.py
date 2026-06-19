@@ -9,11 +9,10 @@ Mamba2 and attention layers, and BOTH are stateful across the packed row:
     ``cache_position`` and production passes ``attention_mask=None``), so they attend across documents.
 Both must reset per document, exactly like the qwen3_5_moe GatedDeltaNet packing fix (which reset both
 the stateful op and attention). Resetting only ONE pathway is *worse* than resetting neither — the two
-become inconsistent (measured: stock-both-bleed 0.069, mamba-only-reset 0.565, full fix 0.006 vs the
-0.006 per-document floor, at production 140-short-doc scale). This packed-doc bleed is the dominant
-cause of the nemotron FSDP train/rollout logprob gap (~0.045 -> matches Megatron ~0.008 once fixed).
+become inconsistent. This packed-doc bleed is the dominant cause of the nemotron FSDP train/rollout
+logprob gap.
 
-The fix (offline-verified at production scale): derive per-document boundaries from the packed
+The fix: derive per-document boundaries from the packed
 ``position_ids`` (which reset to 0 at each document start) and
   * feed ``seq_idx`` to the Mamba mixer's ``causal_conv1d_fn`` + ``mamba_chunk_scan_combined`` (run the
     stock un-fused branch so both kernels see it; the fully-fused kernel can't consume seq_idx);

@@ -9,9 +9,9 @@ over the whole packed row without any sequence boundaries:
   * the ``causal_conv1d`` short convolution.
 
 Both bleed across document boundaries, so every token after the first packed document
-gets a wrong hidden state -> the train/rollout logprob abs-diff inflates from ~0.015 to
-~0.07. (Megatron passes cu_seqlens to its GDN and stays ~0.02; the SGLang rollout runs
-each sequence separately, so it has no bleed -- the FSDP train side is the odd one out.)
+gets a wrong hidden state -> the train/rollout logprob abs-diff inflates. (The SGLang
+rollout runs each sequence separately, so it has no bleed -- the FSDP train side is the
+odd one out; Megatron passes cu_seqlens to its GDN and resets per document.)
 
 Fix (explicit, no global/thread-local state): the decoder-layer forward already receives
 the packed ``position_ids``; it derives ``cu_seqlens`` (recurrence) and ``seq_idx`` (conv)
