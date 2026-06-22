@@ -1162,6 +1162,30 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--opd-teacher-urls",
+                type=str,
+                nargs="+",
+                default=None,
+                metavar="NAME=URL",
+                help=(
+                    "Multi-teacher routing map for --opd-type=sglang, e.g. "
+                    "--opd-teacher-urls math=http://h1:30001/generate code=http://h2:30002/generate. "
+                    "Each sample is routed to the teacher named by "
+                    "sample.metadata[--opd-teacher-key]; the reserved name 'default' is the "
+                    "fallback for samples with a missing or unknown name. When unset, all "
+                    "samples are scored by the single teacher at --rm-url (original behavior)."
+                ),
+            )
+            parser.add_argument(
+                "--opd-teacher-key",
+                type=str,
+                default="opd_teacher",
+                help=(
+                    "Sample metadata key holding the teacher name used for --opd-teacher-urls "
+                    "routing. Populated from the dataset's metadata column (see --metadata-key)."
+                ),
+            )
+            parser.add_argument(
                 "--opd-teacher-load",
                 type=str,
                 default=None,
@@ -2112,6 +2136,13 @@ def miles_validate_args(args):
             raise ValueError("--opd-log-prob-top-k must be non-negative.")
         if args.opd_log_prob_top_k > 0 and args.opd_type != "sglang":
             raise ValueError("--opd-log-prob-top-k is currently supported only with --opd-type=sglang.")
+        if args.opd_teacher_urls:
+            if args.opd_type != "sglang":
+                raise ValueError("--opd-teacher-urls is only supported with --opd-type=sglang.")
+            # Local import to keep miles.utils free of rollout imports at module load.
+            from miles.rollout.on_policy_distillation import parse_teacher_urls
+
+            parse_teacher_urls(args.opd_teacher_urls)  # fail fast on malformed/duplicate entries
 
         if args.opd_type == "megatron":
             if args.opd_teacher_load is None:
@@ -2138,6 +2169,8 @@ def miles_validate_args(args):
     else:
         if args.opd_teacher_load is not None:
             raise ValueError("--opd-teacher-load is set but --use-opd is not enabled. Please add --use-opd flag.")
+        if args.opd_teacher_urls:
+            raise ValueError("--opd-teacher-urls is set but --use-opd is not enabled. Please add --use-opd flag.")
 
     # TODO: During loading, we need to set the start_rollout_id here.
     if args.megatron_to_hf_mode == "bridge":
