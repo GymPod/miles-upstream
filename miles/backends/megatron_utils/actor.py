@@ -260,7 +260,6 @@ class MegatronTrainRayActor(TrainRayActor):
         self,
         data_iterator: list[DataIterator],
         num_microbatches: list[int],
-        rollout_id: int,
         store_prefix: str = "",
     ) -> dict[str, list[torch.Tensor]]:
 
@@ -271,7 +270,6 @@ class MegatronTrainRayActor(TrainRayActor):
                 self.model,
                 data_iterator,
                 num_microbatches,
-                rollout_id=rollout_id,
                 store_prefix=store_prefix,
             )
 
@@ -307,7 +305,6 @@ class MegatronTrainRayActor(TrainRayActor):
                 self.model,
                 data_iterator,
                 num_microbatches,
-                rollout_id=rollout_id,
             )
         )
 
@@ -361,7 +358,6 @@ class MegatronTrainRayActor(TrainRayActor):
                         self.compute_log_prob(
                             data_iterator,
                             num_microbatches,
-                            rollout_id=rollout_id,
                             store_prefix="ref_",
                         )
                     )
@@ -373,7 +369,6 @@ class MegatronTrainRayActor(TrainRayActor):
                         self.compute_log_prob(
                             data_iterator,
                             num_microbatches,
-                            rollout_id=rollout_id,
                             store_prefix="teacher_",
                         )
                     )
@@ -389,7 +384,6 @@ class MegatronTrainRayActor(TrainRayActor):
                         self.compute_log_prob(
                             data_iterator,
                             num_microbatches,
-                            rollout_id=rollout_id,
                             store_prefix="",
                         )
                     )
