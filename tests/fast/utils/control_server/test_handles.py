@@ -7,6 +7,9 @@ import pytest
 from miles.utils.control_server.handles import _ActorCellHandle, _RolloutCellHandle
 
 from .conftest import MockRayTrainCell, MockRolloutManager, make_mock_group
+from miles.ray.train.group import RayTrainGroup
+from miles.utils.control_server.handles import _CellHandle
+from miles.utils.test_utils.fault_injector import FailureMode
 
 
 class TestActorCellHandle:
@@ -115,11 +118,6 @@ class TestRolloutCellHandle:
         handle = _RolloutCellHandle(rollout_manager=object(), cell_index=0)
         assert handle.cell_type == "rollout"
         assert handle.cell_id == "rollout-0"
-
-
-from miles.ray.train.group import RayTrainGroup
-from miles.utils.control_server.handles import _CellHandle
-from miles.utils.test_utils.fault_injector import FailureMode
 
 
 class _FakeRemoteMethod:

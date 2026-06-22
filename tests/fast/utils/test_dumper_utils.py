@@ -6,6 +6,7 @@ import pytest
 
 from miles.utils import dumper_utils
 from miles.utils.dumper_utils import DumperMegatronUtil, DumperPhase
+import logging
 
 
 class TestWrapForwardStepWithStepping:
@@ -176,9 +177,6 @@ class TestBarrierAfterDumpDirCleanup:
             dumper_utils._barrier_after_dump_dir_cleanup()
 
         group.barrier.assert_called_once()
-
-
-import logging
 
 
 class TestCleanupDumpDir:

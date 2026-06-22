@@ -2,6 +2,10 @@ import pytest
 import ray
 
 from tests.fast.ray.train.conftest import make_alive_cell, make_cell, make_indep_dp_info
+import asyncio
+import logging
+from types import SimpleNamespace
+from miles.ray.train import cell as cell_module
 
 pytestmark = pytest.mark.asyncio
 
@@ -362,13 +366,6 @@ class TestFullLifecycle:
         assert cell.is_alive
         assert cell.indep_dp_info.quorum_id == 2
         assert cell.indep_dp_info.alive_size == 2
-
-
-import asyncio
-import logging
-from types import SimpleNamespace
-
-from miles.ray.train import cell as cell_module
 
 
 def _make_coro_factory(behavior):

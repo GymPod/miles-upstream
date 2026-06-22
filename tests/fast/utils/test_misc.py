@@ -3,6 +3,8 @@ import os
 import pytest
 
 from miles.utils.misc import FunctionRegistry, function_registry, load_function
+import logging
+from miles.utils.misc import filter_keys
 
 
 def _fn_a():
@@ -57,11 +59,6 @@ class TestLoadFunction:
         with function_registry.temporary("os.path.join", _fn_b):
             assert load_function("os.path.join") is _fn_b
         assert load_function("os.path.join") is os.path.join
-
-
-import logging
-
-from miles.utils.misc import filter_keys
 
 
 class TestFilterKeys:
