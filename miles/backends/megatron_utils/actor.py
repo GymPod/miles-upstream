@@ -547,7 +547,7 @@ class MegatronTrainRayActor(TrainRayActor):
         if self.args.offload_train:
             reload_process_groups()
 
-        if has_new_engines or not self.weight_updater.is_rollout_engines_fresh():
+        if has_new_engines:
             self.weight_updater.connect_rollout_engines(
                 rollout_engines,
                 rollout_engine_lock,
@@ -671,4 +671,3 @@ class MegatronTrainRayActor(TrainRayActor):
             megatron_rank=dist.get_rank(),
             megatron_world_size=dist.get_world_size(),
         )
-        self.weight_updater.mark_engine_connection_stale()
