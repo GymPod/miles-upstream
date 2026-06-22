@@ -67,14 +67,7 @@ def init(
     indep_dp_info: IndepDPInfo | None = None,
 ):
     if indep_dp_info is None:
-        indep_dp_info = IndepDPInfo(
-            cell_index=0,
-            num_cells=1,
-            alive_rank=0,
-            alive_size=1,
-            quorum_id=0,
-            alive_cell_indices=[0],
-        )
+        indep_dp_info = IndepDPInfo.create_trivial()
 
     set_args(args)
     if args.enable_experimental:

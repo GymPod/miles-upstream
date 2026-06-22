@@ -64,14 +64,7 @@ class RayTrainGroup:
         """
         Allocate GPU resourced and initialize model, optimizer, local ckpt, etc.
         """
-        indep_dp_info = IndepDPInfo(
-            cell_index=0,
-            num_cells=1,
-            alive_rank=0,
-            alive_size=1,
-            quorum_id=0,
-            alive_cell_indices=[0],
-        )
+        indep_dp_info = IndepDPInfo.create_trivial()
         return await self._broadcast(
             "init",
             self.args,

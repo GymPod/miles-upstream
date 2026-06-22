@@ -32,7 +32,7 @@ def main(args):
     megatron_utils.init(
         args,
         indep_dp_store_addr=None,
-        indep_dp_info=IndepDPInfo(cell_index=0, num_cells=1, alive_rank=0, alive_size=1, quorum_id=0),
+        indep_dp_info=IndepDPInfo.create_trivial(),
     )
 
     pp_size = mpu.get_pipeline_model_parallel_world_size()
