@@ -64,7 +64,8 @@ async def configure_sglang(args: Namespace) -> None:
 
     engines_dir: Path = _get_dir(args) / "engines"
     _cleanup_dump_dir(engines_dir, indep_dp_rank=0)
-    _barrier_after_dump_dir_cleanup()
+    if not enable_experimental_ft_trainer() and dist.is_initialized():
+        dist.barrier()
 
     coros = []
     for i, url in enumerate(worker_urls):
