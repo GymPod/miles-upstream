@@ -73,9 +73,8 @@ class UpdateWeightFromDistributed(DistBucketedWeightUpdateMixin):
             self._group_name = f"miles-pp_{pp_rank}"
 
         if self._is_source:
-            disconnect_rollout_engines_from_distributed(
-                self.args, self._group_name, self._model_update_groups, self.rollout_engines
-            )
+            if (g := self._model_update_groups) is not None:
+                disconnect_rollout_engines_from_distributed(self.args, self._group_name, g, self.rollout_engines)
             self._model_update_groups = connect_rollout_engines_from_distributed(
                 self.args, self._group_name, rollout_engines
             )
@@ -196,8 +195,7 @@ def disconnect_rollout_engines_from_distributed(args, group_name, model_update_g
     Destroy NCCL on training and engines.
     """
     refs = [engine.destroy_weights_update_group.remote(group_name) for engine in rollout_engines]
-    if model_update_groups is not None:
-        dist.destroy_process_group(model_update_groups)
+    dist.destroy_process_group(model_update_groups)
     ray.get(refs)
 
 
