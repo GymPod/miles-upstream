@@ -1,4 +1,5 @@
 import os
+import types
 
 import ray
 from ray.util.placement_group import PlacementGroup
@@ -58,11 +59,17 @@ def allocate_gpus_for_actor(
 
         actor_impl = FSDPTrainRayActor
 
-    TrainRayActor = ray.remote(
-        num_gpus=1,
-        runtime_env={"env_vars": env_vars},
-        concurrency_groups={"heartbeat_status": 1, "default": 1, "fault_injector": 1},
-    )(actor_impl)
+    if args.use_fault_tolerance:
+        TrainRayActor = ray.remote(
+            num_gpus=1,
+            runtime_env={"env_vars": env_vars},
+            concurrency_groups={"heartbeat_status": 1, "default": 1, "fault_injector": 1},
+        )(actor_impl)
+    else:
+        TrainRayActor = ray.remote(
+            num_gpus=1,
+            runtime_env={"env_vars": env_vars},
+        )(_strip_concurrency_group_markers(actor_impl))
 
     # Create worker actors
     actor_handles = []
@@ -90,3 +97,17 @@ def allocate_gpus_for_actor(
         actor_handles.append(actor)
 
     return actor_handles
+
+
+def _strip_concurrency_group_markers(actor_impl: type) -> type:
+    overrides: dict[str, object] = {}
+    for klass in actor_impl.__mro__:
+        for name, fn in vars(klass).items():
+            if name in overrides or getattr(fn, "__ray_concurrency_group__", None) is None:
+                continue
+            plain = types.FunctionType(fn.__code__, fn.__globals__, fn.__name__, fn.__defaults__, fn.__closure__)
+            plain.__qualname__ = fn.__qualname__
+            plain.__kwdefaults__ = fn.__kwdefaults__
+            plain.__annotations__ = dict(fn.__annotations__)
+            overrides[name] = plain
+    return type(actor_impl.__name__, (actor_impl,), overrides)
