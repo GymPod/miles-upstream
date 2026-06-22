@@ -182,3 +182,135 @@ class TestReadEvents:
 
         events = read_events(tmp_path)
         assert len(events) == 3
+
+
+from miles.utils.event_logger.logger import event_logger_context
+from miles.utils.event_logger.models import MetricEvent
+
+
+class TestWithContext:
+    def test_injects_context_fields_into_logged_event(self, tmp_path: Path) -> None:
+        """Fields from with_context are merged into events logged inside the scope."""
+        logger = _make_logger(tmp_path)
+        with logger.with_context({"rollout_id": 5, "attempt": 7}):
+            logger.log(MetricEvent, dict(metrics={"loss": 1.0}))
+        logger.close()
+
+        parsed = json.loads((tmp_path / "events.jsonl").read_text().strip())
+        assert parsed["rollout_id"] == 5
+        assert parsed["attempt"] == 7
+        assert parsed["metrics"] == {"loss": 1.0}
+
+    def test_context_not_applied_outside_scope(self, tmp_path: Path) -> None:
+        """Events logged after the context scope exits do not carry context fields."""
+        logger = _make_logger(tmp_path)
+        with logger.with_context({"rollout_id": 5}):
+            pass
+        logger.log(MetricEvent, dict(metrics={}))
+        logger.close()
+
+        parsed = json.loads((tmp_path / "events.jsonl").read_text().strip())
+        assert parsed["rollout_id"] is None
+
+    def test_nesting_overrides_then_restores(self, tmp_path: Path) -> None:
+        """A nested with_context overrides outer fields, then restores them on exit."""
+        logger = _make_logger(tmp_path)
+        with logger.with_context({"rollout_id": 1, "attempt": 1}):
+            with logger.with_context({"attempt": 2}):
+                logger.log(MetricEvent, dict(metrics={"k": "inner"}))
+            logger.log(MetricEvent, dict(metrics={"k": "outer"}))
+        logger.close()
+
+        lines = (tmp_path / "events.jsonl").read_text().strip().split("\n")
+        inner = json.loads(lines[0])
+        outer = json.loads(lines[1])
+        assert (inner["rollout_id"], inner["attempt"]) == (1, 2)
+        assert (outer["rollout_id"], outer["attempt"]) == (1, 1)
+
+    def test_context_var_empty_after_exit(self, tmp_path: Path) -> None:
+        """After all with_context scopes exit the underlying contextvar resolves to empty."""
+        logger = _make_logger(tmp_path)
+        with logger.with_context({"rollout_id": 1}):
+            with logger.with_context({"attempt": 2}):
+                pass
+        assert logger._context_var.get({}) == {}
+
+
+class TestEventLoggerContextDecorator:
+    def test_uninitialized_runs_without_context(self) -> None:
+        """When the logger is uninitialized the wrapper invokes the method directly."""
+        set_event_logger(None)
+        calls: list[tuple] = []
+
+        @event_logger_context(lambda obj, x: {"rollout_id": x})
+        def method(obj: object, x: int) -> int:
+            calls.append((obj, x))
+            return x * 2
+
+        try:
+            assert method(object(), 3) == 6
+            assert len(calls) == 1
+        finally:
+            set_event_logger(None)
+
+    def test_ctx_fn_not_called_when_uninitialized(self) -> None:
+        """ctx_fn is skipped entirely when the event logger is not initialized."""
+        set_event_logger(None)
+        ctx_calls: list[int] = []
+
+        def ctx_fn(obj: object, x: int) -> dict:
+            ctx_calls.append(x)
+            return {"rollout_id": x}
+
+        @event_logger_context(ctx_fn)
+        def method(obj: object, x: int) -> int:
+            return x
+
+        try:
+            assert method(object(), 9) == 9
+            assert ctx_calls == []
+        finally:
+            set_event_logger(None)
+
+    def test_initialized_injects_fields_from_method_args(self, tmp_path: Path) -> None:
+        """When initialized, ctx_fn output is injected into events logged by the method."""
+        logger = _make_logger(tmp_path)
+        set_event_logger(logger)
+
+        class Worker:
+            @event_logger_context(lambda self, rollout_id: {"rollout_id": rollout_id})
+            def run(self, rollout_id: int) -> None:
+                get_event_logger().log(MetricEvent, dict(metrics={"ok": True}))
+
+        try:
+            Worker().run(42)
+            logger.close()
+        finally:
+            set_event_logger(None)
+
+        parsed = json.loads((tmp_path / "events.jsonl").read_text().strip())
+        assert parsed["rollout_id"] == 42
+
+    def test_ctx_fn_receives_method_args(self, tmp_path: Path) -> None:
+        """ctx_fn is called with exactly the same positional/keyword args as the method."""
+        logger = _make_logger(tmp_path)
+        set_event_logger(logger)
+        seen: list[tuple] = []
+
+        def ctx_fn(obj: object, rollout_id: int, *, attempt: int) -> dict:
+            seen.append((rollout_id, attempt))
+            return {"rollout_id": rollout_id, "attempt": attempt}
+
+        @event_logger_context(ctx_fn)
+        def method(obj: object, rollout_id: int, *, attempt: int) -> None:
+            get_event_logger().log(MetricEvent, dict(metrics={}))
+
+        try:
+            method(object(), 3, attempt=8)
+            logger.close()
+        finally:
+            set_event_logger(None)
+
+        assert seen == [(3, 8)]
+        parsed = json.loads((tmp_path / "events.jsonl").read_text().strip())
+        assert (parsed["rollout_id"], parsed["attempt"]) == (3, 8)

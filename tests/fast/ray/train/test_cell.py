@@ -362,3 +362,126 @@ class TestFullLifecycle:
         assert cell.is_alive
         assert cell.indep_dp_info.quorum_id == 2
         assert cell.indep_dp_info.alive_size == 2
+
+
+import asyncio
+import logging
+from types import SimpleNamespace
+
+from miles.ray.train import cell as cell_module
+
+
+def _make_coro_factory(behavior):
+    async def _coro():
+        return behavior()
+
+    return _coro
+
+
+def _raise_factory(exc):
+    async def _coro():
+        raise exc
+
+    return _coro
+
+
+class _FakeReadyMethod:
+    def __init__(self, coro_factories):
+        self._coro_factories = list(coro_factories)
+        self.call_count = 0
+
+    def remote(self):
+        self.call_count += 1
+        index = min(self.call_count - 1, len(self._coro_factories) - 1)
+        return self._coro_factories[index]()
+
+
+def _make_fake_handle(coro_factories):
+    ready = _FakeReadyMethod(coro_factories)
+    handle = SimpleNamespace()
+    setattr(handle, "__ray_ready__", ready)
+    return handle, ready
+
+
+def _ray_actor_error():
+    return ray.exceptions.RayActorError()
+
+
+def _ray_task_error():
+    return ray.exceptions.RayTaskError.__new__(ray.exceptions.RayTaskError)
+
+
+class TestConfirmActorDead:
+    async def test_returns_immediately_when_actor_error_on_first_probe(self):
+        """A dead actor whose first probe raises RayActorError is confirmed dead after one probe."""
+        handle, ready = _make_fake_handle([_raise_factory(_ray_actor_error())])
+
+        await cell_module._confirm_actor_dead(handle)
+
+        assert ready.call_count == 1
+
+    async def test_returns_immediately_when_task_error_on_first_probe(self):
+        """RayTaskError on the first probe is also treated as confirmed actor death."""
+        handle, ready = _make_fake_handle([_raise_factory(_ray_task_error())])
+
+        await cell_module._confirm_actor_dead(handle)
+
+        assert ready.call_count == 1
+
+    async def test_retries_after_timeout_then_confirms_death(self, monkeypatch):
+        """A probe timeout is tolerated; the loop retries and confirms death on the next probe."""
+        slept = []
+
+        async def _noop_sleep(seconds):
+            slept.append(seconds)
+
+        monkeypatch.setattr(cell_module.asyncio, "sleep", _noop_sleep)
+        monkeypatch.setattr(
+            cell_module, "time", SimpleNamespace(monotonic=_make_monotonic([0.0, 1.0]))
+        )
+
+        handle, ready = _make_fake_handle(
+            [
+                _raise_factory(asyncio.TimeoutError()),
+                _raise_factory(_ray_actor_error()),
+            ]
+        )
+
+        await cell_module._confirm_actor_dead(handle)
+
+        assert ready.call_count == 2
+        assert slept == [1.0]
+
+    async def test_deadline_reached_returns_and_logs_error(self, monkeypatch, caplog):
+        """When the timeout deadline is exceeded after a hung probe, it returns and logs an ERROR."""
+        async def _noop_sleep(seconds):
+            return None
+
+        monkeypatch.setattr(cell_module.asyncio, "sleep", _noop_sleep)
+        monkeypatch.setattr(
+            cell_module, "time", SimpleNamespace(monotonic=_make_monotonic([0.0, 200.0]))
+        )
+
+        handle, ready = _make_fake_handle([_raise_factory(asyncio.TimeoutError())])
+
+        with caplog.at_level(logging.ERROR, logger="miles.ray.train.cell"):
+            await cell_module._confirm_actor_dead(handle)
+
+        assert ready.call_count == 1
+        error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(error_records) == 1
+        assert "Timed out after 120s confirming actor death" in error_records[0].getMessage()
+
+
+def _make_monotonic(values):
+    seq = list(values)
+    state = {"i": 0}
+
+    def _monotonic():
+        i = state["i"]
+        if i < len(seq):
+            state["i"] = i + 1
+            return seq[i]
+        return seq[-1]
+
+    return _monotonic

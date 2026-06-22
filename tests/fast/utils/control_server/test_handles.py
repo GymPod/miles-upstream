@@ -115,3 +115,117 @@ class TestRolloutCellHandle:
         handle = _RolloutCellHandle(rollout_manager=object(), cell_index=0)
         assert handle.cell_type == "rollout"
         assert handle.cell_id == "rollout-0"
+
+
+from miles.ray.train.group import RayTrainGroup
+from miles.utils.control_server.handles import _CellHandle
+from miles.utils.test_utils.fault_injector import FailureMode
+
+
+class _FakeRemoteMethod:
+    def __init__(self) -> None:
+        self.remote_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def remote(self, *args: object, **kwargs: object) -> None:
+        self.remote_calls.append((args, kwargs))
+
+
+class _FakeActor:
+    def __init__(self) -> None:
+        self.inject_fault = _FakeRemoteMethod()
+
+
+class _FakeInjectCell:
+    def __init__(self, *, is_alive: bool = True, num_actors: int = 2) -> None:
+        self._is_alive = is_alive
+        self._actor = _FakeActor()
+        self._num_actors = num_actors
+
+    @property
+    def is_alive(self) -> bool:
+        return self._is_alive
+
+    def _get_actor_handles(self) -> list[_FakeActor]:
+        return [self._actor for _ in range(self._num_actors)]
+
+
+def _make_inject_group(cell: _FakeInjectCell) -> object:
+    group = object.__new__(RayTrainGroup)
+    group._cells = [cell]
+    return group
+
+
+class _ConcreteCellHandle(_CellHandle):
+    @property
+    def cell_type(self) -> str:
+        return "fake"
+
+    @property
+    def cell_index(self) -> int:
+        return 0
+
+    async def get_cell(self) -> object:
+        raise NotImplementedError
+
+    async def suspend(self) -> None:
+        raise NotImplementedError
+
+    async def resume(self) -> None:
+        raise NotImplementedError
+
+
+class TestActorCellHandleInjectFault:
+    @pytest.mark.asyncio
+    async def test_inject_fault_calls_actor_with_mode_value(self) -> None:
+        """inject_fault forwards mode.value to the selected actor's remote handle."""
+        cell = _FakeInjectCell(is_alive=True, num_actors=2)
+        group = _make_inject_group(cell)
+        handle = _ActorCellHandle(group=group, cell_index=0)
+
+        await handle.inject_fault(mode=FailureMode.SIGKILL, sub_index=1)
+
+        assert cell._actor.inject_fault.remote_calls == [(("sigkill",), {})]
+
+    @pytest.mark.asyncio
+    async def test_inject_fault_raises_when_cell_not_alive(self) -> None:
+        """inject_fault raises RuntimeError when the target cell is not alive."""
+        cell = _FakeInjectCell(is_alive=False, num_actors=2)
+        group = _make_inject_group(cell)
+        handle = _ActorCellHandle(group=group, cell_index=0)
+
+        with pytest.raises(RuntimeError, match="not alive"):
+            await handle.inject_fault(mode=FailureMode.SIGKILL, sub_index=0)
+
+        assert cell._actor.inject_fault.remote_calls == []
+
+    @pytest.mark.asyncio
+    async def test_inject_fault_raises_index_error_when_sub_index_out_of_range(self) -> None:
+        """inject_fault raises IndexError when sub_index exceeds the actor count."""
+        cell = _FakeInjectCell(is_alive=True, num_actors=2)
+        group = _make_inject_group(cell)
+        handle = _ActorCellHandle(group=group, cell_index=0)
+
+        with pytest.raises(IndexError, match="out of range"):
+            await handle.inject_fault(mode=FailureMode.SIGKILL, sub_index=2)
+
+        assert cell._actor.inject_fault.remote_calls == []
+
+    @pytest.mark.asyncio
+    async def test_inject_fault_raises_index_error_when_sub_index_negative(self) -> None:
+        """inject_fault raises IndexError when sub_index is negative."""
+        cell = _FakeInjectCell(is_alive=True, num_actors=2)
+        group = _make_inject_group(cell)
+        handle = _ActorCellHandle(group=group, cell_index=0)
+
+        with pytest.raises(IndexError, match="out of range"):
+            await handle.inject_fault(mode=FailureMode.SIGKILL, sub_index=-1)
+
+
+class TestBaseCellHandleInjectFault:
+    @pytest.mark.asyncio
+    async def test_base_inject_fault_raises_not_implemented(self) -> None:
+        """The base _CellHandle.inject_fault raises NotImplementedError naming the subclass."""
+        handle = _ConcreteCellHandle()
+
+        with pytest.raises(NotImplementedError, match="_ConcreteCellHandle does not support fault injection"):
+            await handle.inject_fault(mode=FailureMode.SIGKILL, sub_index=0)

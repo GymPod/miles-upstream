@@ -176,3 +176,77 @@ class TestBarrierAfterDumpDirCleanup:
             dumper_utils._barrier_after_dump_dir_cleanup()
 
         group.barrier.assert_called_once()
+
+
+import logging
+
+
+class TestCleanupDumpDir:
+    """Best-effort dump-dir wipe gated on global rank 0 + indep-DP (cell) rank 0."""
+
+    def test_rank0_cell0_existing_dir_is_removed(self, tmp_path: Path) -> None:
+        """Global rank 0 of cell 0 deletes the dump dir when it exists."""
+        dump_dir = tmp_path / "fwd_bwd"
+        dump_dir.mkdir()
+        (dump_dir / "stale.pt").write_text("stale")
+
+        with patch("miles.utils.dumper_utils._get_rank", return_value=0):
+            dumper_utils._cleanup_dump_dir(dump_dir, indep_dp_rank=0)
+
+        assert not dump_dir.exists()
+
+    def test_rmtree_oserror_is_swallowed_and_warns(self, tmp_path: Path, caplog) -> None:
+        """A failing rmtree (e.g. NFS stale handle) is logged as a warning and does not propagate."""
+        dump_dir = tmp_path / "fwd_bwd"
+        dump_dir.mkdir()
+
+        with (
+            patch("miles.utils.dumper_utils._get_rank", return_value=0),
+            patch("miles.utils.dumper_utils.shutil.rmtree", side_effect=OSError("Directory not empty")),
+            caplog.at_level(logging.WARNING, logger="miles.utils.dumper_utils"),
+        ):
+            dumper_utils._cleanup_dump_dir(dump_dir, indep_dp_rank=0)
+
+        assert any("dump dir cleanup failed" in record.message for record in caplog.records)
+        assert dump_dir.exists()
+
+    def test_nonzero_rank_does_not_delete(self, tmp_path: Path) -> None:
+        """A non-zero global rank never calls rmtree, so the dir survives for rank 0 to own."""
+        dump_dir = tmp_path / "fwd_bwd"
+        dump_dir.mkdir()
+
+        with (
+            patch("miles.utils.dumper_utils._get_rank", return_value=1),
+            patch("miles.utils.dumper_utils.shutil.rmtree") as mock_rmtree,
+        ):
+            dumper_utils._cleanup_dump_dir(dump_dir, indep_dp_rank=0)
+
+        mock_rmtree.assert_not_called()
+        assert dump_dir.exists()
+
+    def test_nonzero_indep_dp_rank_does_not_delete(self, tmp_path: Path) -> None:
+        """Only cell 0 (indep_dp_rank 0) deletes; other cells leave the shared dir intact."""
+        dump_dir = tmp_path / "fwd_bwd"
+        dump_dir.mkdir()
+
+        with (
+            patch("miles.utils.dumper_utils._get_rank", return_value=0),
+            patch("miles.utils.dumper_utils.shutil.rmtree") as mock_rmtree,
+        ):
+            dumper_utils._cleanup_dump_dir(dump_dir, indep_dp_rank=1)
+
+        mock_rmtree.assert_not_called()
+        assert dump_dir.exists()
+
+    def test_missing_dir_is_noop(self, tmp_path: Path) -> None:
+        """When the dump dir does not exist, cleanup is a silent no-op (no rmtree, no error)."""
+        dump_dir = tmp_path / "does_not_exist"
+
+        with (
+            patch("miles.utils.dumper_utils._get_rank", return_value=0),
+            patch("miles.utils.dumper_utils.shutil.rmtree") as mock_rmtree,
+        ):
+            dumper_utils._cleanup_dump_dir(dump_dir, indep_dp_rank=0)
+
+        mock_rmtree.assert_not_called()
+        assert not dump_dir.exists()
