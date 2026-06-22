@@ -15,7 +15,6 @@ import torch.distributed as dist
 from sglang.srt.debug_utils.dumper import DumperConfig, _get_rank, dumper
 
 from miles.backends.training_utils.parallel import get_parallel_state
-from miles.utils.environ import enable_experimental_ft_trainer
 from miles.utils.process_group_utils import GeneralPGUtil
 from miles.utils.structured_log import log_structured
 
@@ -63,8 +62,7 @@ async def configure_sglang(args: Namespace) -> None:
     overrides = _get_phase_override_configs(args, DumperPhase.INFERENCE)
 
     engines_dir: Path = _get_dir(args) / "engines"
-    indep_dp_rank = 0 if enable_experimental_ft_trainer() else None
-    _cleanup_dump_dir(engines_dir, indep_dp_rank=indep_dp_rank)
+    _cleanup_dump_dir(engines_dir, indep_dp_rank=0)
 
     coros = []
     for i, url in enumerate(worker_urls):
@@ -109,19 +107,15 @@ class DumperMegatronUtil:
         if not self.enabled:
             return
 
-        ft = enable_experimental_ft_trainer()
         extracted_model = self._extract_model(model)
         get_grad: Callable[[torch.nn.Parameter], torch.Tensor | None] | None = None
         if self.phase is DumperPhase.FWD_BWD and self.overrides.get("enable_model_grad"):
             _log_model_grad_coverage(extracted_model)
-            if ft:
-                get_grad = _build_full_grad_getter(extracted_model)
-        if ft:
-            # Weights/grads are a once-per-rollout end-state, so pin them to step 0 instead of
-            # the running per-microbatch step.
-            dumper.dump_model(extracted_model, get_grad=get_grad, step=0)
-        else:
-            dumper.dump_model(extracted_model)
+            get_grad = _build_full_grad_getter(extracted_model)
+
+        # Weights/grads are a once-per-rollout end-state, so pin them to step 0 instead of
+        # the running per-microbatch step.
+        dumper.dump_model(extracted_model, get_grad=get_grad, step=0)
         dumper.step()
         dumper.configure(enable=False)
 
@@ -145,36 +139,33 @@ class DumperMegatronUtil:
         if not overrides.get("enable"):
             return False
 
-        ft = enable_experimental_ft_trainer()
-        exp_name = f"{phase.value}/rollout_{rollout_id}" if ft else phase.value
+        exp_name = f"{phase.value}/rollout_{rollout_id}"
         merged = {
             "dir": str(_get_dir(args)),
             "exp_name": exp_name,
+            "enable_output_console": False,
             **overrides,
         }
 
-        if ft:
+        # Only write dump files on effective DP rank 0 (covers both intra-DP
+        # and indep-DP). Other DP ranks still participate in dumper collectives
+        # (barrier, broadcast, allgather) but don't produce output files.
+        # TODO: optimize — non-DP-rank-0 ranks currently run full dumper logic
+        # (forward hooks, model iteration) without producing output.
+        if get_parallel_state().effective_dp.rank != 0:
+            merged["enable_output_file"] = False
             merged["enable_output_console"] = False
-            # Only write dump files on effective DP rank 0 (covers both intra-DP
-            # and indep-DP). Other DP ranks still participate in dumper collectives
-            # (barrier, broadcast, allgather) but don't produce output files.
-            # TODO: optimize — non-DP-rank-0 ranks currently run full dumper logic
-            # (forward hooks, model iteration) without producing output.
-            if get_parallel_state().effective_dp.rank != 0:
-                merged["enable_output_file"] = False
-                merged["enable_output_console"] = False
 
         full_config = DumperConfig(**merged)
         dumper.reset()
-        indep_dp_rank = get_parallel_state().indep_dp.rank if ft else None
-        if ft and rollout_id == 0:
-            # Wipe the whole phase dir only at run start (rollout 0). Gating on a
-            # per-process latch instead would make a respawned process re-wipe the
-            # phase dir mid-run, deleting dumps already written by surviving cells.
+        # Wipe the whole phase dir only at run start (rollout 0). Gating on a
+        # per-process latch instead would make a respawned process re-wipe the
+        # phase dir mid-run, deleting dumps already written by surviving cells.
+        indep_dp_rank = get_parallel_state().indep_dp.rank
+        if rollout_id == 0:
             _cleanup_dump_dir(Path(merged["dir"]) / phase.value, indep_dp_rank=indep_dp_rank)
         _cleanup_dump_dir(Path(merged["dir"]) / merged["exp_name"], indep_dp_rank=indep_dp_rank)
-        if ft:
-            _barrier_after_dump_dir_cleanup()
+        _barrier_after_dump_dir_cleanup()
         dumper.configure(**dataclasses.asdict(full_config))
         return True
 
@@ -270,26 +261,17 @@ def _wrap_forward_step_with_stepping(forward_step_func: Callable) -> Callable:
 # ------------------------------- Common -------------------------------------
 
 
-def _cleanup_dump_dir(dump_dir: Path, *, indep_dp_rank: int | None = None) -> None:
-    ft = enable_experimental_ft_trainer()
-    should_delete = _get_rank() == 0
-    if ft:
-        # Only cell 0's rank 0 deletes — avoids race when multiple cells' rank 0
-        # all see _get_rank()==0 and try to rmtree the same directory.
-        should_delete = should_delete and indep_dp_rank == 0
-    if should_delete and dump_dir.is_dir():
-        if ft:
-            # Best-effort: stale handles from a peer that crashed (NFS .nfsXXXX stubs)
-            # can make rmtree fail with "Directory not empty"; we don't want that to
-            # propagate up and mark the (healthy) cell as errored.
-            try:
-                shutil.rmtree(dump_dir)
-            except OSError:
-                logger.warning("dump dir cleanup failed; continuing", exc_info=True)
-        else:
+def _cleanup_dump_dir(dump_dir: Path, *, indep_dp_rank: int) -> None:
+    # Only cell 0's rank 0 deletes — avoids race when multiple cells' rank 0
+    # all see _get_rank()==0 and try to rmtree the same directory.
+    # Best-effort: stale handles from a peer that crashed (NFS .nfsXXXX stubs)
+    # can make rmtree fail with "Directory not empty"; we don't want that to
+    # propagate up and mark the (healthy) cell as errored.
+    if (_get_rank() == 0) and (indep_dp_rank == 0) and dump_dir.is_dir():
+        try:
             shutil.rmtree(dump_dir)
-    if not ft and dist.is_initialized():
-        dist.barrier()
+        except OSError:
+            logger.warning("dump dir cleanup failed; continuing", exc_info=True)
 
 
 def _barrier_after_dump_dir_cleanup() -> None:
