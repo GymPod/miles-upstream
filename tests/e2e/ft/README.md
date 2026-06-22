@@ -2,11 +2,9 @@
 
 ## Layout
 
-Each scenario's logic lives in a library module `conftest_ft/scenario_<scenario>.py`. CI
-runs it through thin **per-mode entry files** `test_trainer_ft_<scenario>_<mode>.py` — one
-mode each, registered with `register_cuda_ci(est_time=..., suite="stage-c-8-gpu-h200",
-labels=["ft"])`. The CUDA CI runner executes each entry as bare `python3 <file>` (exit code
-= pass/fail), so the entry just calls the scenario's `run_ci(mode)`.
+- Scenario logic lives in `conftest_ft/scenario_<name>.py`.
+- CI runs it via thin per-mode entry files `test_trainer_ft_<scenario>_<mode>.py`, each registered with `register_cuda_ci(est_time=..., suite="stage-c-8-gpu-h200", labels=["ft"])`.
+- The CUDA CI runner executes each entry as bare `python3 <file>` (exit code = pass/fail); the entry just calls the scenario's `run_ci(mode)`.
 
 | Scenario (`conftest_ft/scenario_*.py`) | Type | What it verifies |
 |------|------|-----------------|
@@ -18,9 +16,8 @@ labels=["ft"])`. The CUDA CI runner executes each entry as bare `python3 <file>`
 
 ## Mode Variants
 
-Each scenario runs with a `--mode`:
-
-All modes are **disaggregated** (training and rollout on separate nodes). Modes without rollout use debug rollout data.
+- Each scenario runs with a `--mode`.
+- All modes are **disaggregated** (training and rollout on separate nodes). Modes without rollout use debug rollout data.
 
 | Mode | Nodes | DP cells | Parallelism | Rollout | Model | Coverage |
 |------|-------|----------|-------------|---------|-------|----------|
@@ -31,88 +28,62 @@ All modes are **disaggregated** (training and rollout on separate nodes). Modes 
 | `dp2_cp2_real_rollout_dense` | 1 | 2 | CP2 | 4 engines × 1 GPU | dense Qwen3-0.6B | Real rollout under a fault + injection match guard (with_failure) |
 | `6node_dp4_cp2_tp2_pp2_ep2_etp2` | 4+2 | 4 | CP2 TP2 PP2 EP2 ETP2 | 2 engines × 8 GPU | full MoE | Large-scale, all parallelism |
 
-All scenarios use `--rollout-batch-size 32 --n-samples-per-prompt 8 --global-batch-size 256`
-(256 samples per rollout), which divides evenly across both 2 and 4 cells. Uneven sample
-distribution across replicas is **not** currently exercised by these tests.
-
-The 1-node modes use the truncated 5-layer MoE model (`Qwen3-30B-A3B-5layer`), except
-`dp2_cp2_real_rollout_dense`, which uses a small real dense model (`Qwen3-0.6B`) — see the
-`scenario_with_failure` definition for why the injection match guard requires it.
-
-Authorized CI skips (no entry file): `6node_dp4_cp2_tp2_pp2_ep2_etp2` (multi-node) and `with_failure × dp4_cp2`.
+- All scenarios use `--rollout-batch-size 32 --n-samples-per-prompt 8 --global-batch-size 256` (256 samples/rollout), which divides evenly across both 2 and 4 cells. Uneven sample distribution across replicas is **not** exercised.
+- 1-node modes use the 5-layer MoE (`Qwen3-30B-A3B-5layer`), except `dp2_cp2_real_rollout_dense` (dense `Qwen3-0.6B` — see `scenario_with_failure` for why).
+- Authorized CI skips (no entry file): `6node_dp4_cp2_tp2_pp2_ep2_etp2` (multi-node), `with_failure × dp4_cp2`.
 
 ## Running
 
 ### In CI
 
-The FT entries are gated on the `run-ci-ft` PR label (FT is expensive — it does not run on
-every PR). With that label set, every `test_trainer_ft_<scenario>_<mode>.py` runs on the
-`stage-c-8-gpu-h200` suite. To add a new `(scenario, mode)` to CI, add an entry file (copy
-an existing one and change `run_ci(...)`'s mode). To add a brand-new label, edit
-`tests/ci/labels.py` and create the matching `run-ci-<label>` GitHub label.
+- Gated on the `run-ci-ft` PR label (FT is expensive — not run on every PR). With the label set, every entry runs on `stage-c-8-gpu-h200`.
+- Add a `(scenario, mode)` to CI: copy an entry file, change `run_ci(...)`'s mode.
+- Add a new label: edit `tests/ci/labels.py` and create the matching `run-ci-<label>` GitHub label.
 
 ### Manually
 
-Set `PYTHONPATH` to the repo root (CI sets it automatically). Two ways:
+Set `PYTHONPATH` to the repo root (CI sets it automatically).
 
-1. One mode, exactly as CI runs it — invoke the entry file:
+- One mode, exactly as CI runs it — invoke the entry file:
 
-   ```bash
-   PYTHONPATH=. python tests/e2e/ft/test_trainer_ft_no_failure_dp2_cp2_tp2_ep2.py
-   ```
+  ```bash
+  PYTHONPATH=. python tests/e2e/ft/test_trainer_ft_no_failure_dp2_cp2_tp2_ep2.py
+  ```
 
-2. Any mode (incl. the authorized-skip ones) — invoke the scenario's typer app with a
-   subcommand:
+- Any mode (incl. authorized-skips) — invoke the scenario's typer app:
 
-   | subcommand | does |
-   |---|---|
-   | `run` | full pipeline: prepare + baseline + target + compare |
-   | `baseline` / `target` | run one side only (debugging) |
-   | `compare` | re-run comparison on existing dumps (no GPU) |
+  ```bash
+  PYTHONPATH=. python tests/e2e/ft/conftest_ft/scenario_<name>.py run --mode <mode>
+  ```
 
-   ```bash
-   PYTHONPATH=. python tests/e2e/ft/conftest_ft/scenario_<name>.py run --mode <mode>
-   ```
+  | subcommand | does |
+  |---|---|
+  | `run` | full pipeline: prepare + baseline + target + compare |
+  | `baseline` / `target` | run one side only (debugging) |
+  | `compare` | re-run comparison on existing dumps (no GPU) |
 
-   When debugging a failure, prefer the individual subcommands (with a shared `--dump-dir`,
-   and `--phase` for multi-phase scenarios) over `run`, so you only re-run the part you
-   changed and reuse what already passed — e.g. re-run just `compare` (no GPU) on existing
-   dumps, or re-run a single side / phase.
-
-   `scenario_ft_random` is non-comparison: only `run`, with `--seed` / `--num-steps` /
-   `--crash-probability`. `scenario_realistic_gsm8k` is likewise non-comparison (and has
-   no `--mode`): only `run`, with `--seed` / `--num-rollout` / `--crash-probability` /
-   `--metric-threshold`. Each scenario's modes, phases, and knobs are in Mode Variants and
-   Test Definitions.
-
-Dumps are written under `/node_public/dumps/<test_name>/` (see `conftest_ft/app.py`
-`resolve_dump_dir`).
+- When debugging, prefer the individual subcommands (shared `--dump-dir`, `--phase` for multi-phase) over `run`, so you re-run only what changed (e.g. just `compare` on existing dumps, or one side / phase).
+- `scenario_ft_random`: non-comparison; only `run` with `--seed` / `--num-steps` / `--crash-probability`.
+- `scenario_realistic_gsm8k`: non-comparison, no `--mode`; only `run` with `--seed` / `--num-rollout` / `--crash-probability` / `--metric-threshold`.
+- Dumps land under `/node_public/dumps/<test_name>/` (`conftest_ft/app.py` `resolve_dump_dir`).
 
 ## Comparison criterion
 
-Dumps use per-tensor boolean predicates over `rel`/`max_abs`/`mean_abs`
-(`compare_dumps(diff_thresholds=[(name_regex, predicate), ...])`): the deterministic
-scenario requires bitwise equality (`rel <= 0`), which relies on both
-`--deterministic-mode` (kernel determinism) and `--debug-deterministic-collective`
-(fixed-tree SUM collectives). Metrics are also compared at `rtol=atol=0`, except
-`train/grad_norm` (`rtol<=1e-6`): its bracketing depends on the distributed-optimizer
-shard count (8 flat vs 2 per cell), so a few fp32 ulps are inherent, while the grads
-themselves stay bitwise-checked via the dumps. Every other scenario allows a small
-relative diff (`rel <= 0.0085`, with_failure also flooring near-zero MoE-expert and
-QK-norm (`q_layernorm`/`k_layernorm`) grads at `max_abs <= 1e-3`). Unmatched tensors are a fail-closed error, so end each list with a `.*`
-catch-all. Exact per-scenario thresholds are in Test Definitions below.
+- Dumps: per-tensor boolean predicates over `rel`/`max_abs`/`mean_abs` (`compare_dumps(diff_thresholds=[(name_regex, predicate), ...])`).
+- `scenario_deterministic`: bitwise (`rel <= 0`), relying on `--deterministic-mode` (kernel determinism) + `--debug-deterministic-collective` (fixed-tree SUM collectives).
+- Metrics: `rtol=atol=0`, except `train/grad_norm` (`rtol<=1e-6`): its bracketing depends on dist-optimizer shard count (8 flat vs 2 per cell), so a few fp32 ulps are inherent; the grads stay bitwise-checked via the dumps.
+- Other scenarios: `rel <= 0.0085`; `with_failure` also floors near-zero MoE-expert and QK-norm (`q_layernorm`/`k_layernorm`) grads at `max_abs <= 1e-3`.
+- Unmatched tensors are a fail-closed error — end each list with a `.*` catch-all.
+- Exact per-scenario thresholds: Test Definitions below.
 
 ## Debug Rollout Data
 
-Modes without rollout engines (`has_real_rollout == False`) use pre-recorded rollout data via `--load-debug-rollout-data --debug-train-only`, skipping real rollout generation.
-
-`conftest_ft/execution.py` `prepare()` downloads the data via `U.hf_download_dataset()`.
+- Modes without rollout engines (`has_real_rollout == False`) use pre-recorded data via `--load-debug-rollout-data --debug-train-only`.
+- `conftest_ft/execution.py` `prepare()` downloads it via `U.hf_download_dataset()`.
 
 ### How to regenerate
 
-The debug rollout data **must** be generated using the 5-layer model (not the full model).
-Using the full model produces `rollout_log_probs` incompatible with the 5-layer training model,
-causing NaN gradients in GRPO training.
+- **Must** use the 5-layer model (the full model produces `rollout_log_probs` incompatible with the 5-layer training model → NaN gradients in GRPO).
 
 ```bash
 # Step 1: Generate rollout data (5-layer model + real sglang rollout, no dumper)
@@ -133,8 +104,6 @@ huggingface-cli upload --repo-type dataset fzyzcjy/miles-test-rollout-Qwen3-30B-
 
 ### `scenario_no_failure`
 
-Comparison test. Verifies indep_dp produces the same results as normal DP when no faults occur.
-
 ```
 Type: comparison (baseline=normal DP, target=indep_dp)
 Steps: 2
@@ -149,8 +118,6 @@ Roughly equal, not bitwise — allreduce kernel ordering differs across topologi
 ```
 
 ### `scenario_with_failure`
-
-Multi-phase comparison test. Verifies indep_dp matches normal DP after fault + checkpoint resume.
 
 ```
 Type: comparison, multi-phase (phase_a + phase_b)
@@ -190,69 +157,27 @@ The JSON `at_rollout` field specifies which rollout_id triggers the action.
 The `attempt` field (for actor-level actions like `crash_before_allreduce`) specifies which retry attempt to match.
 ```
 
-The `dp2_cp2_real_rollout_dense` mode runs this scenario with live generation (real sglang
-engines, deterministic inference, temperature 0.8), and the target's **post-fault rollouts
-inject the baseline's recorded rollout data** (`--ci-inject-rollout-data-path` pointing at
-the baseline phase_b's `--save-debug-rollout-data` output, start id = crash rollout + 1).
-Rationale: the post-crash degraded-quorum commit accumulates microbatches in a different
-floating-point bracketing than the fault-free side — a fault-inherent ulp-level weight
-difference no collective ordering removes. Under live sampling that drift flips individual
-sampled tokens (the recovered weights are numerically correct; the sampler amplifies ulps),
-after which the two runs' rollout data diverges wholesale — so a strict vs-baseline
-numerical comparison of *real-sampled* post-fault rollouts is ill-posed, not merely strict.
-Injection makes post-fault training inputs identical by construction and restores the full
-strict grad/activation/metric comparison with zero threshold relaxation.
+#### `dp2_cp2_real_rollout_dense` mode
 
-What stays real on the target during injected rollouts: engines and generation itself (the
-generated samples are discarded after the fact), update_weights after the degraded commit
-and after healing, and health-monitor pause/resume — i.e. the whole
-crash→retry→heal→weight-sync path. The post-healing update_weights is now consumed:
-real_rollout mode asserts the target pushed bitwise-identical engine weights to the
-baseline (see "inference engine weight checksum" below). Injected rollouts' dump comparison gives a
-`max_abs <= 3e-3` floor to the **measured noisy grad families only** (decoder-layer
-QK-norms, folded `layer_norm_weight`s, and the attention/MLP weight matrices): the
-training data is bitwise-identical, but the target's weights carry the fault-inherent ulp
-drift of the degraded commit, which lands in those cancellation-dominated near-zero grads
-as absolute noise measured up to 2.8e-3 (40 tensors, 2026-06-12; e.g. q_layernorm grads at
-rel 20% but max_abs 2.6e-3) while real grads sit at ~1e-2 — the same argument as the
-pre-existing 1e-3 QK-norm floor, recalibrated for the converged dense model whose
-near-zero grads are smaller. Embedding/output-layer/final-norm grads, all activations, and
-all pre-fault rollouts keep the strict predicate set.
+Runs `scenario_with_failure` with live generation (real sglang engines, deterministic inference, temperature 0.8).
 
-The discarded generation is not wasted: each injected
-rollout asserts the generated responses match the recording at a mean per-token positional
-ratio above a calibrated threshold with bitwise-identical prompts
-(`RolloutDataInjectionUtil.assert_matches_generated`). ulp-level drift only flips an
-occasional sampled token (which then cascades within that one response), keeping the mean
-ratio high, while grossly wrong post-fault engine weights (e.g. a broken update_weights)
-make responses unrelated to the recording and drop it by two orders of magnitude — so
-wrong-weights bugs still fail the test even though the injected data replaces the
-generated content for training. What the scenario does not assert is the exact post-fault
-sampled content beyond that ratio. Pre-fault rollouts (up to and including the crash
-rollout, whose data is generated before the crash and redriven by the retry) are not
-injected — they remain a real sampled-data comparison.
+- Post-fault rollouts **inject the baseline's recorded rollout data** (`--ci-inject-rollout-data-path` → baseline phase_b's `--save-debug-rollout-data`, start id = crash rollout + 1).
+- Why inject: the degraded-quorum commit accumulates microbatches in a different fp bracketing than the fault-free side — a fault-inherent ulp diff no collective ordering removes. Under live sampling it flips sampled tokens, after which the two runs' rollout data diverges wholesale, so a strict vs-baseline comparison of real-sampled post-fault rollouts is ill-posed. Injection makes training inputs identical by construction → full strict comparison, zero relaxation.
+- Stays real on the target: engines + generation (samples discarded), `update_weights` after the degraded commit and after healing, health-monitor pause/resume — the whole crash→retry→heal→weight-sync path.
+- Post-healing `update_weights` is consumed: real_rollout asserts the target pushed bitwise-identical engine weights to the baseline (see inference engine weight checksum).
+- Injected rollouts' dump comparison floors `max_abs <= 3e-3` on the **noisy grad families only** (decoder-layer QK-norms, folded `layer_norm_weight`s, attn/MLP matrices): training data is bitwise-identical, but target weights carry the degraded commit's ulp drift, landing as ≤2.8e-3 absolute noise in those near-zero grads while real grads sit ~1e-2 (40 tensors, 2026-06-12; same argument as the 1e-3 QK-norm floor, recalibrated for the dense model). Embedding/output/final-norm grads, all activations, and all pre-fault rollouts keep the strict set.
+- Generation is still asserted: each injected rollout checks generated responses match the recording at a mean per-token ratio above threshold with bitwise-identical prompts (`RolloutDataInjectionUtil.assert_matches_generated`). Gross weight bugs (e.g. broken `update_weights`) drop the ratio ~2 orders → still fail. Exact post-fault sampled content beyond the ratio is not asserted. Pre-fault rollouts are not injected (real comparison).
 
-The guard's calibration (measured 2026-06-12, first post-fault rollout, 256 samples,
-correct weights — note the metric counts everything after a response's first flipped
-token as mismatched, so even rare flips cost a large fraction):
+Guard calibration (2026-06-12, first post-fault rollout, 256 samples, correct weights; metric counts everything after a response's first flipped token as mismatched):
 
 | Model | mean response-token match | min |
 |-------|---------------------------|-----|
 | dense Qwen3-0.6B | **0.63** | 0.035 |
 | 5-layer MoE | **0.19** | 0.005 |
 
-This is why the scenario needs the **dense** model: on the truncated MoE the uncalibrated
-logits and router near-ties amplify ulp drift into near-wholesale divergence (0.19), which
-is not separable from the unrelated-content regime, while the dense model's 0.63 sits two
-orders of magnitude above it. The scenario passes
-`--ci-inject-rollout-data-min-match-ratio 0.5` — below the legitimate 0.63
-and far above what any gross weight corruption can produce.
+- Needs the **dense** model: on the truncated MoE, uncalibrated logits + router near-ties amplify ulp drift to near-wholesale divergence (0.19, not separable from the unrelated-content regime); dense's 0.63 sits 2 orders above. Scenario uses `--ci-inject-rollout-data-min-match-ratio 0.5` (below the legitimate 0.63, far above any gross corruption).
 
 ### `scenario_deterministic`
-
-Multi-phase comparison test. Verifies healing state transfer is **bitwise** correct, in
-both start regimes: cold start (phase_a) and resume from a post-healing checkpoint
-(phase_b).
 
 ```
 Type: comparison, multi-phase (phase_a + phase_b)
@@ -309,8 +234,6 @@ fault-free runs.
 
 ### `scenario_ft_random`
 
-Non-comparison soak test. Verifies the system survives random crashes without hanging.
-
 ```
 Type: non-comparison (no baseline, no compare)
 Steps: 30 (default), configurable via --num-steps
@@ -343,14 +266,7 @@ CLI options: --seed (default 42), --num-steps (default 30), --crash-probability 
 
 ### `scenario_realistic_gsm8k`
 
-Non-comparison accuracy test (entry `test_trainer_ft_realistic_gsm8k.py`, no mode
-variants). Runs the same external fault injection as `scenario_ft_random` (shared
-machinery in `conftest_ft/fault_injection.py`) over the real gsm8k RL recipe of
-`tests/e2e/long/test_qwen2.5_0.5B_gsm8k.py` (whose regular CI runs serve as the no-fault
-reference wandb curves) and additionally asserts accuracy — i.e. fault recovery preserves
-end-to-end learning, which the comparison scenarios cannot observe (e.g. whether engines
-receive correct weights after recovery, and whether the post-fault on-policy loop still
-improves accuracy).
+Entry `test_trainer_ft_realistic_gsm8k.py`, no mode variants. Runs the same external fault injection as `scenario_ft_random` (shared `conftest_ft/fault_injection.py`) over the real gsm8k RL recipe of `tests/e2e/long/test_qwen2.5_0.5B_gsm8k.py` (its regular CI runs are the no-fault reference wandb curves), and additionally asserts accuracy — i.e. fault recovery preserves end-to-end learning, which the comparison scenarios cannot observe.
 
 ```
 Type: non-comparison (no baseline run; reference = the baseline test's wandb curves)
