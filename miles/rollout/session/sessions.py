@@ -76,15 +76,24 @@ def _parse_and_validate_response(response_body: bytes) -> tuple[dict, dict, list
             f"!= completion_tokens={completion_tokens}. "
             f"Please check whether you use the correct SGLang branch which has fix the tokenizer batch decode issue."
         )
-    # Each entry must be a (logprob, token_id) pair with an integer token id. A
-    # malformed entry (short/non-sequence, or a str/float/None/bool id) would
-    # silently corrupt the stored trajectory token ids, so reject the whole
-    # response instead of extracting garbage.
+    # Each entry must be a (logprob, token_id, ...) sequence (SGLang emits
+    # [logprob, token_id, token_text] triples; len > 2 is normal). Both leading
+    # fields are consumed downstream: token_id (entry[1]) feeds the stored
+    # trajectory token ids, and logprob (entry[0]) feeds Sample.rollout_log_probs
+    # in openai_endpoint_utils. A non-int token id or non-numeric logprob would
+    # silently corrupt the stored trajectory / training logprobs, so reject the
+    # whole response instead of extracting garbage. bool is an int subclass, so
+    # reject it explicitly for both fields.
     completion_token_ids: list[int] = []
     for entry in output_token_logprobs:
         if not isinstance(entry, (list, tuple)) or len(entry) < 2:
             raise UpstreamResponseError(
                 "upstream response output_token_logprobs entry is not a (logprob, token_id) pair"
+            )
+        logprob = entry[0]
+        if not isinstance(logprob, (int, float)) or isinstance(logprob, bool):
+            raise UpstreamResponseError(
+                f"upstream response output_token_logprobs logprob is not a number: {logprob!r}"
             )
         token_id = entry[1]
         if not isinstance(token_id, int) or isinstance(token_id, bool):

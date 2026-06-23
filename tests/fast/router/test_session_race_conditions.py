@@ -1091,3 +1091,27 @@ class TestResponseTokenIdValidation:
             raise AssertionError(
                 f"expected UpstreamResponseError for {logprobs!r}, completion_tokens={completion_tokens!r}"
             )
+
+    def test_non_numeric_logprob_values_rejected(self):
+        # entry[0] (the logprob) flows into Sample.rollout_log_probs downstream
+        # (openai_endpoint_utils), so a str / None / bool logprob with an
+        # otherwise-valid token id must still raise rather than being accepted.
+        bad_cases = [
+            [["bad-logprob", 562]],
+            [[None, 562]],
+            [[True, 562]],
+        ]
+        for logprobs in bad_cases:
+            try:
+                _parse_and_validate_response(self._payload(logprobs, completion_tokens=1))
+            except UpstreamResponseError:
+                continue
+            raise AssertionError(f"expected UpstreamResponseError for logprob in {logprobs!r}")
+
+    def test_sglang_triples_with_token_text_accepted(self):
+        # SGLang emits [logprob, token_id, token_text] triples; len > 2 is normal
+        # and must NOT be rejected. Integer logprobs (e.g. 0) are also valid numbers.
+        _resp, _msg, ids = _parse_and_validate_response(
+            self._payload([[-0.1, 123, "he"], [0, 456, "llo"]], completion_tokens=2)
+        )
+        assert ids == [123, 456]
