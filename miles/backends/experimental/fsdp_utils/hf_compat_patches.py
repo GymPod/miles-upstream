@@ -107,12 +107,12 @@ def check_fp8_checkpoint(hf_config) -> None:
 
 
 class ModelPatchHook:
-    """A config-time HF-compat patch: an ``applies_to`` predicate + an ``apply`` action.
+    """A config-time HF-compat/model patch: an ``applies_to(hf_config)`` predicate + an
+    ``apply(hf_config, args)`` action (``args`` is the actor Namespace, e.g. for true_on_policy_mode).
 
     Makes the per-arch dispatch a first-class registry instead of a hardcoded per-arch if-chain.
-    New archs register a hook rather than editing ``apply_hf_compat_patches``.
-    ``applies_to``/``apply`` both take the hf_config (or None);
-    self-gating checks (fp8 fail-fast, DSA warn) use ``applies_to=_has_config`` and gate internally.
+    New archs register a hook rather than editing ``apply_hf_compat_patches``. Self-gating checks
+    (fp8 fail-fast, DSA warn) use ``applies_to=_has_config`` and gate internally.
     """
 
     def __init__(self, name, applies_to, apply):
@@ -136,18 +136,43 @@ def _has_config(hf_config) -> bool:
     return hf_config is not None
 
 
-register_model_patch(ModelPatchHook("flash_attn_saux_guard", _always, lambda cfg: apply_flash_attn_saux_guard()))
-register_model_patch(ModelPatchHook("fp8_checkpoint_guard", _has_config, check_fp8_checkpoint))
-register_model_patch(ModelPatchHook("dsa_train_infer_warn", _has_config, check_train_infer_consistency))
+def _is_qwen3_moe(hf_config) -> bool:
+    return str(getattr(hf_config, "model_type", "") or "") == "qwen3_moe"
 
 
-def apply_hf_compat_patches(hf_config=None) -> None:
-    """Apply all registered FSDP HF-compat patches. Safe to call once at actor init.
+def _apply_qwen3_moe_moe_patch(hf_config, args) -> None:
+    """qwen3_moe needs a MoE-block patch before construction; the variant depends on the run mode.
+
+    true_on_policy_mode swaps in the batch-invariant Qwen3MoeSparseMoeBlock so train logits match the
+    sglang rollout; otherwise the legacy graph patch (a no-op on transformers>=5.6 batched experts) is
+    applied. Imports are lazy because the true-on-policy path pulls sglang fused-MoE kernels that don't
+    exist for every sglang build. The backend-level enable_batch_invariant_mode stays in the actor.
+    """
+    if getattr(args, "true_on_policy_mode", False):
+        from .models.qwen3_moe import apply_true_on_policy_patch_for_qwen3_moe
+
+        apply_true_on_policy_patch_for_qwen3_moe()
+    else:
+        from .models.qwen3_moe_hf import apply_fsdp_moe_patch
+
+        apply_fsdp_moe_patch()
+
+
+register_model_patch(ModelPatchHook("flash_attn_saux_guard", _always, lambda cfg, args: apply_flash_attn_saux_guard()))
+register_model_patch(ModelPatchHook("fp8_checkpoint_guard", _has_config, lambda cfg, args: check_fp8_checkpoint(cfg)))
+register_model_patch(
+    ModelPatchHook("dsa_train_infer_warn", _has_config, lambda cfg, args: check_train_infer_consistency(cfg))
+)
+register_model_patch(ModelPatchHook("qwen3_moe_moe_patch", _is_qwen3_moe, _apply_qwen3_moe_moe_patch))
+
+
+def apply_hf_compat_patches(hf_config=None, args=None) -> None:
+    """Apply all registered FSDP HF-compat/model patches. Safe to call once at actor init.
 
     Scope is the ModelPatchHook registry only. The actor driver invokes the other registries
-    around this call: config-lifetime packing before construction, post-load packing and the
-    Mamba clobber-reload after ``from_pretrained`` (those need the instantiated model).
+    around this call: config-lifetime packing before construction, post-load packing and weight
+    fixups after ``from_pretrained``, and the backend-level true_on_policy batch-invariant setup.
     """
     for hook in _MODEL_PATCH_HOOKS:
         if hook.applies_to(hf_config):
-            hook.apply(hf_config)
+            hook.apply(hf_config, args)

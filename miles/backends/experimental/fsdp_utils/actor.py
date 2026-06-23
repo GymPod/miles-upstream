@@ -106,7 +106,7 @@ class FSDPTrainRayActor(TrainRayActor):
         from .hf_compat_patches import apply_hf_compat_patches
         from .packing import apply_packing
 
-        apply_hf_compat_patches(self.hf_config)
+        apply_hf_compat_patches(self.hf_config, self.args)
         apply_packing(None, self.hf_config, "config")
 
         # Needs hf_config (gates the qwen3_moe-specific MoE patches on model_type), so run after load.
@@ -218,10 +218,11 @@ class FSDPTrainRayActor(TrainRayActor):
             return AutoModelForCausalLM
 
     def _enable_true_on_policy_optimizations(self, args):
-        # The qwen3_moe MoE patches are arch-specific (and the true-on-policy one imports sglang fused-MoE
-        # kernels that don't exist for every sglang build); gate them on model_type so other archs
-        # (nemotron_h Mamba, dense Qwen3, ...) can use true-on-policy / recompute-logprobs-via-prefill.
-        model_type = str(getattr(self.hf_config, "model_type", "") or "")
+        """Backend-level true-on-policy setup (batch-invariant ops), gated purely on the run mode.
+
+        The qwen3_moe-specific MoE-block patch is a ModelPatchHook (applied in apply_hf_compat_patches);
+        only the backend-wide batch-invariant ops live here, since they are not per-model.
+        """
         if args.true_on_policy_mode:
             from sglang.srt.batch_invariant_ops import enable_batch_invariant_mode
 
@@ -231,15 +232,6 @@ class FSDPTrainRayActor(TrainRayActor):
                 # and disabling it will make it aligned
                 enable_bmm=False,
             )
-
-            if model_type == "qwen3_moe":
-                from .models.qwen3_moe import apply_true_on_policy_patch_for_qwen3_moe
-
-                apply_true_on_policy_patch_for_qwen3_moe()
-        elif model_type == "qwen3_moe":
-            from .models.qwen3_moe_hf import apply_fsdp_moe_patch
-
-            apply_fsdp_moe_patch()
 
     def _get_init_weight_context_manager(self):
         """Get context manager for model initialization.

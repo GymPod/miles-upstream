@@ -161,6 +161,15 @@ def test_model_patch_registry_gating():
     # s_aux guard runs even without a config; the others don't
     assert by_name["flash_attn_saux_guard"].applies_to(None)
     assert not by_name["fp8_checkpoint_guard"].applies_to(None)
+    # the qwen3_moe MoE-block patch is a hook now (moved out of _enable_true_on_policy_optimizations),
+    # gated on model_type; the backend-level enable_batch_invariant_mode stays in the actor.
+    from types import SimpleNamespace
+
+    assert "qwen3_moe_moe_patch" in by_name
+    assert by_name["qwen3_moe_moe_patch"].applies_to(SimpleNamespace(model_type="qwen3_moe"))
+    assert not by_name["qwen3_moe_moe_patch"].applies_to(SimpleNamespace(model_type="qwen3"))
+    # off-mode dispatch applies the legacy patch (a no-op on transformers>=5.6 batched experts); must not raise
+    by_name["qwen3_moe_moe_patch"].apply(SimpleNamespace(model_type="qwen3_moe"), SimpleNamespace(true_on_policy_mode=False))
 
 
 def test_packed_seq_context_boundaries():
