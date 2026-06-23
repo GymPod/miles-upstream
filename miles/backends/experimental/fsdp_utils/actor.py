@@ -132,11 +132,12 @@ class FSDPTrainRayActor(TrainRayActor):
             model = model.to(torch.float32)
             model._fsdp_sync_orig_dtypes = orig_dtypes
 
-        # transformers' NemotronH (Mamba2) _init_weights re-inits mixer.dt_bias + out_proj after loading;
-        # re-assert the checkpoint over any clobbered param. No-op for non-Mamba archs.
-        from .hf_compat_patches import reload_clobbered_checkpoint_params
+        # Post-load weight fixups: re-assert the checkpoint over any param from_pretrained clobbered
+        # post-load (NemotronH Mamba2 _init_weights re-inits mixer.dt_bias + out_proj). Registry-
+        # dispatched + arch-gated; no-op for archs that need no fixup.
+        from .post_load_fixups import apply_post_load_fixups
 
-        reload_clobbered_checkpoint_params(model, self.args.hf_checkpoint, self.hf_config)
+        apply_post_load_fixups(model, self.hf_config, self.args.hf_checkpoint)
 
         # Post-load packed-sequence layout patches that need the instantiated model (NemotronH resets
         # Mamba2 conv+scan via seq_idx on its un-fused branch AND attention via varlen cu_seqlens, both

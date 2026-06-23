@@ -92,7 +92,7 @@ def test_is_mamba_hybrid_gating():
     # re-inits dt_bias + out_proj post-load); it must be a no-op gate for everything else.
     from types import SimpleNamespace
 
-    from miles.backends.experimental.fsdp_utils.hf_compat_patches import _is_mamba_hybrid
+    from miles.backends.experimental.fsdp_utils.post_load_fixups import _is_mamba_hybrid
 
     assert _is_mamba_hybrid(SimpleNamespace(model_type="nemotron_h"))
     assert _is_mamba_hybrid(SimpleNamespace(model_type="mamba2"))
@@ -102,6 +102,19 @@ def test_is_mamba_hybrid_gating():
     assert not _is_mamba_hybrid(SimpleNamespace(model_type="qwen3"))
     assert not _is_mamba_hybrid(SimpleNamespace(model_type="qwen3_moe"))
     assert not _is_mamba_hybrid(SimpleNamespace(model_type="llama", layer_types=["attention"]))
+
+
+def test_post_load_fixups_registry():
+    # The clobber-reload is registered in the post_load_fixups registry, gated to Mamba/hybrid archs.
+    from types import SimpleNamespace
+
+    from miles.backends.experimental.fsdp_utils.post_load_fixups import _FIXUPS
+
+    by_name = {f.name: f for f in _FIXUPS}
+    assert "mamba_clobber_reload" in by_name
+    # the registered fixup gates on the same Mamba/hybrid predicate
+    assert by_name["mamba_clobber_reload"].applies_to(SimpleNamespace(model_type="nemotron_h"))
+    assert not by_name["mamba_clobber_reload"].applies_to(SimpleNamespace(model_type="qwen3_moe"))
 
 
 def test_weight_bridge_registry():
