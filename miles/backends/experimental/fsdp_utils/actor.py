@@ -121,16 +121,13 @@ class FSDPTrainRayActor(TrainRayActor):
                 attn_implementation=self.args.attn_implementation,
             )
 
-        # GLM-4.7-Flash (glm4_moe_lite): keep an fp32 master copy of the weights. The FSDP2 bf16
-        # reshard perturbs stored weights ~1 bf16 ULP vs a clean disk load; an fp32 master is bit-exact,
-        # so the weight sync downcasts it back to each param's on-disk dtype and streams sglang exactly
-        # what a clean disk load produces (compute stays bf16 via MixedPrecisionPolicy). Per-param on-disk
-        # dtype is recorded so fp32 params (e.g. e_score_correction_bias) stay fp32 — casting those to
-        # bf16 would flip MoE routing. update_weight_utils reads model._fsdp_sync_orig_dtypes.
-        if "glm4_moe_lite" in str(getattr(self.hf_config, "model_type", "") or "").lower():
-            orig_dtypes = {name: p.dtype for name, p in model.state_dict().items()}
-            model = model.to(torch.float32)
-            model._fsdp_sync_orig_dtypes = orig_dtypes
+        # Precision policy: FSDP MixedPrecisionPolicy dtypes + whether to keep an fp32 master copy
+        # (glm4_moe_lite, whose bf16 reshard would otherwise perturb weights ~1 ULP). See precision.py.
+        from .precision import apply_fp32_master, resolve_precision_policy
+
+        precision = resolve_precision_policy(self.hf_config, self.args)
+        if precision.keep_fp32_master:
+            model = apply_fp32_master(model)
 
         # Post-load weight fixups: re-assert the checkpoint over any param from_pretrained clobbered
         # post-load (NemotronH Mamba2 _init_weights re-inits mixer.dt_bias + out_proj). Registry-
@@ -150,7 +147,12 @@ class FSDPTrainRayActor(TrainRayActor):
         full_state = model.state_dict()
 
         model = apply_fsdp2(
-            model, mesh=get_parallel_state().dp_mesh, cpu_offload=self.fsdp_cpu_offload, args=self.args
+            model,
+            mesh=get_parallel_state().dp_mesh,
+            cpu_offload=self.fsdp_cpu_offload,
+            args=self.args,
+            param_dtype=precision.param_dtype,
+            reduce_dtype=precision.reduce_dtype,
         )
 
         model = self._fsdp2_load_full_state_dict(
@@ -714,7 +716,7 @@ def move_torch_optimizer(optimizer, device):
     torch.cuda.synchronize()
 
 
-def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None):
+def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, param_dtype=None, reduce_dtype=None):
     """Apply FSDP v2 to the model.
 
     Args:
@@ -723,6 +725,8 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None):
         cpu_offload: If True, offload parameters, gradients, and optimizer states
             to CPU. The optimizer step will run on CPU. (Default: False)
         args: Arguments containing precision settings (fp16/bf16)
+        param_dtype/reduce_dtype: MixedPrecisionPolicy dtypes (see precision.py). When None they
+            fall back to the args-based default (bf16 / fp32, or fp16 param when args.fp16).
 
     Ref: https://github.com/volcengine/verl/blob/main/verl/utils/fsdp_utils.py
     """
@@ -740,12 +744,10 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None):
         or (isinstance(module, torch.nn.Embedding) and not model.config.tie_word_embeddings)
     ]
 
-    # Determine precision policy based on args
-    param_dtype = torch.bfloat16  # Default to bf16 as before
-    reduce_dtype = torch.float32
-
-    if args.fp16:
-        param_dtype = torch.float16
+    if param_dtype is None:
+        param_dtype = torch.float16 if args.fp16 else torch.bfloat16
+    if reduce_dtype is None:
+        reduce_dtype = torch.float32
 
     logger.info(f"FSDP MixedPrecision Policy: param_dtype={param_dtype}, reduce_dtype={reduce_dtype}")
 
