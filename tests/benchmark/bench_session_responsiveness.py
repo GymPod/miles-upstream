@@ -19,14 +19,14 @@ This file is named `bench_*` so pytest does NOT auto-collect it (no flaky timing
 test in CI). Run it directly:
 
   # Run once, print a human-readable block:
-  python tests/fast/router/bench_session_responsiveness.py
+  python tests/benchmark/bench_session_responsiveness.py
 
   # Run once, persist a reviewable JSON artifact (used for before/after):
-  python tests/fast/router/bench_session_responsiveness.py --label after \
+  python tests/benchmark/bench_session_responsiveness.py --label after \
       --json-out .humanize/.../benchmarks/session-responsiveness-after.json
 
   # Compare two persisted runs into a markdown verdict:
-  python tests/fast/router/bench_session_responsiveness.py --compare \
+  python tests/benchmark/bench_session_responsiveness.py --compare \
       before.json after.json --out compare.md
 
 Method: fire K concurrent chats across K DISTINCT sessions (distinct sessions are
