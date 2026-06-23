@@ -77,7 +77,6 @@ def _patch_attn_forward(attn_cls):
     orig = attn_cls.forward
     if getattr(orig, "_nemotron_packing", False):
         return
-    import torch
 
     mod = sys.modules[attn_cls.__module__]
     repeat_kv = getattr(mod, "repeat_kv", None)

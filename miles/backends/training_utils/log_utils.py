@@ -204,10 +204,6 @@ def log_rollout_data(rollout_id: int, args: Namespace, rollout_data: RolloutBatc
                 assert 0 < reduced_log_dict["rollout/entropy"] < 0.7
 
         if args.ci_test and args.true_on_policy_mode and not args.ci_disable_logprobs_checker:
-            # Strict bit-exact equality holds for batch-invariant-capable archs; archs whose
-            # train/infer kernels aren't numerically identical (e.g. NemotronH Mamba2: chunked-prefill
-            # vs chunked-train differ at ~1e-2) can't satisfy ==, so --ci-disable-logprobs-checker
-            # disables this check too (consistent with the isclose checks above).
             assert log_dict["log_probs"] == log_dict["rollout_log_probs"], (
                 f"CI check failed: true_on_policy_mode is enabled, but log_probs "
                 f"({log_dict['log_probs']}) != rollout_log_probs "

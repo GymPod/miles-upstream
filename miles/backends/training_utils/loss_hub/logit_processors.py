@@ -41,8 +41,7 @@ def get_responses(
     qkv_format = args.qkv_format
 
     if not args.true_on_policy_mode:
-        # Allow bf16 logits (the FSDP backend hands native bf16 to avoid a full-vocab fp32 buffer);
-        # the per-response chunk is upcast to fp32 before the cross-entropy / entropy reduction.
+        # FSDP hands native bf16 here (no full-vocab fp32 buffer); chunks are upcast to fp32 downstream
         assert logits.dtype in (torch.float32, torch.bfloat16), f"{logits.dtype}"
     assert len(logits.shape) == 3, f"{logits.shape}"
 

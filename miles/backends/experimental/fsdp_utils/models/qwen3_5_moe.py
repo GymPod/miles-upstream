@@ -56,9 +56,9 @@ def _patch_gdn_forward(gdn_cls):
     # them for the duration of the forward to inject the per-document boundaries, then
     # restore -- so nothing leaks across modules or forwards.
     _INJECT = (
-        ("chunk_gated_delta_rule", "cu_seqlens", "_gdn_cu_seqlens"),
-        ("recurrent_gated_delta_rule", "cu_seqlens", "_gdn_cu_seqlens"),
-        ("causal_conv1d_fn", "seq_idx", "_gdn_seq_idx"),
+        ("chunk_gated_delta_rule", "cu_seqlens"),
+        ("recurrent_gated_delta_rule", "cu_seqlens"),
+        ("causal_conv1d_fn", "seq_idx"),
     )
 
     @functools.wraps(orig)
@@ -68,7 +68,7 @@ def _patch_gdn_forward(gdn_cls):
         if cu is None and si is None:
             return orig(self, *args, **kwargs)
         saved = {}
-        for attr, key, ctx_attr in _INJECT:
+        for attr, key in _INJECT:
             value = cu if key == "cu_seqlens" else si
             fn = getattr(self, attr, None)
             if fn is not None and value is not None:
