@@ -1,4 +1,5 @@
 import copy
+import logging
 import os
 
 import einops
@@ -23,6 +24,8 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
+
+logger = logging.getLogger(__name__)
 
 from miles_plugins.models.deepseek_v4.ops.compressor import DeepSeekV4Compressor
 from miles_plugins.models.deepseek_v4.ops.cp_utils import (
@@ -336,14 +339,40 @@ def _dsv4_attention_module_spec(config, backend=None):
     )
 
 
+def _select_dsv4_attention_backend(config) -> str:
+    """Pick the DSv4 attention backend for the `dsv4` variant.
+
+    `MILES_DSV4_ATTENTION_BACKEND in {miles, native}` (default `miles`). `native` selects dev's
+    `dsv4_hybrid` sparse-attention module (flash_mla/cuDNN-DSA or unfused PyTorch); it asserts TP==1
+    and has no sparse-CP, so we force `miles` (BSHD + full sparse-CP + tilelang, the validated
+    production path) whenever TP>1 or CP>1. `miles` stays the default so a `native` limitation never
+    blocks production.
+    """
+    backend = os.environ.get("MILES_DSV4_ATTENTION_BACKEND", "miles").lower()
+    if backend not in ("miles", "native"):
+        raise ValueError(f"MILES_DSV4_ATTENTION_BACKEND must be 'miles' or 'native', got {backend!r}")
+    if backend == "native" and (config.tensor_model_parallel_size > 1 or config.context_parallel_size > 1):
+        logger.warning(
+            "MILES_DSV4_ATTENTION_BACKEND=native is unsupported with TP>1 or CP>1 "
+            "(dev dsv4_hybrid asserts TP==1 / no sparse-CP); falling back to the miles backend."
+        )
+        backend = "miles"
+    return backend
+
+
 def get_dsv4_spec(args, config, vp_stage):
     """
     Usage: --spec miles_plugins.models.deepseek_v4.deepseek_v4 get_dsv4_spec
     """
     _orig_get_spec = _eav_specs.get_experimental_attention_variant_module_spec
+    dsv4_backend = _select_dsv4_attention_backend(config)
 
     def _patched_get_spec(config, backend=None):
         if config.experimental_attention_variant == "dsv4":
+            if dsv4_backend == "native":
+                # dev's native DSv4-hybrid sparse attention (csa + CSAIndexer). The surrounding
+                # block (miles mHC, hash-routed MoE) is unchanged; only the attention module swaps.
+                return _eav_specs.get_dsv4_hybrid_module_spec_for_backend(config=config, backend=backend)
             return _dsv4_attention_module_spec(config, backend)
         return _orig_get_spec(config, backend)
 
