@@ -8,7 +8,7 @@ import ray
 import torch
 import torch.distributed as dist
 from ray.actor import ActorHandle
-from torch.distributed.tensor import DTensor, Replicate
+from torch.distributed.tensor import DTensor
 
 try:
     from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions  # type: ignore[import]
@@ -28,6 +28,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
+from .dtensor import gather_full_param
 
 # Per-model-type train->rollout name/shape transforms (see weight_bridge.py): e.g. split
 # transformers>=5.6 batched qwen3_moe experts into the per-expert names SGLang wants.
@@ -62,14 +64,8 @@ def _iter_sync_named_params(name, param, model_type, orig_dtypes=None):
         yield name, param
         return
 
-    # Materialize the full (unsharded) tensor before the transform slices it. Mirror the caller's
-    # proven path: move to CUDA first, then all-gather via redistribute (calling full_tensor() on a
-    # CPU DTensor picks the wrong collective backend).
-    full = param.cuda()
-    if isinstance(full, DTensor):
-        full = full.redistribute(
-            placements=[Replicate()] * full.device_mesh.ndim,
-        ).to_local()
+    # Materialize the full (unsharded) tensor before the transform slices it.
+    full = gather_full_param(param)
     if orig_dtypes is not None:
         target = orig_dtypes.get(name)
         if target is not None and full.dtype != target:
@@ -117,15 +113,10 @@ class UpdateWeight(abc.ABC):
                     bucket = []
                     bucket_size = 0
 
-                # passthrough params only; bridge-split experts are pre-cast in _iter_sync_named_params
+                # passthrough params only; bridge-split experts are pre-cast in _iter_sync_named_params.
+                # async gather: the cast to target_dtype is deferred until after .wait() (below).
                 target_dtype = orig_dtypes.get(name) if orig_dtypes is not None else None
-                param = param.cuda()
-                if isinstance(param, DTensor):
-                    # async version of param.full_tensor
-                    param = param.redistribute(
-                        placements=[Replicate()] * param.device_mesh.ndim,
-                        async_op=True,
-                    ).to_local()
+                param = gather_full_param(param, async_op=True)
                 bucket.append((name, param, target_dtype))
                 bucket_size += param_size
 
