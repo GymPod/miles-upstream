@@ -98,6 +98,36 @@ def _patch_mock_chat_response_bad_first():
     return patch.object(MockSGLangServer, "_compute_chat_completions_response", new=patched_chat_response)
 
 
+def _patch_mock_chat_response_bad_logprob_first():
+    """Like `_patch_mock_chat_response`, but the FIRST chat response carries a
+    non-numeric logprob value (entry[0]) so the session server rejects it with
+    UpstreamResponseError (502) instead of letting the bad value flow into
+    Sample.rollout_log_probs downstream. Later responses are valid.
+    """
+    original_chat_response = MockSGLangServer._compute_chat_completions_response
+    state = {"calls": 0}
+
+    def patched_chat_response(self, payload: dict) -> dict:
+        response = original_chat_response(self, payload)
+        choice = response["choices"][0]
+        logprobs_content = choice["logprobs"]["content"]
+        output_token_logprobs = [
+            (item["logprob"], self.tokenizer.convert_tokens_to_ids(item["token"])) for item in logprobs_content
+        ]
+        state["calls"] += 1
+        if state["calls"] == 1 and output_token_logprobs:
+            # Corrupt the first response's leading logprob value only.
+            _logprob, token_id = output_token_logprobs[0][0], output_token_logprobs[0][1]
+            output_token_logprobs[0] = ("bad-logprob", token_id)
+        choice["meta_info"] = {
+            "output_token_logprobs": output_token_logprobs,
+            "completion_tokens": len(output_token_logprobs),
+        }
+        return response
+
+    return patch.object(MockSGLangServer, "_compute_chat_completions_response", new=patched_chat_response)
+
+
 @contextmanager
 def _router_env(process_fn, *, latency: float = 0.0, response_patch=None):
     with (response_patch or _patch_mock_chat_response)():
@@ -565,6 +595,36 @@ class TestSlotReleaseAfterError:
             good = _chat(env.url, session_id, {"messages": [{"role": "user", "content": "hi again"}]}, timeout=20.0)
             assert good.status_code == 200
             assert len(env.backend.request_log) == 2
+
+    def test_bad_logprob_value_rejected_without_committing(self):
+        """A successful (200) upstream response carrying a non-numeric logprob
+        value must return 502, commit NOTHING to the session (no record, no
+        accumulated token id), and release the slot so the next legal chat 200s.
+        Guards against the bad logprob flowing into rollout_log_probs downstream.
+        """
+
+        def process_fn(prompt: str) -> ProcessResult:
+            return ProcessResult(text="ok", finish_reason="stop")
+
+        with _router_env(process_fn, response_patch=_patch_mock_chat_response_bad_logprob_first) as env:
+            session_id = _create_session(env.url)
+
+            bad = _chat(env.url, session_id, {"messages": [{"role": "user", "content": "hi"}]}, timeout=20.0)
+            assert bad.status_code == 502
+            assert len(env.backend.request_log) == 1
+
+            # Nothing from the malformed response was committed.
+            state = requests.get(f"{env.url}/sessions/{session_id}", timeout=5.0).json()
+            assert state["records"] == []
+            assert state["metadata"]["accumulated_token_ids"] == []
+
+            good = _chat(env.url, session_id, {"messages": [{"role": "user", "content": "hi again"}]}, timeout=20.0)
+            assert good.status_code == 200
+            assert len(env.backend.request_log) == 2
+
+            after = requests.get(f"{env.url}/sessions/{session_id}", timeout=5.0).json()
+            assert len(after["records"]) == 1
+            assert len(after["metadata"]["accumulated_token_ids"]) > 0
 
 
 def _normal_messages(content: str) -> dict:
