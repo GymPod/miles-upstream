@@ -643,19 +643,23 @@ def train(
                 config.param_sync_func = param_sync_func
                 pre_hook_enabled = True
 
+        mtp_losses = None
         if args.enable_mtp_training:
             from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
 
             mtp_loss_scale = 1 / num_microbatches[step_id]
+            # New Megatron tracks MTP loss as loss_sums/num_tokens (or loss_values) rather than a
+            # pre-divided "values" tensor. reduce_loss_in_tracker() all-reduces across ranks
+            # (collective: call on all ranks) and computes the per-token loss into tracker["values"].
+            MTPLossLoggingHelper.reduce_loss_in_tracker()
             tracker = MTPLossLoggingHelper.tracker
+            # here we assume only one mtp layer
             if "values" in tracker:
-                values = tracker["values"]
-                if (x := tracker.get("reduce_group")) is not None:
-                    torch.distributed.all_reduce(values, group=x)
-                if (x := tracker.get("avg_group")) is not None:
-                    torch.distributed.all_reduce(values, group=x, op=torch.distributed.ReduceOp.AVG)
-                # here we assume only one mtp layer
                 mtp_losses = (tracker["values"] * mtp_loss_scale).item()
+            elif "loss_values" in tracker:
+                mtp_losses = (tracker["loss_values"] * mtp_loss_scale).item()
+
+            if mtp_losses is not None:
                 MTPLossLoggingHelper.clean_loss_in_tracker()
 
                 # CI check: verify MTP loss is within expected bounds
@@ -671,7 +675,7 @@ def train(
             role_tag = "" if role == "actor" else f"{role}-"
 
             extra_metrics = {}
-            if args.enable_mtp_training:
+            if args.enable_mtp_training and mtp_losses is not None:
                 extra_metrics["mtp_loss"] = mtp_losses
 
             if not disable_optimizer:
