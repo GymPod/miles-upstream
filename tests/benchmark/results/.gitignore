@@ -1,0 +1,3 @@
+# Bulky uvicorn access logs from benchmark runs — keep the JSON artifacts +
+# SUMMARY.md, not the multi-hundred-KB per-run logs.
+*.log
