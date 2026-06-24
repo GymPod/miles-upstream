@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -15,6 +16,10 @@ logger = logging.getLogger(__name__)
 # TODO: hardcoded to 1 for now; if multi-step rollback is actually needed,
 #  raise this limit or make it configurable and remove the restriction.
 MAX_ASSISTANT_ROLLBACK_STEPS = 1
+
+# Canonical session_id shape (uuid4().hex): 32 lowercase hex chars. The router
+# generates ids and routes by them, so workers must agree on this exact shape.
+_SESSION_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 @dataclass
@@ -266,7 +271,20 @@ class SessionRegistry:
         self.comparator = tito_tokenizer.create_comparator()
 
     def create_session(self) -> str:
-        session_id = uuid.uuid4().hex
+        return self.create_session_with_id(uuid.uuid4().hex)
+
+    def create_session_with_id(self, session_id: str) -> str:
+        """Create a trajectory under an explicitly supplied session_id.
+
+        The router generates ids out-of-band and dispatches to the owning
+        worker, so the worker must create under that exact id rather than
+        minting its own. Rejects ids that are not 32-char lowercase hex and
+        refuses to overwrite an existing session.
+        """
+        if not _SESSION_ID_RE.match(session_id):
+            raise ValueError(f"invalid session_id (expected 32-char lowercase hex): {session_id!r}")
+        if session_id in self.sessions:
+            raise ValueError(f"session_id already exists: {session_id}")
         self.sessions[session_id] = LinearTrajectory()
         return session_id
 

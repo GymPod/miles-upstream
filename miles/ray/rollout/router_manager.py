@@ -102,6 +102,10 @@ def start_session_server(args):
     if getattr(args, "session_server_instance_id", None) is None:
         args.session_server_instance_id = uuid.uuid4().hex
 
+    workers = getattr(args, "session_server_workers", 1)
+    if workers > 1:
+        raise NotImplementedError("multi-process session server (workers>1) lands in M3/M4")
+
     ip, port = args.session_server_ip, args.session_server_port
     if not is_port_available(port):
         raise RuntimeError(
