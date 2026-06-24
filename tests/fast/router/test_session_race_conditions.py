@@ -128,6 +128,33 @@ def _patch_mock_chat_response_bad_logprob_first(bad_logprob="bad-logprob"):
     return patch.object(MockSGLangServer, "_compute_chat_completions_response", new=patched_chat_response)
 
 
+def _patch_mock_chat_response_with_r3():
+    """Like `_patch_mock_chat_response`, but injects per-turn replay blobs
+    (routed_experts / indexer_topk) into choice.meta_info so the uniform R3
+    strip can be exercised: the client chat body must omit them while the
+    stored GET-records keep them for training-sample reconstruction.
+    """
+    original_chat_response = MockSGLangServer._compute_chat_completions_response
+
+    def patched_chat_response(self, payload: dict) -> dict:
+        response = original_chat_response(self, payload)
+        choice = response["choices"][0]
+        logprobs_content = choice["logprobs"]["content"]
+        output_token_logprobs = [
+            (item["logprob"], self.tokenizer.convert_tokens_to_ids(item["token"])) for item in logprobs_content
+        ]
+        choice["meta_info"] = {
+            "output_token_logprobs": output_token_logprobs,
+            "completion_tokens": len(output_token_logprobs),
+            "routed_experts": [[1, 2, 3]] * len(output_token_logprobs),
+            "indexer_topk": [[4, 5]] * len(output_token_logprobs),
+            "indexer_topk_num_layers": 1,
+        }
+        return response
+
+    return patch.object(MockSGLangServer, "_compute_chat_completions_response", new=patched_chat_response)
+
+
 @contextmanager
 def _router_env(process_fn, *, latency: float = 0.0, response_patch=None):
     with (response_patch or _patch_mock_chat_response)():
@@ -1146,6 +1173,37 @@ class TestPassthroughFidelity:
             assert "transfer-encoding" not in lowered
             assert "content-encoding" not in lowered
             assert resp.headers.get("content-type", "").startswith("application/json")
+
+    def test_client_chat_strips_r3_but_records_keep_it(self):
+        """Uniform R3 strip (AC-1, byte-for-byte EXCEPT the R3 strip): the
+        client chat response preserves message + output_token_logprobs meta but
+        OMITS routed_experts/indexer_topk, while GET /sessions/{id} records
+        STILL contain them so compute_samples_from_openai_records can
+        reconstruct R3 from the records.
+        """
+
+        def process_fn(prompt: str) -> ProcessResult:
+            return ProcessResult(text="r3-ok", finish_reason="stop")
+
+        with _router_env(process_fn, response_patch=_patch_mock_chat_response_with_r3) as env:
+            session_id = _create_session(env.url)
+            resp = _chat(env.url, session_id, {"messages": [{"role": "user", "content": "hi"}]}, timeout=20.0)
+            assert resp.status_code == 200
+
+            # Client body preserves message + the logprob meta...
+            client_meta = resp.json()["choices"][0]["meta_info"]
+            assert "output_token_logprobs" in client_meta
+            assert client_meta["completion_tokens"] > 0
+            # ...but OMITS the per-turn replay blobs.
+            assert "routed_experts" not in client_meta
+            assert "indexer_topk" not in client_meta
+
+            # GET-records keep the FULL response (R3 present) for reconstruction.
+            record_meta = requests.get(f"{env.url}/sessions/{session_id}", timeout=5.0).json()["records"][0][
+                "response"
+            ]["choices"][0]["meta_info"]
+            assert record_meta["routed_experts"] == [[1, 2, 3]] * client_meta["completion_tokens"]
+            assert record_meta["indexer_topk"] == [[4, 5]] * client_meta["completion_tokens"]
 
 
 class TestResponseTokenIdValidation:

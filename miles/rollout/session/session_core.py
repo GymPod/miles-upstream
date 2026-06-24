@@ -17,10 +17,13 @@ passthrough — lives here, not in the adapter.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import math
 import time
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 
 from miles.rollout.session.linear_trajectory import SessionRegistry
@@ -98,6 +101,38 @@ def _proxy_result_to_core_response(result: dict) -> CoreResponse:
 
 def _reject_json_constant(value: str):
     raise ValueError(f"invalid JSON constant: {value}")
+
+
+# Per-turn replay blobs (routed_experts / indexer_topk) are reconstructed from
+# GET /sessions/{id} records, never from the chat response, so they are stripped
+# from every client-facing chat body (uniform across single- and multi-process).
+_R3_KEYS = ("routed_experts", "indexer_topk")
+
+
+def _client_chat_response(result: dict, response: dict) -> CoreResponse:
+    """Build the client-facing chat CoreResponse with R3 blobs stripped.
+
+    ``response`` is the already-parsed full upstream dict (R3 still present);
+    the stored SessionRecord keeps it intact. Here we re-serialize a shallow
+    copy of choices[0].meta_info minus the R3 keys — no re-parse, and the big
+    blobs never cross to the client.
+    """
+    choice = response["choices"][0]
+    meta_info = choice.get("meta_info")
+    if isinstance(meta_info, dict) and any(k in meta_info for k in _R3_KEYS):
+        stripped = {k: v for k, v in meta_info.items() if k not in _R3_KEYS}
+        response = {**response, "choices": [{**choice, "meta_info": stripped}, *response["choices"][1:]]}
+    headers = {
+        k: v
+        for k, v in result["headers"].items()
+        if k.lower() not in ("content-length", "transfer-encoding", "content-encoding")
+    }
+    return CoreResponse(
+        status_code=result["status_code"],
+        headers=headers,
+        body=json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+        media_type=headers.get("content-type", ""),
+    )
 
 
 def _parse_request_body(body: bytes) -> dict:
@@ -207,6 +242,21 @@ class SessionCore:
         session_id = self.registry.create_session()
         return _json_response(200, {"session_id": session_id})
 
+    async def create_session_with_id(self, session_id: str) -> CoreResponse:
+        """Create a session under a router-supplied id (multi-process path).
+
+        The router mints the id and routes by it, so the owning worker creates
+        under that exact id. ``create_session_with_id`` raises ValueError on a
+        malformed id (400) or an id that already exists (409, lost-ack retry or
+        a routing bug); both are mapped to a JSON error, never an unhandled 500.
+        """
+        try:
+            self.registry.create_session_with_id(session_id)
+        except ValueError as exc:
+            status = 409 if "already exists" in str(exc) else 400
+            return _json_response(status, {"error": str(exc)})
+        return _json_response(200, {"session_id": session_id})
+
     async def get_session(self, session_id: str) -> CoreResponse:
         try:
             session = self.registry.get_session(session_id)
@@ -251,14 +301,21 @@ class SessionCore:
         query: str,
         headers: dict[str, str],
         body: bytes,
+        parse_gate: Callable[[], AbstractAsyncContextManager] | None = None,
     ) -> CoreResponse:
         """One in-flight chat per session; a second concurrent same-session chat
         fast-fails 409 without entering the backend. State mutation and the
         stateless JSON parse/validation both run inline on the event loop under
         session.lock where state is touched.
+
+        ``parse_gate`` (multi-process worker only) is an async-CM factory that
+        bounds concurrent CPU parse/validate for memory. It is entered ONLY
+        after the in-flight slot is claimed (so a same-session contender still
+        409s fast, ahead of any gate wait) and never while ``session.lock`` is
+        held. The single-process path passes ``None`` (no gating).
         """
         try:
-            return await self._chat_completions(session_id, method, query, headers, body)
+            return await self._chat_completions(session_id, method, query, headers, body, parse_gate)
         except SessionError as exc:
             return self._error_response(exc)
 
@@ -269,7 +326,10 @@ class SessionCore:
         query: str,
         headers: dict[str, str],
         body: bytes,
+        parse_gate: Callable[[], AbstractAsyncContextManager] | None,
     ) -> CoreResponse:
+        if parse_gate is None:
+            parse_gate = contextlib.nullcontext
         registry = self.registry
         args = self.args
         session = registry.get_session(session_id)
@@ -284,24 +344,27 @@ class SessionCore:
             session.chat_inflight = True
             claimed = True
         try:
-            request_body = _parse_request_body(body)
+            # parse_gate (worker-only) bounds the CPU request parse for memory;
+            # entered after the claim, released before session.lock is taken.
+            async with parse_gate():
+                request_body = _parse_request_body(body)
 
-            # TITO token tracking requires Miles-owned input_ids plus SGLang
-            # output-token metadata:
-            #   logprobs=True     → populates meta_info.output_token_logprobs
-            #   return_meta_info  → wraps the above in choice.meta_info
-            # Both flags are hardcoded (not set default) to prevent agent-side
-            # overrides from breaking the token accumulation invariants.
-            request_body["logprobs"] = True
-            request_body["return_meta_info"] = True
-            if getattr(args, "use_rollout_routing_replay", False):
-                request_body["return_routed_experts"] = True
-            if getattr(args, "use_rollout_indexer_replay", False):
-                request_body["return_indexer_topk"] = True
-            # Must be False so stop-token text is trimmed from assistant
-            # message content; token IDs are still taken from logprobs below.
-            request_body["no_stop_trim"] = False
-            request_messages = request_body.get("messages", [])
+                # TITO token tracking requires Miles-owned input_ids plus SGLang
+                # output-token metadata:
+                #   logprobs=True     → populates meta_info.output_token_logprobs
+                #   return_meta_info  → wraps the above in choice.meta_info
+                # Both flags are hardcoded (not set default) to prevent agent-side
+                # overrides from breaking the token accumulation invariants.
+                request_body["logprobs"] = True
+                request_body["return_meta_info"] = True
+                if getattr(args, "use_rollout_routing_replay", False):
+                    request_body["return_routed_experts"] = True
+                if getattr(args, "use_rollout_indexer_replay", False):
+                    request_body["return_indexer_topk"] = True
+                # Must be False so stop-token text is trimmed from assistant
+                # message content; token IDs are still taken from logprobs below.
+                request_body["no_stop_trim"] = False
+                request_messages = request_body.get("messages", [])
 
             # prepare pretokenized input under the lock (mutates trajectory state)
             async with session.lock:
@@ -328,13 +391,18 @@ class SessionCore:
             if result["status_code"] != 200:
                 return _proxy_result_to_core_response(result)
 
-            response, assistant_message, completion_token_ids = _parse_and_validate_response(result["response_body"])
+            # parse_gate bounds the big response parse/validate; released before
+            # the commit lock below.
+            async with parse_gate():
+                response, assistant_message, completion_token_ids = _parse_and_validate_response(
+                    result["response_body"]
+                )
 
             # commit state under the lock
             async with session.lock:
                 if session.closing:
                     logger.warning(f"Session {session_id} closed during proxy, skipping state update")
-                    return _proxy_result_to_core_response(result)
+                    return _client_chat_response(result, response)
                 if session.num_assistant != expected_num_assistant:
                     logger.error(
                         f"Session {session_id} invariant violation: num_assistant={session.num_assistant} "
@@ -359,7 +427,7 @@ class SessionCore:
                     response=response,
                 )
                 session.append_record(record)
-            return _proxy_result_to_core_response(result)
+            return _client_chat_response(result, response)
         finally:
             if claimed:
                 # single-threaded event loop: a plain write is atomic; no other coroutine
