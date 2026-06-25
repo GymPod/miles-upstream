@@ -1533,6 +1533,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             )
             parser.add_argument("--check-weight-update-equal", action="store_true")
             parser.add_argument(
+                "--check-weight-update-allow-quant-error",
+                action="store_true",
+                help="When comparing weights after update, allow quantized tensors to differ "
+                "by up to 1 ULP of the quantized dtype per side (compared in dequantized space).",
+            )
+            parser.add_argument(
                 "--env-report",
                 type=str,
                 default=os.environ.get("MILES_SCRIPT_ENV_REPORT", ""),
@@ -2269,6 +2275,9 @@ def miles_validate_args(args):
         "debug_rollout_only and debug_train_only cannot be set at the same time, " "please set only one of them."
     )
 
+    if args.ci_test and not args.debug_rollout_only and not args.debug_train_only:
+        args.check_weight_update_equal = True
+
     # always true on offload for colocate at the moment.
     if args.update_weight_transfer_mode == "p2p":
         assert not args.colocate, (
@@ -2445,6 +2454,12 @@ def hf_validate_args(args, hf_config):
     if hasattr(hf_config, "rope_parameters") and isinstance(hf_config.rope_parameters, dict):
         if "rope_theta" in hf_config.rope_parameters:
             hf_config.rope_theta = hf_config.rope_parameters["rope_theta"]
+        else:
+            # Gemma-4 nests rope_theta per attention type; take the first.
+            for _entry in hf_config.rope_parameters.values():
+                if isinstance(_entry, dict) and "rope_theta" in _entry:
+                    hf_config.rope_theta = _entry["rope_theta"]
+                    break
 
     model_name = (args.model_name or "").lower().replace("-", "").replace("_", "")
     if (hf_config.model_type == "deepseek_v4" or "deepseekv4" in model_name) and args.context_parallel_size > 1:
