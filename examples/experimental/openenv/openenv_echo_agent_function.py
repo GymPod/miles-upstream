@@ -30,8 +30,10 @@ Env vars:
                         (same semantics as swe_agent_function.py)
 """
 
+import asyncio
 import logging
 import os
+import random
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
@@ -40,6 +42,12 @@ from openai import AsyncOpenAI
 logger = logging.getLogger(__name__)
 
 _DEFAULT_ECHO_URL = "https://openenv-echo-env.hf.space"
+
+# The hosted Echo space serves a single MCP session at a time
+# (CAPACITY_REACHED). Episodes hold the session only for the tiny reset+step
+# round-trip, so retrying with jittered backoff serializes them cheaply.
+_CAPACITY_MAX_WAIT_S = 180.0
+_CAPACITY_BACKOFF_S = (0.25, 1.5)
 
 
 def _resolve_session_url(base_url: str) -> str:
@@ -58,6 +66,24 @@ def _extract_messages(prompt: Any) -> list[dict[str, str]]:
     if isinstance(prompt, list):
         return prompt
     return [{"role": "user", "content": str(prompt)}]
+
+
+async def _run_episode(EchoEnv: Any, CallToolAction: Any, env_url: str, action_text: str) -> float:
+    """reset()+step() the Echo env, retrying while the single session is busy."""
+    deadline = asyncio.get_event_loop().time() + _CAPACITY_MAX_WAIT_S
+    while True:
+        try:
+            async with EchoEnv(base_url=env_url) as env:
+                await env.reset()
+                result = await env.step(
+                    CallToolAction(tool_name="echo_message", arguments={"message": action_text})
+                )
+                return float(getattr(result, "reward", 0.0) or 0.0)
+        except Exception as e:
+            if "CAPACITY_REACHED" in str(e) and asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(random.uniform(*_CAPACITY_BACKOFF_S))
+                continue
+            raise
 
 
 async def run(
@@ -81,21 +107,21 @@ async def run(
     policy = AsyncOpenAI(base_url=session_url, api_key="EMPTY")
 
     try:
-        async with EchoEnv(base_url=env_url) as env:
-            await env.reset()
+        # Generate the policy action FIRST, with no env session held -- so the
+        # (slow) LLM calls for every episode run concurrently through sglang.
+        # miles' sampling params (top_k, min_tokens, ...) are sglang-specific and
+        # not accepted as top-level kwargs by the OpenAI client, so forward them
+        # via extra_body (merged into the request body sglang reads).
+        messages = _extract_messages(prompt)
+        completion = await policy.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            extra_body=request_kwargs,
+        )
+        action_text = completion.choices[0].message.content or ""
 
-            messages = _extract_messages(prompt)
-            completion = await policy.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                **request_kwargs,
-            )
-            action_text = completion.choices[0].message.content or ""
-
-            result = await env.step(
-                CallToolAction(tool_name="echo_message", arguments={"message": action_text})
-            )
-            reward = float(getattr(result, "reward", 0.0) or 0.0)
+        # Only the tiny reset+step round-trip holds the single Echo session.
+        reward = await _run_episode(EchoEnv, CallToolAction, env_url, action_text)
     except Exception as e:
         logger.error(f"OpenEnv Echo episode failed: {e}", exc_info=True)
         return None
