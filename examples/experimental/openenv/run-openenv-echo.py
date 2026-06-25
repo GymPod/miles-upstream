@@ -49,7 +49,7 @@ class ScriptArgs(U.ExecuteTrainConfig):
     model_name: str = "GLM-4.7-Flash"
     hf_checkpoint: str = "zai-org/GLM-4.7-Flash"
     ref_load: str = "/root/GLM-4.7-Flash_torch_dist"
-    save_dir: str = "/root/GLM-4.7-Flash_openenv_echo/"
+    save_dir: str = "/workspace/GLM-4.7-Flash_openenv_echo/"
     prompt_data: str = "/root/echo_train.jsonl"
 
     # Training settings (small for a smoke test)
@@ -134,7 +134,7 @@ def execute(args: ScriptArgs):
         "--sequence-parallel "
         "--pipeline-model-parallel-size 1 "
         "--context-parallel-size 1 "
-        "--expert-model-parallel-size 8 "
+        "--expert-model-parallel-size 2 "  # single 8-GPU node: TP=4 -> DP=2, so EP<=2
         "--expert-tensor-parallel-size 1 "
         "--recompute-granularity full "
         "--recompute-method uniform "
