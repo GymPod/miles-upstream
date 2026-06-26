@@ -241,7 +241,13 @@ async def _multi_turn(
 
             step_result = await env.step(action_cls(action_type="exec", command=command))
             output = _obs_field(step_result, "output")
-            convo.append({"role": "tool", "content": output[:_OBS_CHAR_CAP]})
+            # Feed the command output back as a user turn, not a tool turn. GLM
+            # emits native tool_calls that we must echo verbatim (above) for the
+            # session server's prefix match; a role="tool" reply would then have
+            # to carry a matching tool_call_id and trips OpenAI tool-call
+            # validation. A plain user turn sidesteps the handshake -- the same
+            # text protocol the Harbor mini-swe-agent scaffold uses.
+            convo.append({"role": "user", "content": output[:_OBS_CHAR_CAP]})
 
         eval_result = await env.step(action_cls(action_type="evaluate"))
         reward = float(getattr(eval_result, "reward", 0.0) or 0.0)
