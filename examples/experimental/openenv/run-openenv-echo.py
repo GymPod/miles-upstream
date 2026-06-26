@@ -21,7 +21,6 @@ Usage:
 """
 
 import os
-import socket
 import subprocess
 import time
 from dataclasses import dataclass
@@ -64,7 +63,10 @@ class ScriptArgs(U.ExecuteTrainConfig):
     # Optional host rewrite for the policy URL (only needed if the in-process
     # agent cannot reach the session server at its raw base_url host).
     router_external_host: str = os.environ.get("MILES_ROUTER_EXTERNAL_HOST", "")
-    miles_host_ip: str = os.environ.get("MILES_HOST_IP", socket.gethostname())
+    # Leave empty so miles resolves the numeric LAN IP itself. sgl-router's Rust
+    # binder rejects a hostname ("invalid socket address syntax"), and a numeric
+    # base_url host keeps the in-process policy client off hostname DNS too.
+    miles_host_ip: str = os.environ.get("MILES_HOST_IP", "")
 
     # W&B settings
     wandb_key: str = os.environ.get("WANDB_KEY", os.environ.get("WANDB_API_KEY", ""))
@@ -238,8 +240,9 @@ def execute(args: ScriptArgs):
         "MILES_EXPERIMENTAL_ROLLOUT_REFACTOR": "1",
         "OPENENV_ENV_URL": args.openenv_env_url,
         "AGENT_MODEL_NAME": args.agent_model_name,
-        "MILES_HOST_IP": args.miles_host_ip,
     }
+    if args.miles_host_ip:
+        extra_env_vars["MILES_HOST_IP"] = args.miles_host_ip
     if args.router_external_host:
         extra_env_vars["MILES_ROUTER_EXTERNAL_HOST"] = args.router_external_host
 
