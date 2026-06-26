@@ -25,10 +25,8 @@ offloaded, plus the colocated sglang weights + KV cache) on H200 (140 GB).
 
 | script | model | type | GPUs | offload |
 |---|---|---|---|---|
-| `qwen2.5-7b` | Qwen2.5-7B | dense | 1×4 | – |
 | `qwen3-4b` | Qwen3-4B | dense | 1×4 | – |
 | `qwen3.5-4b` | Qwen3.5-4B | dense | 1×4 | – |
-| `llama3.1-8b` | Llama-3.1-8B | dense | 1×4 | – |
 | `nemotron3-nano-4b` | Nemotron-3-Nano-4B | dense (Mamba2 hybrid) | 1×4 | – |
 | `gemma-4-31b` | Gemma-4-31B | dense | 1×8 | ✓ |
 | `gpt-oss-20b` | gpt-oss-20B | MoE | 1×8 | – |
@@ -39,8 +37,9 @@ offloaded, plus the colocated sglang weights + KV cache) on H200 (140 GB).
 | `glm4.7-flash` | GLM-4.7-Flash | MoE (`glm4_moe_lite`, fp32-master) | 1×8 | ✓ |
 | `qwen3-next-80b-a3b` | Qwen3-Next-80B-A3B | MoE (GatedDeltaNet) | 1×8 | ✓ |
 | `deepseek-v3` | DeepSeek-V3 (671B) | MoE | 8×8 (64) | ✓ |
+| `kimi-k2.5` | Kimi-K2.5 (~1T) | MoE | 16×8 (128) | ✓ |
 
-**Note on the very large ones:** `deepseek-v3` (and other 100B+ MoEs) are sized for *pure*
-FSDP data-parallel sharding — this backend has no expert/pipeline parallelism, so at 671B it's
-aggressive (sized for weights+grads+sglang with the optimizer on CPU). Adjust `NNODES`/
-`GPUS_PER_NODE`/`MAX_TOKENS_PER_GPU` to your cluster.
+**Note on the very large ones:** `deepseek-v3` (671B) and `kimi-k2.5` (~1T) are sized for *pure*
+FSDP data-parallel sharding — this backend has no expert/pipeline parallelism, so at this scale it's
+aggressive (sized for weights+grads+sglang with the optimizer on CPU; in practice they'd want EP/PP).
+Adjust `NNODES`/`GPUS_PER_NODE`/`MAX_TOKENS_PER_GPU` to your cluster.
