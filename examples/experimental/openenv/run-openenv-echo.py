@@ -177,7 +177,7 @@ def execute(args: ScriptArgs):
 
     agent_args = (
         "--custom-generate-function-path miles.rollout.generate_hub.agentic_tool_call.generate "
-        "--custom-agent-function-path openenv_echo_agent_function.run "
+        "--custom-agent-function-path openenv_agent_function.run "
         "--custom-rm-path openenv_generate.reward_func "
         "--dynamic-sampling-filter-path miles.rollout.filter_hub.dynamic_sampling_filters.check_no_aborted "
         "--tito-model glm47 "
@@ -238,6 +238,7 @@ def execute(args: ScriptArgs):
     extra_env_vars = {
         "PYTHONPATH": f"{args.megatron_path}:{SCRIPT_DIR}:{miles_root}",
         "MILES_EXPERIMENTAL_ROLLOUT_REFACTOR": "1",
+        "OPENENV_ENV_TYPE": "echo",
         "OPENENV_ENV_URL": args.openenv_env_url,
         "AGENT_MODEL_NAME": args.agent_model_name,
     }
