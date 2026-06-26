@@ -21,6 +21,8 @@ Env vars:
   OPENENV_ENV_TYPE   echo | coding | tbench2   (required)
   OPENENV_ENV_URL    base_url of the env server (default: per-env)
   OPENENV_MAX_TURNS  multi-turn cap (default: 30)
+  OPENENV_MESSAGE_TIMEOUT_S  per-message WS recv timeout (default: 600; docker-mode
+                     reset/exec/pytest routinely exceed the client default of 60)
   AGENT_MODEL_NAME   model name sent to the policy (default: "model")
   MILES_ROUTER_EXTERNAL_HOST  optional host rewrite for off-cluster agents
 """
@@ -49,6 +51,10 @@ _FENCE_RE = re.compile(r"```(?:python|py|bash|sh)?\s*\n?(.*?)```", re.DOTALL | r
 
 # Max chars of command output fed back to the policy per turn (keeps context bounded).
 _OBS_CHAR_CAP = 4000
+
+# Per-message WS recv timeout. Docker-mode tbench2 reset (container create),
+# exec, and evaluate (pytest) each routinely exceed the EnvClient default of 60s.
+_MESSAGE_TIMEOUT_S = float(os.getenv("OPENENV_MESSAGE_TIMEOUT_S", "600"))
 
 
 def _resolve_session_url(base_url: str) -> str:
@@ -132,7 +138,7 @@ async def _with_env(env_cls: Any, env_url: str, body: Callable[[Any], Any]) -> A
     deadline = asyncio.get_event_loop().time() + _CAPACITY_MAX_WAIT_S
     while True:
         try:
-            async with env_cls(base_url=env_url) as env:
+            async with env_cls(base_url=env_url, message_timeout_s=_MESSAGE_TIMEOUT_S) as env:
                 return await body(env)
         except Exception as e:
             if "CAPACITY_REACHED" in str(e) and asyncio.get_event_loop().time() < deadline:
