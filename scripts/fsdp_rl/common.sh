@@ -27,7 +27,7 @@
 : "${GPUS_PER_NODE:=8}"
 : "${CPU_OFFLOAD:=0}"
 : "${MAX_TOKENS_PER_GPU:=16384}"
-: "${SGLANG_MEM:=0.55}"
+: "${SGLANG_MEM:=0.45}"   # colocate: leave enough GPU for the training step (raise CPU_OFFLOAD / lower this if OOM)
 : "${SEQ:=8192}"
 : "${RUN_ID:=fsdp-rl}"
 : "${MASTER_ADDR:=127.0.0.1}"
@@ -51,7 +51,7 @@ ROLLOUT_ARGS=(
    --rollout-max-response-len "$SEQ" --rollout-temperature 1.0 --global-batch-size 256
 )
 EVAL_ARGS=(
-   --eval-interval 10 --eval-prompt-data gsm8k "$GSM8K_TEST"
+   --eval-interval 10 --eval-prompt-data gsm8k "$GSM8K_TEST" --eval-input-key messages
    --n-samples-per-eval-prompt 1 --eval-max-response-len "$SEQ" --eval-top-k 1
 )
 GRPO_ARGS=( --advantage-estimator grpo --kl-loss-coef 0.0 --kl-coef 0.0 --entropy-coef 0.0 --eps-clip 0.2 --eps-clip-high 0.28 )
@@ -64,7 +64,8 @@ TRAIN_BACKEND_ARGS=(
 )
 [ "$CPU_OFFLOAD" = "1" ] && TRAIN_BACKEND_ARGS+=( --fsdp-cpu-offload )
 PERF_ARGS=( --use-dynamic-batch-size --max-tokens-per-gpu "$MAX_TOKENS_PER_GPU" )
-MISC_ARGS=( --actor-num-nodes "$NNODES" --actor-num-gpus-per-node "$GPUS_PER_NODE" --colocate --use-fault-tolerance )
+# --ci-test is required: the FSDP backend is experimental and gated behind it (arguments.py raises otherwise).
+MISC_ARGS=( --actor-num-nodes "$NNODES" --actor-num-gpus-per-node "$GPUS_PER_NODE" --colocate --use-fault-tolerance --ci-test --ci-disable-logprobs-checker )
 WANDB_ARGS=()
 [ -n "${WANDB_API_KEY:-}" ] && WANDB_ARGS=( --use-wandb --wandb-project "${WANDB_PROJECT:-miles_fsdp_rl}" --wandb-group "$RUN_ID" --wandb-key "$WANDB_API_KEY" )
 
