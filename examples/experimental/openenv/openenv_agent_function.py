@@ -46,8 +46,14 @@ logger = logging.getLogger(__name__)
 # (MAX_CONCURRENT_ENVS), closing the WebSocket cleanly (ConnectionClosedOK) once
 # full. Both are transient -- episodes hold a slot only for their rollout -- so
 # jittered backoff + retry serializes the surplus rather than failing it.
-_CAPACITY_MAX_WAIT_S = 180.0
-_CAPACITY_BACKOFF_S = (0.25, 1.5)
+#
+# A rollout fans out more episodes than the server has slots (e.g. ~32 episodes
+# vs a 16-session cap), so a queued episode must outwait a full episode ahead of
+# it -- minutes, not seconds. The wait deadline is sized for that; the backoff
+# ceiling is wide enough that 16 queued episodes don't hammer the server with
+# reconnects while they wait.
+_CAPACITY_MAX_WAIT_S = 1800.0
+_CAPACITY_BACKOFF_S = (1.0, 5.0)
 
 # Strip a single fenced block: ```python / ```bash / ``` ... ```.
 _FENCE_RE = re.compile(r"```(?:python|py|bash|sh)?\s*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
