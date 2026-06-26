@@ -41,8 +41,11 @@ from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
-# Some hosted env spaces admit a single session at a time (CAPACITY_REACHED).
-# Episodes hold a session only briefly, so jittered backoff serializes them.
+# Env slots are finite: hosted spaces admit one session at a time
+# (CAPACITY_REACHED) and the docker-mode tbench2 server caps concurrent envs
+# (MAX_CONCURRENT_ENVS), closing the WebSocket cleanly (ConnectionClosedOK) once
+# full. Both are transient -- episodes hold a slot only for their rollout -- so
+# jittered backoff + retry serializes the surplus rather than failing it.
 _CAPACITY_MAX_WAIT_S = 180.0
 _CAPACITY_BACKOFF_S = (0.25, 1.5)
 
@@ -55,6 +58,19 @@ _OBS_CHAR_CAP = 4000
 # Per-message WS recv timeout. Docker-mode tbench2 reset (container create),
 # exec, and evaluate (pytest) each routinely exceed the EnvClient default of 60s.
 _MESSAGE_TIMEOUT_S = float(os.getenv("OPENENV_MESSAGE_TIMEOUT_S", "600"))
+
+
+def _is_retryable_env_error(e: BaseException) -> bool:
+    """True when an env op failed only because no env slot was free (transient).
+
+    The docker-mode tbench2 server caps concurrent envs; over that cap it either
+    returns CAPACITY_REACHED or closes the WebSocket cleanly (ConnectionClosedOK).
+    Both mean "retry once a slot frees up", not a genuine episode failure. Match
+    the close exceptions by class name so the adapter need not import websockets.
+    """
+    if "CAPACITY_REACHED" in str(e):
+        return True
+    return type(e).__name__ in {"ConnectionClosedOK", "ConnectionClosedError", "ConnectionClosed"}
 
 
 def _resolve_session_url(base_url: str) -> str:
@@ -141,7 +157,7 @@ async def _with_env(env_cls: Any, env_url: str, body: Callable[[Any], Any]) -> A
             async with env_cls(base_url=env_url, message_timeout_s=_MESSAGE_TIMEOUT_S) as env:
                 return await body(env)
         except Exception as e:
-            if "CAPACITY_REACHED" in str(e) and asyncio.get_event_loop().time() < deadline:
+            if _is_retryable_env_error(e) and asyncio.get_event_loop().time() < deadline:
                 await asyncio.sleep(random.uniform(*_CAPACITY_BACKOFF_S))
                 continue
             raise
@@ -207,8 +223,17 @@ async def _multi_turn(
             completion = await policy.chat.completions.create(
                 model=model_name, messages=convo, extra_body=request_kwargs
             )
-            reply = completion.choices[0].message.content or ""
-            convo.append({"role": "assistant", "content": reply})
+            message = completion.choices[0].message
+            reply = message.content or ""
+            # Echo the assistant turn back verbatim. The session server stores the
+            # message exactly as SGLang emitted it -- content plus reasoning_content
+            # and tool_calls split out by the reasoning/tool-call parsers -- and
+            # matches each later request against that stored prefix. A thin
+            # {role, content} dict drops reasoning_content/tool_calls, diverges at
+            # the assistant turn, and trips "rollback failed: no assistant message
+            # in matched prefix". model_dump round-trips whatever the SDK parsed
+            # (extras like reasoning_content included).
+            convo.append(message.model_dump(exclude_none=True))
 
             command = _strip_fence(reply) if "```" in reply else reply.strip()
             if not command or command.upper().startswith("TASK_COMPLETE"):
