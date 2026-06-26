@@ -247,7 +247,11 @@ async def _multi_turn(
             # to carry a matching tool_call_id and trips OpenAI tool-call
             # validation. A plain user turn sidesteps the handshake -- the same
             # text protocol the Harbor mini-swe-agent scaffold uses.
-            convo.append({"role": "user", "content": output[:_OBS_CHAR_CAP]})
+            #
+            # Substitute a placeholder when a command produces no stdout: SGLang
+            # rejects an empty message content with "content cannot be empty".
+            content = output[:_OBS_CHAR_CAP] or "(no output)"
+            convo.append({"role": "user", "content": content})
 
         eval_result = await env.step(action_cls(action_type="evaluate"))
         reward = float(getattr(eval_result, "reward", 0.0) or 0.0)
