@@ -18,10 +18,11 @@ Each script just sets a few env vars and sources `common.sh`. Override paths wit
 `wandb` turns on automatically when `WANDB_API_KEY` is set. Multi-node scripts print the
 `ray start --address=...` line the worker nodes need.
 
-**CPU offload is optional** — it trades step speed for GPU memory. The bigger models default to
-`CPU_OFFLOAD=1` (optimizer/params/grads on CPU), but if a model fits on its GPUs without it, run with
-`CPU_OFFLOAD=0` for faster steps (e.g. `CPU_OFFLOAD=0 bash scripts/fsdp_rl/qwen3-30b-a3b.sh`), or bump
-`GPUS_PER_NODE`/`NNODES` so it fits and drop the offload.
+**CPU offload is on by default** (`CPU_OFFLOAD=1`) — optimizer/params to CPU so the colocated training
+step fits alongside sglang (validated: a 4B trains end-to-end this way with the 8k seq). If a model has
+GPU room, `CPU_OFFLOAD=0 bash scripts/fsdp_rl/<m>.sh` runs faster. `ROLLOUT_GPUS_PER_ENGINE` sets
+sglang's TP per engine — `1` for ≤24B, `2` for 26B+ (they don't fit one GPU at the default sglang
+fraction). On OOM: lower `SGLANG_MEM` or `MAX_TOKENS_PER_GPU` (defaults 0.4 / 10240).
 
 ## Models & GPU sizing
 

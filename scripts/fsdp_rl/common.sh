@@ -25,9 +25,10 @@
 : "${HF_HOME:=/storage/cache/huggingface}"
 : "${NNODES:=1}"
 : "${GPUS_PER_NODE:=8}"
-: "${CPU_OFFLOAD:=0}"
-: "${MAX_TOKENS_PER_GPU:=16384}"
-: "${SGLANG_MEM:=0.45}"   # colocate: leave enough GPU for the training step (raise CPU_OFFLOAD / lower this if OOM)
+: "${CPU_OFFLOAD:=1}"     # default on: optimizer/params to CPU so the colocated training step fits (validated)
+: "${ROLLOUT_GPUS_PER_ENGINE:=1}"   # sglang TP per engine; 26B+ models need 2 (don't fit one GPU at SGLANG_MEM)
+: "${MAX_TOKENS_PER_GPU:=10240}"   # fits one 8k-response sequence + prompt; bigger OOMs the loss/logits
+: "${SGLANG_MEM:=0.4}"   # colocate: leave enough GPU for the training step (raise CPU_OFFLOAD / lower this if OOM)
 : "${SEQ:=8192}"
 : "${RUN_ID:=fsdp-rl}"
 : "${MASTER_ADDR:=127.0.0.1}"
@@ -56,7 +57,7 @@ EVAL_ARGS=(
 )
 GRPO_ARGS=( --advantage-estimator grpo --kl-loss-coef 0.0 --kl-coef 0.0 --entropy-coef 0.0 --eps-clip 0.2 --eps-clip-high 0.28 )
 OPTIMIZER_ARGS=( --optimizer adam --lr 1e-6 --lr-decay-style constant --weight-decay 0.1 --adam-beta1 0.9 --adam-beta2 0.98 )
-SGLANG_ARGS=( --rollout-num-gpus-per-engine 1 --sglang-mem-fraction-static "$SGLANG_MEM" --sglang-decode-log-interval 1000 --sglang-chunked-prefill-size 4096 --sglang-attention-backend fa3 )
+SGLANG_ARGS=( --rollout-num-gpus-per-engine "$ROLLOUT_GPUS_PER_ENGINE" --sglang-mem-fraction-static "$SGLANG_MEM" --sglang-decode-log-interval 1000 --sglang-chunked-prefill-size 4096 --sglang-attention-backend fa3 )
 TRAIN_BACKEND_ARGS=(
    --train-backend fsdp --update-weight-buffer-size 536870912
    --gradient-checkpointing --attn-implementation eager
