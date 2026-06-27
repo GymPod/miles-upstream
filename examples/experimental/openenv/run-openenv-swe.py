@@ -69,6 +69,11 @@ class ScriptArgs(U.ExecuteTrainConfig):
     # OpenEnv settings
     openenv_env_url: str = os.environ.get("OPENENV_ENV_URL", "http://localhost:8004")
     agent_model_name: str = os.environ.get("AGENT_MODEL_NAME", "model")
+    # Optional path to an OpenEnv source checkout (its ``src`` dir) to prepend to
+    # PYTHONPATH. Use when ``openenv`` is not pip-installed in the rollout env --
+    # e.g. on an ephemeral pod where the install does not survive restarts; point
+    # this at a checkout on a persistent volume instead.
+    openenv_src_path: str = os.environ.get("OPENENV_SRC_PATH", "")
     openenv_max_turns: int = int(os.environ.get("OPENENV_MAX_TURNS", "30"))
     # Optional host rewrite for the policy URL (only needed if the in-process
     # agent cannot reach the session server at its raw base_url host).
@@ -245,8 +250,12 @@ def execute(args: ScriptArgs):
 
     miles_root = U.repo_base_dir
 
+    pythonpath = f"{args.megatron_path}:{SCRIPT_DIR}:{miles_root}"
+    if args.openenv_src_path:
+        pythonpath = f"{args.openenv_src_path}:{pythonpath}"
+
     extra_env_vars = {
-        "PYTHONPATH": f"{args.megatron_path}:{SCRIPT_DIR}:{miles_root}",
+        "PYTHONPATH": pythonpath,
         "MILES_EXPERIMENTAL_ROLLOUT_REFACTOR": "1",
         "OPENENV_ENV_TYPE": "swe",
         "OPENENV_ENV_URL": args.openenv_env_url,
