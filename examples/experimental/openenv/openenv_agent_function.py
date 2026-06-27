@@ -3,7 +3,7 @@
 miles selects the policy and calls ``run`` once per episode via
 ``--custom-agent-function-path openenv_agent_function.run``. Which OpenEnv
 environment that episode drives is chosen by ``OPENENV_ENV_TYPE``
-(echo | coding | tbench2), so the same file serves all tasks -- only the
+(echo | coding | tbench2 | swe), so the same file serves all tasks -- only the
 prompt-data and the env server differ. There is no per-task (or per-env) agent
 function to write: new single-turn envs are one entry in ``_ENV_SPECS``.
 
@@ -14,11 +14,11 @@ on every turn, including each turn of a multi-turn env.
 Per-env behavior lives in ``_ENV_SPECS``:
   * ``loader``      -- lazy import of the env client + action class,
   * ``default_url`` -- env server URL when OPENENV_ENV_URL is unset,
-  * ``multi_turn``  -- single ``step`` (echo/coding) vs an agentic loop (tbench2),
+  * ``multi_turn``  -- single ``step`` (echo/coding) vs an agentic loop (tbench2/swe),
   * ``build_action``-- (single-turn only) policy text -> env action.
 
 Env vars:
-  OPENENV_ENV_TYPE   echo | coding | tbench2   (required)
+  OPENENV_ENV_TYPE   echo | coding | tbench2 | swe   (required)
   OPENENV_ENV_URL    base_url of the env server (default: per-env)
   OPENENV_MAX_TURNS  multi-turn cap (default: 30)
   OPENENV_MESSAGE_TIMEOUT_S  per-message WS recv timeout (default: 600; docker-mode
@@ -132,6 +132,12 @@ def _load_tbench2() -> dict[str, Any]:
     return {"env": Tbench2Env, "action": Tbench2Action}
 
 
+def _load_swe() -> dict[str, Any]:
+    from swe_env import SweAction, SweEnv
+
+    return {"env": SweEnv, "action": SweAction}
+
+
 def _echo_action(classes: dict[str, Any], text: str) -> Any:
     return classes["action"](tool_name="echo_message", arguments={"message": text})
 
@@ -152,6 +158,7 @@ _ENV_SPECS: dict[str, EnvSpec] = {
     "echo": EnvSpec(_load_echo, "https://openenv-echo-env.hf.space", False, _echo_action),
     "coding": EnvSpec(_load_coding, "http://localhost:8002", False, _coding_action),
     "tbench2": EnvSpec(_load_tbench2, "http://localhost:8003", True),
+    "swe": EnvSpec(_load_swe, "http://localhost:8004", True),
 }
 
 
