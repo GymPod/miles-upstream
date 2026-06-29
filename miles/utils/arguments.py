@@ -1777,6 +1777,14 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "--ci-check-model-hash",
                 action="store_true",
             )
+            parser.add_argument(
+                "--ci-enable-metrics-capture",
+                action="store_true",
+                default=False,
+                help="Capture target training/rollout metrics into a per-process local "
+                "record (NDJSON under $MILES_CI_GATE_RECORD_DIR) for the CI metric-history "
+                "gate. Off by default; no record is written and behavior is unchanged.",
+            )
             return parser
 
         def add_session_arguments(parser):

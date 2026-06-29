@@ -128,6 +128,9 @@ BACKEND_REGISTRY: dict[str, tuple[type[TrackingBackend], str]] = {
     "mlflow": (MlflowBackend, "use_mlflow"),
     "prometheus": (PrometheusBackend, "use_prometheus"),
 }
+# ci_history is registered from this package's __init__, not here: base.py must
+# never import a backend module (ci_history imports TrackingBackend from base,
+# so a back-import would be circular).
 
 
 class TrackingManager:
