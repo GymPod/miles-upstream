@@ -18,6 +18,20 @@ from miles.utils.misc import load_function
 
 logger = logging.getLogger(__name__)
 
+CI_GATE_RECORD_DIR_ENV = "MILES_CI_GATE_RECORD_DIR"
+
+
+def resolve_ci_enable_metrics_capture(flag_value, env=None):
+    """Resolve the effective --ci-enable-metrics-capture value.
+
+    True when the flag is explicitly set, or when MILES_CI_GATE_RECORD_DIR is
+    present (and non-empty) in the environment. When the env var is unset the
+    result is the flag value itself, so default behavior stays unchanged.
+    """
+    if env is None:
+        env = os.environ
+    return bool(flag_value) or bool(env.get(CI_GATE_RECORD_DIR_ENV))
+
 
 def reset_arg(parser, name, **kwargs):
     """
@@ -1937,6 +1951,8 @@ def parse_args(add_custom_arguments=None):
                 "It has been moved to miles.backends.experimental. "
                 "Contributions are welcome if you are interested in improving it."
             )
+
+    args.ci_enable_metrics_capture = resolve_ci_enable_metrics_capture(args.ci_enable_metrics_capture)
 
     miles_validate_args(args)
 
