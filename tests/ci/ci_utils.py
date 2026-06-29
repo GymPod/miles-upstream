@@ -1,3 +1,4 @@
+import datetime
 import json
 import logging
 import os
@@ -9,7 +10,10 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from tests.ci.ci_register import CIRegistry
+from tests.ci.ci_register import CIRegistry, HWBackend
+from tests.ci.history_gate import evaluate_gate
+from tests.ci.metric_history import MetricSample, NeonMetricHistoryStore, RunIdentity, RunProvenance
+from tests.ci.metric_history.neon_store import NEON_DATABASE_URL_ENV
 
 # Env var the training process reads to find the per-attempt record directory; kept
 # in sync with miles.utils.tracking_utils.ci_history.RECORD_DIR_ENV.
@@ -183,6 +187,158 @@ def write_github_step_summary(content: str):
             f.write(content)
 
 
+def is_nightly(stripped_labels: set[str] | None = None) -> bool:
+    """True when this run should write trusted baselines.
+
+    A run is a baseline-writing nightly when the GitHub event is ``schedule`` or
+    when a stripped ``nightly`` label is present. This is the harness signal for
+    "this run produces baselines", distinct from ``args.nightly`` /
+    ``NIGHTLY_SUITES`` which select which *tests* run.
+    """
+    if os.environ.get("GITHUB_EVENT_NAME") == "schedule":
+        return True
+    if stripped_labels and "nightly" in stripped_labels:
+        return True
+    return False
+
+
+def _gate_pr_number_from_env() -> int | None:
+    """Parse the PR number out of ``GITHUB_COMMIT_NAME`` (``{sha}_{pr|non-pr}``).
+
+    The workflow sets ``GITHUB_COMMIT_NAME = {github.sha}_{pr_number||'non-pr'}``.
+    A push / schedule run carries the ``non-pr`` sentinel and yields None.
+    """
+    commit_name = os.environ.get("GITHUB_COMMIT_NAME")
+    if not commit_name or "_" not in commit_name:
+        return None
+    tail = commit_name.rsplit("_", 1)[1]
+    if tail == "non-pr":
+        return None
+    try:
+        return int(tail)
+    except ValueError:
+        return None
+
+
+def _gate_commit_sha_from_env() -> str:
+    """The run's commit sha: prefer ``GITHUB_SHA``; fall back to the sha encoded
+    in ``GITHUB_COMMIT_NAME`` (``{sha}_{pr|non-pr}``); else empty string."""
+    sha = os.environ.get("GITHUB_SHA")
+    if sha:
+        return sha
+    commit_name = os.environ.get("GITHUB_COMMIT_NAME")
+    if commit_name and "_" in commit_name:
+        return commit_name.rsplit("_", 1)[0]
+    return commit_name or ""
+
+
+def _gate_int_env(name: str) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def gate_provenance_from_env() -> RunProvenance:
+    """Build a :class:`RunProvenance` from the GitHub Actions environment.
+
+    Reads ``GITHUB_SHA`` (or the sha embedded in ``GITHUB_COMMIT_NAME``),
+    ``GITHUB_RUN_ID``, ``GITHUB_RUN_ATTEMPT``, ``GITHUB_EVENT_NAME``,
+    ``GITHUB_REF``, and the PR number embedded in ``GITHUB_COMMIT_NAME``. Missing
+    values become ``None`` (run_id / attempt / pr_number) or an empty string
+    (commit_sha) rather than raising -- provenance is audit metadata, never part
+    of the baseline key.
+    """
+    return RunProvenance(
+        commit_sha=_gate_commit_sha_from_env(),
+        pr_number=_gate_pr_number_from_env(),
+        github_run_id=_gate_int_env("GITHUB_RUN_ID"),
+        github_run_attempt=_gate_int_env("GITHUB_RUN_ATTEMPT"),
+        event_name=os.environ.get("GITHUB_EVENT_NAME"),
+        ref=os.environ.get("GITHUB_REF"),
+    )
+
+
+def build_store_from_env():
+    """Return the metric-history store for this environment, or None.
+
+    A hosted store is used only when ``NEON_DATABASE_URL`` is set (CI with the
+    secret inherited). Locally / in dev the var is unset and this returns None,
+    which disables the gate hook entirely -- no store, no evaluation, no writes.
+    """
+    if os.environ.get(NEON_DATABASE_URL_ENV):
+        return NeonMetricHistoryStore()
+    return None
+
+
+def _shadow_verdict_line(filename: str, result) -> str:
+    """One-line human-readable shadow verdict for a PR run.
+
+    Shadow runs never write a row and never change pass/fail; this is the only
+    artifact they emit besides the per-metric detail.
+    """
+    verdict = "TRUSTED" if result.trusted else "NOT-TRUSTED"
+    return f"[CI Gate][shadow] {filename}: {verdict} ({len(result.metrics)} metric(s))"
+
+
+def run_gate_hook(
+    filename: str,
+    merged_record_path: str,
+    *,
+    store,
+    registry: CIRegistry,
+    nightly: bool,
+    provenance: RunProvenance,
+    now_iso: str | None = None,
+) -> None:
+    """Evaluate the history gate for one passed CUDA test and act on the verdict.
+
+    NIGHTLY-marked run -> persist the run as a trusted/untrusted baseline via
+    ``store.write_run``. ORDINARY PR run -> never write; log a shadow verdict and
+    append it to ``GITHUB_STEP_SUMMARY``.
+
+    The entire body is wrapped: any gate or store error is caught and logged and
+    NEVER propagates, so the gate verdict can never change the test's pass/fail
+    this round.
+    """
+    try:
+        result = evaluate_gate(filename, merged_record_path, store)
+
+        if nightly:
+            identity = RunIdentity(
+                test_path=result.test_path,
+                backend=result.backend,
+                suite=result.suite,
+                test_file_hash=result.test_file_hash,
+            )
+            created_at = now_iso or datetime.datetime.now(datetime.timezone.utc).isoformat()
+            values = [
+                MetricSample(m.metric_key, m.sub_label, m.current) for m in result.metrics if m.current is not None
+            ]
+            store.write_run(
+                identity,
+                provenance,
+                created_at,
+                trusted=result.trusted,
+                values=values,
+            )
+            logger.info(
+                f"[CI Gate][nightly] {filename}: wrote baseline " f"(trusted={result.trusted}, {len(values)} value(s))"
+            )
+        else:
+            line = _shadow_verdict_line(filename, result)
+            logger.info(line)
+            detail = "\n".join(f"  - {m.metric_key} ({m.sub_label}): {m.reason}" for m in result.metrics)
+            write_github_step_summary(line + ("\n" + detail if detail else "") + "\n")
+    except Exception as e:
+        # The gate is informational this round: a gate error, a missing record,
+        # or a DB error must never fail the test or CI.
+        logger.warning(f"[CI Gate] hook failed for {filename}: {type(e).__name__}: {e}")
+
+
 def _gha_emit_group(title: str) -> None:
     if os.environ.get("GITHUB_ACTIONS") != "true":
         return
@@ -226,6 +382,9 @@ def run_unittest_files(
     enable_retry: bool = False,
     max_attempts: int = 2,
     retry_wait_seconds: int = 60,
+    gate_store=None,
+    gate_nightly: bool = False,
+    gate_provenance: RunProvenance | None = None,
 ):
     """
     Run a list of test files.
@@ -239,6 +398,12 @@ def run_unittest_files(
                      assertion failures (not code errors).
         max_attempts: Maximum number of attempts per file including initial run (default: 2).
         retry_wait_seconds: Seconds to wait between retries (default: 60).
+        gate_store: Metric-history store for the regression gate, or None to skip
+                    the gate hook entirely. Built by `build_store_from_env`.
+        gate_nightly: True when this run writes trusted baselines (nightly);
+                    False for an ordinary PR run, which only logs a shadow verdict.
+        gate_provenance: RunProvenance for the gate write; defaults to
+                    `gate_provenance_from_env()` when None.
     """
     tic = time.perf_counter()
     success = True
@@ -309,6 +474,9 @@ def run_unittest_files(
         attempt = 1
         file_passed = False
         was_retried = False
+        # Merged record path of the PASSING attempt only. Failed attempts merge
+        # their records for debugging but are never selected for the gate.
+        passing_record_path: str | None = None
 
         while attempt <= (max_attempts if enable_retry else 1):
             if attempt > 1:
@@ -342,6 +510,8 @@ def run_unittest_files(
                     if ret_code == 0:
                         attempt_status = "PASS"
                         file_passed = True
+                        if attempt_record_dir is not None:
+                            passing_record_path = f"{attempt_record_dir}.merged.ndjson"
                         if was_retried:
                             logger.info(f"\nPASSED on retry (attempt {attempt}): {filename}\n")
                             retried_tests.append((filename, attempt, "passed"))
@@ -405,6 +575,26 @@ def run_unittest_files(
                 if attempt_record_dir is not None:
                     merged_path = f"{attempt_record_dir}.merged.ndjson"
                     _merge_attempt_records(attempt_record_dir, merged_path)
+
+        # Gate hook (CUDA path only): only run_unittest_files dispatches CUDA
+        # suites; CPU suites go through pytest in run_a_suite and never reach
+        # here. Fire only on a PASS with a selected passing-attempt record and a
+        # configured store. The hook never affects file_passed / success.
+        if (
+            file_passed
+            and gate_store is not None
+            and passing_record_path is not None
+            and isinstance(file, CIRegistry)
+            and file.backend == HWBackend.CUDA
+        ):
+            run_gate_hook(
+                filename,
+                passing_record_path,
+                store=gate_store,
+                registry=file,
+                nightly=gate_nightly,
+                provenance=gate_provenance or gate_provenance_from_env(),
+            )
 
         if not file_passed:
             success = False

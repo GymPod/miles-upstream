@@ -91,7 +91,7 @@ After the test passes, the harness:
 1. merges the per-process NDJSON files into one per-run record,
 2. assigns the run-level identity (`test_path`, `backend`, `suite`, `test_file_hash`) and the GitHub provenance columns,
 3. reads the trusted history for the series, runs the two-layer gate,
-4. writes the run (`runs` + `metric_values`) with its `trusted` verdict, and fails CI if the gate failed.
+4. surfaces the verdict (logs / GitHub step summary), and — **only for nightly-marked runs** (`event_name == 'schedule'` or a `nightly` label) — writes the run (`runs` + `metric_values`) with its `trusted` verdict. An ordinary PR run stops at surfacing the verdict and writes **no rows**. Failing CI on the verdict is **not** part of this shadow rollout; it arrives in a later enforcement milestone, only for allowlisted (opted-in) tests, and only while the global kill-switch is off.
 
 Nothing is fetched from wandb at any step; the local NDJSON files are the only source for a run's own numbers.
 
