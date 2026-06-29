@@ -73,7 +73,7 @@ A run is **trusted iff it passed ALL active gates** for every value. A run that 
 
 ## Which runs write a baseline
 
-Ordinary PR runs are **read-only**: they fetch history, run the gate, and (a PR run records its result as an untrusted-eligible row per the rollout policy below) — but a normal PR **cannot move the baseline**. Only **nightly-marked** runs write baselines, where nightly is detected as:
+Ordinary PR runs are **read-only**: they fetch history, run the gate, and surface the verdict — they write **no rows at all**, so a normal PR **cannot move the baseline**. Only **nightly-marked** runs write baselines, where nightly is detected as:
 
 - `event_name == 'schedule'` (the daily cron), **or**
 - the PR carries a `nightly` label.
@@ -97,7 +97,7 @@ Nothing is fetched from wandb at any step; the local NDJSON files are the only s
 
 ## Rollout: shadow-first
 
-The gate rolls out **shadow-first**: it collects, stores, and evaluates, but **never blocks any PR** in the initial milestone — a historical-gate failure is recorded (the run lands untrusted) and surfaced, not enforced. Enforcement arrives in a later milestone behind an **allowlist** of opted-in tests plus a **global kill-switch**, so the gate can be turned hard for a known-good set and disabled wholesale if it misbehaves.
+The gate rolls out **shadow-first**: a PR run collects its numbers locally and evaluates the gate, but **never blocks any PR** in the initial milestone and **persists no row** — a historical-gate verdict is surfaced (to logs / the GitHub step summary / a PR comment), not stored and not enforced. (Recording an untrusted row on drift is the nightly run's job, not the PR run's.) Enforcement arrives in a later milestone behind an **allowlist** of opted-in tests plus a **global kill-switch**, so the gate can be turned hard for a known-good set and disabled wholesale if it misbehaves.
 
 ## Relationship to the rest of CI
 
