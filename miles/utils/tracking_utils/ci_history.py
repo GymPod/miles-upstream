@@ -1,8 +1,8 @@
 """CI metric-history collection backend.
 
-Captures a fixed set of training/rollout metrics from the live process (driver or
-Ray actor) into a per-process NDJSON record, atomically rewritten as a full
-snapshot on each update (not appended line-by-line). The record is a pure
+Captures a fixed set of training/rollout metrics from the live process into an
+NDJSON record, atomically rewritten as a full snapshot on each update (not appended
+line-by-line). The record is a pure
 process-to-harness handoff: it carries only ``{metric_key: [(step, value), ...]}``
 series, never identity (no test path), never reads wandb, and never writes to any
 cloud. Reduction and gating happen in a later step that consumes these records.
@@ -40,14 +40,12 @@ RECORD_DIR_ENV = "MILES_CI_GATE_RECORD_DIR"
 class CiHistoryBackend(TrackingBackend):
     """Accumulate target metrics in-process and persist the raw series to disk.
 
-    One instance lives per process that runs ``init_tracking`` (the driver and
-    each main-rank actor). Each instance owns a distinct NDJSON file keyed by a
-    fresh process-local id, so concurrent Ray processes never clobber each other.
+    Each initialized backend instance owns a distinct NDJSON file keyed by a
+    fresh process-local id, so separate instances do not clobber each other.
 
-    The target metrics are logged from the Ray training actor, whose ``finish()``
-    is never called (``finish_tracking()`` runs only on the driver). So every
-    ``log()`` persists a fresh snapshot of the full accumulated series; the
-    file is the latest snapshot regardless of whether ``finish()`` ever fires.
+    Some logging processes may not call ``finish()``, so every ``log()`` persists
+    a fresh snapshot of the full accumulated series. The file is the latest
+    snapshot regardless of whether ``finish()`` ever fires.
     """
 
     def __init__(self) -> None:
@@ -94,9 +92,9 @@ class CiHistoryBackend(TrackingBackend):
             self._write_snapshot_locked()
 
     def _write_snapshot_locked(self) -> None:
-        # Rewrite the whole per-process file with the current series. Writing to a
+        # Rewrite the whole record file with the current series. Writing to a
         # temp file and renaming makes each snapshot atomic, so a concurrent reader
-        # (the harness merge) never sees a half-written record.
+        # never sees a half-written record.
         assert self._record_path is not None
         tmp_path = f"{self._record_path}.tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:

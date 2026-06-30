@@ -1,17 +1,18 @@
-"""Tests for the CI metric-history collection backend and harness merge.
+"""Tests for the CI metric-history collection backend and harness handoff.
 
 Covers the record structure produced by ``CiHistoryBackend`` (target keys present,
-NDJSON parseable, raw unreduced series) and the harness per-attempt isolation +
-merge in ``tests.ci.ci_utils``.
+NDJSON parseable, raw unreduced series) and the harness per-attempt record-dir
+handoff in ``tests.ci.ci_utils``.
 """
 
 import json
 import logging
 import os
+from pathlib import Path
 
 import pytest
 
-from tests.ci.ci_utils import _attempt_record_dir, _merge_attempt_records
+from tests.ci.ci_utils import TestFile, _attempt_record_dir, run_unittest_files
 
 from miles.utils.tracking_utils import RECORD_DIR_ENV, TARGET_METRIC_KEYS
 from miles.utils.tracking_utils.ci_history import CiHistoryBackend
@@ -46,7 +47,7 @@ def test_record_has_target_keys_and_is_parseable(tmp_path, monkeypatch):
     backend.finish()
 
     files = [f for f in os.listdir(tmp_path) if f.endswith(".ndjson")]
-    assert len(files) == 1, f"expected one per-process file, got {files}"
+    assert len(files) == 1, f"expected one record file, got {files}"
 
     records = _read_ndjson(os.path.join(tmp_path, files[0]))
     by_metric = {r["metric"]: r["series"] for r in records}
@@ -127,7 +128,9 @@ def test_flush_survives_without_finish(tmp_path, monkeypatch):
     assert by_metric["train/grad_norm"] == [[0, 1.0], [1, 2.0]]
 
 
-def test_concurrent_processes_do_not_clobber(tmp_path, monkeypatch):
+def test_distinct_backend_instances_do_not_clobber_current_record_files(tmp_path, monkeypatch):
+    # This covers the backend's current file naming detail, not a CI harness
+    # contract to merge multiple writer outputs.
     monkeypatch.setenv(RECORD_DIR_ENV, str(tmp_path))
     b1 = CiHistoryBackend()
     b1.init(object(), primary=False)
@@ -140,50 +143,74 @@ def test_concurrent_processes_do_not_clobber(tmp_path, monkeypatch):
     b2.finish()
 
     files = [f for f in os.listdir(tmp_path) if f.endswith(".ndjson")]
-    assert len(files) == 2, f"expected one file per process, got {files}"
-
-
-def test_merge_combines_per_process_records(tmp_path):
-    attempt_dir = _attempt_record_dir(str(tmp_path), "test_foo.py", attempt=1)
-    os.makedirs(attempt_dir, exist_ok=True)
-
-    # Driver and actor each wrote a partial slice of the same metric.
-    with open(os.path.join(attempt_dir, "100-aaa.ndjson"), "w") as f:
-        f.write(json.dumps({"metric": "train/grad_norm", "series": [[1, 1.0]]}) + "\n")
-    with open(os.path.join(attempt_dir, "200-bbb.ndjson"), "w") as f:
-        f.write(json.dumps({"metric": "train/grad_norm", "series": [[0, 0.5]]}) + "\n")
-        f.write(json.dumps({"metric": "rollout/raw_reward", "series": [[0, 0.3]]}) + "\n")
-
-    merged_path = f"{attempt_dir}.merged.ndjson"
-    _merge_attempt_records(attempt_dir, merged_path)
-
-    merged = {r["metric"]: r["series"] for r in _read_ndjson(merged_path)}
-    # Series concatenated across processes and sorted by step.
-    assert merged["train/grad_norm"] == [[0, 0.5], [1, 1.0]]
-    assert merged["rollout/raw_reward"] == [[0, 0.3]]
+    assert len(files) == 2, f"expected one file per backend instance, got {files}"
 
 
 def test_attempt_isolation(tmp_path):
     base = str(tmp_path)
-    filename = "test_bar.py"
+    filename = "nested dir/test bar.py"
 
     d1 = _attempt_record_dir(base, filename, attempt=1)
     d2 = _attempt_record_dir(base, filename, attempt=2)
     assert d1 != d2, "attempts must not share a record directory"
+    assert os.path.dirname(d1) == os.path.dirname(d2)
+    assert os.path.basename(os.path.dirname(d1)).startswith("nested_dir_test_bar.py-")
+    assert d1.endswith(os.path.join("attempt-1"))
+    assert d2.endswith(os.path.join("attempt-2"))
 
-    os.makedirs(d1, exist_ok=True)
-    os.makedirs(d2, exist_ok=True)
-    with open(os.path.join(d1, "p1.ndjson"), "w") as f:
-        f.write(json.dumps({"metric": "train/grad_norm", "series": [[0, 11.0]]}) + "\n")
-    with open(os.path.join(d2, "p1.ndjson"), "w") as f:
-        f.write(json.dumps({"metric": "train/grad_norm", "series": [[0, 22.0]]}) + "\n")
 
-    m1 = f"{d1}.merged.ndjson"
-    m2 = f"{d2}.merged.ndjson"
-    _merge_attempt_records(d1, m1)
-    _merge_attempt_records(d2, m2)
+def test_attempt_record_dir_disambiguates_test_filenames(tmp_path):
+    base = str(tmp_path)
 
-    r1 = {r["metric"]: r["series"] for r in _read_ndjson(m1)}
-    r2 = {r["metric"]: r["series"] for r in _read_ndjson(m2)}
-    assert r1["train/grad_norm"] == [[0, 11.0]]
-    assert r2["train/grad_norm"] == [[0, 22.0]]
+    same_basename_a = _attempt_record_dir(base, "suite_a/test_a.py", attempt=1)
+    same_basename_b = _attempt_record_dir(base, "suite_b/test_a.py", attempt=1)
+    assert same_basename_a != same_basename_b
+
+    sanitized_collision_a = _attempt_record_dir(base, "foo/bar.py", attempt=1)
+    sanitized_collision_b = _attempt_record_dir(base, "foo_bar.py", attempt=1)
+    assert os.path.basename(os.path.dirname(sanitized_collision_a)).startswith("foo_bar.py-")
+    assert os.path.basename(os.path.dirname(sanitized_collision_b)).startswith("foo_bar.py-")
+    assert sanitized_collision_a != sanitized_collision_b
+
+
+def test_run_unittest_files_hands_off_attempt_record_dir(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    record_base = tmp_path / "records"
+    monkeypatch.setenv(RECORD_DIR_ENV, str(record_base))
+
+    state_file = tmp_path / "retry_state.txt"
+    child = tmp_path / "t retry.py"
+    child.write_text(
+        f"""
+import os
+import pathlib
+import sys
+
+record_dir = os.environ[{RECORD_DIR_ENV!r}]
+pathlib.Path(record_dir).mkdir(parents=True, exist_ok=True)
+pathlib.Path(record_dir, "seen.txt").write_text(record_dir)
+
+state_file = {str(state_file)!r}
+if os.path.exists(state_file):
+    sys.exit(0)
+
+pathlib.Path(state_file).write_text("1")
+print("accuracy retry", flush=True)
+sys.exit(1)
+"""
+    )
+
+    rc = run_unittest_files(
+        [TestFile(name=child.name, estimated_time=1)],
+        timeout_per_file=10,
+        enable_retry=True,
+        max_attempts=2,
+        retry_wait_seconds=0,
+    )
+
+    assert rc == 0
+    attempt_1 = Path(_attempt_record_dir(str(record_base), child.name, attempt=1))
+    attempt_2 = Path(_attempt_record_dir(str(record_base), child.name, attempt=2))
+    assert (attempt_1 / "seen.txt").read_text() == str(attempt_1)
+    assert (attempt_2 / "seen.txt").read_text() == str(attempt_2)
+    assert not list(record_base.glob("**/*.merged.ndjson"))

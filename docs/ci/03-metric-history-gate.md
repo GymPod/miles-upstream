@@ -43,7 +43,7 @@ After a test passes, each `(metric_key, sub_label)` value is checked with `|cur 
 
 ## Collection
 
-`CiHistoryBackend` runs alongside `WandbBackend` on the same `log()` fan-out and writes a **per-process NDJSON** snapshot — the full accumulated series, atomically rewritten on each update (safe under Ray multi-process training — each process writes its own file). After the test passes, the harness merges the files, assigns identity + provenance, runs the gate, and (on a nightly-marked run only) writes the rows. Nothing is read back from wandb.
+`CiHistoryBackend` runs alongside `WandbBackend` on the same `log()` fan-out and writes NDJSON snapshots under the harness-assigned per-test attempt directory. After the test passes, the later gate/finalizer consumes those records, assigns identity + provenance, runs the gate, and (on a nightly-marked run only) writes the rows. Nothing is read back from wandb.
 
 ## Rollout
 
