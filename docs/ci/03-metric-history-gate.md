@@ -16,8 +16,9 @@ The gate compares a number only against earlier numbers of the same kind, from t
 
 The store's baseline query keys on exactly these (plus a `limit` for how many recent points to read): `recent_trusted_values(test_path, backend, suite, metric_key, sub_label, test_file_hash, limit)`.
 
-## Storage: Neon, two tables
+## Storage: two backends, two tables
 
+- Backends: `SQLiteMetricHistoryStore` is the local/offline backend for unit tests and in-process development; `NeonMetricHistoryStore` is the hosted Postgres backend for CI/prod. Callers use only `MetricHistoryStore`: for the same inputs, both backends must persist the same run and metric fields, return the same trusted baseline rows in newest-first order, and revoke trust for the same runs via `mark_untrusted`.
 - `runs` — one row per CI run of one series: the identity above + provenance (`commit_sha`, `pr_number`, `github_run_id`, `github_run_attempt`, `event_name`, `ref`) + `created_at` + `trusted` (run-level).
 - `metric_values` — one row per value: `run_id` FK + `(metric_key, sub_label)` + `value`.
 - Read path: composite index `runs(test_path, backend, suite, test_file_hash, trusted, created_at DESC)`.
@@ -65,4 +66,3 @@ Shadow-first: collect, store, and evaluate, but **never block a PR** initially �
 - Any test-file edit is an intentional baseline reset for that series (the hash changes).
 - The nightly trigger (`schedule` cron + `nightly` label) already shipped (#1491); detection here is harness-side via `GITHUB_EVENT_NAME`, so this feature needs **no** `pr-test.yml` **edit**.
 - Open: should a brand-new test's first baselines need human confirmation before counting as trusted? (v1: no.) Per-series `rel` / `abs_floor` overrides beyond the global defaults.
-
