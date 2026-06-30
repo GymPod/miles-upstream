@@ -13,10 +13,9 @@ Implementation notes for whoever lands the real driver:
   only when this is implemented -- not before.
 * Read the DSN from the ``NEON_DATABASE_URL`` environment variable. Do not
   embed credentials and do not hardcode the host.
-* Apply schema via the ``migrations/*.sql`` files; never issue DDL on the
-  read/write path. The connection role granted by
-  ``0002_least_privilege_role.sql`` lacks CREATE/ALTER/DROP, so a stray runtime
-  DDL would fail loudly rather than mutate the schema.
+* Provision the schema and connection role out-of-band for now. The store's
+  read/write path must remain DML-only: insert runs, read baselines, and mark
+  runs untrusted.
 * ``recent_trusted_values`` must use the authoritative baseline query verbatim
   (``sub_label IS NOT DISTINCT FROM %s``), so its results match
   :class:`~tests.ci.metric_history.sqlite_store.SQLiteMetricHistoryStore`.

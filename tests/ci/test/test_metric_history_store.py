@@ -240,31 +240,3 @@ def test_baseline_sql_matches_authoritative_shape():
 def test_neon_store_is_deferred():
     with pytest.raises(NotImplementedError):
         NeonMetricHistoryStore()
-
-
-def test_production_migration_sql_creates_tables_and_index():
-    # The production DDL targets Postgres; here we only assert the migration
-    # file declares the two tables and the composite baseline index, so the
-    # shapes under test and in production stay aligned.
-    from pathlib import Path
-
-    sql = (Path(__file__).parent.parent / "metric_history" / "migrations" / "0001_create_metric_history.sql").read_text().lower()
-    assert "create table if not exists runs" in sql
-    assert "create table if not exists metric_values" in sql
-    assert "trusted" in sql and "boolean not null" in sql
-    assert "double precision not null" in sql
-    assert "timestamptz not null" in sql
-    assert "create index if not exists runs_baseline_idx" in sql
-    assert "(test_path, backend, suite, test_file_hash, trusted, created_at desc)" in sql
-
-
-def test_least_privilege_role_grants_no_ddl():
-    from pathlib import Path
-
-    sql = (Path(__file__).parent.parent / "metric_history" / "migrations" / "0002_least_privilege_role.sql").read_text().lower()
-    assert "grant insert, select, update on runs" in sql
-    assert "grant insert, select, update on metric_values" in sql
-    # The app role must not be handed schema-mutating or delete verbs.
-    assert "grant create" not in sql
-    assert "grant delete" not in sql
-    assert "grant all" not in sql

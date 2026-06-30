@@ -25,7 +25,7 @@ The store's baseline query keys on exactly these (plus a `limit` for how many re
 - `runs` — one row per CI run of one series: the identity above + provenance (`commit_sha`, `pr_number`, `github_run_id`, `github_run_attempt`, `event_name`, `ref`) + `created_at` + `trusted` (run-level).
 - `metric_values` — one row per value: `run_id` FK + `(metric_key, sub_label)` + `value`.
 - Read path: composite index `runs(test_path, backend, suite, test_file_hash, trusted, created_at DESC)`.
-- Setup is **versioned migrations** in `tests/ci/metric_history/migrations/`, applied **once at provisioning by a privileged role — never by the gate**: `0001` = the two tables + indexes; `0002` = the gate's login role granted **only `INSERT`/`SELECT`/`UPDATE`** (no `CREATE`/`ALTER`/`DROP`, no `DELETE`); `0003` = retention (a maintenance role prunes runs past a window on a schedule). The gate connects as the `0002` role, so a stray runtime DDL or row delete fails as a permission error, not a silent mutation.
+- Hosted Postgres setup is out-of-band in this round: when `NeonMetricHistoryStore` is implemented, provision the equivalent two tables and application role outside this repo, and keep runtime gate code DML-only. Old-row cleanup policy is a later operational concern, not part of the M0/M1 substrate.
 
 ## The gate: two layers
 

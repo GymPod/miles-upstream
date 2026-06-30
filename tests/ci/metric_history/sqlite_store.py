@@ -7,26 +7,20 @@ Its query and write semantics mirror the hosted Postgres backend so that tests
 exercising this implementation validate the contract the gate relies on in
 production.
 
-The schema is applied from the versioned migration files under ``migrations/``;
-this module never issues DDL at query time. Tests apply the same SQL the
-production migrations carry, so the table shapes under test and in production do
-not drift.
+This module owns a small local schema literal for tests; production Postgres
+setup is out-of-band until the hosted backend is implemented. The store never
+issues DDL on the read/write path.
 """
 
 from __future__ import annotations
 
 import sqlite3
 import uuid
-from pathlib import Path
 
 from tests.ci.metric_history.store import MetricHistoryStore, MetricSample, RunIdentity, RunProvenance
 
-_MIGRATIONS_DIR = Path(__file__).parent / "migrations"
-
-# The portable subset of the production DDL: the two tables and the composite
-# baseline index. Postgres-only grammar (timestamptz, double precision, role
-# grants, partitioning) lives in the .sql migration files and is exercised
-# there; SQLite stores the same logical columns with its dynamic typing.
+# The local/offline schema: the two tables and the composite baseline index.
+# SQLite stores the same logical columns with its dynamic typing.
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS runs (
     run_id              TEXT PRIMARY KEY,
@@ -84,10 +78,9 @@ class SQLiteMetricHistoryStore(MetricHistoryStore):
     def apply_schema(self) -> None:
         """Create the tables and index if absent.
 
-        This is migration application, not runtime DDL: it runs once at
-        construction (or when a caller resets a database), never on the
-        read/write path. Production applies the ``migrations/*.sql`` files
-        instead; this method keeps the SQLite fixture self-contained.
+        This runs once at construction (or when a caller resets a database),
+        never on the read/write path. This method keeps the SQLite fixture
+        self-contained.
         """
         self._conn.executescript(_SCHEMA_SQL)
         self._conn.commit()
