@@ -19,6 +19,9 @@ The store's baseline query keys on exactly these (plus a `limit` for how many re
 ## Storage: two backends, two tables
 
 - Backends: `SQLiteMetricHistoryStore` is the local/offline backend for unit tests and in-process development; `NeonMetricHistoryStore` is the hosted Postgres backend for CI/prod. Callers use only `MetricHistoryStore`: for the same inputs, both backends must persist the same run and metric fields, return the same trusted baseline rows in newest-first order, and revoke trust for the same runs via `mark_untrusted`.
+- `write_run(...)` stores one CI run, its identity/provenance, its run-level `trusted` flag, and all metric values from that run.
+- `recent_trusted_values(...)` returns the newest trusted values for one exact run series and one exact metric coordinate; this is the historical-gate baseline read.
+- `mark_untrusted(...)` flips matching runs to `trusted = false` by `run_id`, `github_run_id`, or `commit_sha`, so the next baseline read excludes those runs without deleting rows.
 - `runs` — one row per CI run of one series: the identity above + provenance (`commit_sha`, `pr_number`, `github_run_id`, `github_run_attempt`, `event_name`, `ref`) + `created_at` + `trusted` (run-level).
 - `metric_values` — one row per value: `run_id` FK + `(metric_key, sub_label)` + `value`.
 - Read path: composite index `runs(test_path, backend, suite, test_file_hash, trusted, created_at DESC)`.

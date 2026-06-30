@@ -1,3 +1,4 @@
+# doc-dev: docs/ci/03-metric-history-gate.md
 """Deferred Neon (hosted Postgres) backend for the metric-history store.
 
 This is an intentional placeholder. The hosted backend is not wired this round:

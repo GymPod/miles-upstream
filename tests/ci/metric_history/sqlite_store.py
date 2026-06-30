@@ -1,3 +1,4 @@
+# doc-dev: docs/ci/03-metric-history-gate.md
 """SQLite-backed :class:`MetricHistoryStore` for offline use and tests.
 
 This backend keeps no network dependency and runs entirely in-process; an
