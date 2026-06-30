@@ -72,15 +72,18 @@ class CiHistoryBackend(TrackingBackend):
         if self._record_dir is None:
             return
         with self._lock:
-            captured = False
+            captured: list[tuple[str, float]] = []
             for key in TARGET_METRIC_KEYS:
                 if key not in metrics:
                     continue
                 value = metrics[key]
                 if not isinstance(value, (int, float)) or isinstance(value, bool):
-                    continue
-                self._series.setdefault(key, []).append((step, float(value)))
-                captured = True
+                    message = f"CI history metric {key!r} must be int or float, got {type(value).__name__}"
+                    logger.error("%s", message)
+                    raise TypeError(message)
+                captured.append((key, float(value)))
+            for key, value in captured:
+                self._series.setdefault(key, []).append((step, value))
             if captured:
                 self._write_snapshot_locked()
 

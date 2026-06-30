@@ -6,7 +6,10 @@ merge in ``tests.ci.ci_utils``.
 """
 
 import json
+import logging
 import os
+
+import pytest
 
 from tests.ci.ci_utils import _attempt_record_dir, _merge_attempt_records
 
@@ -67,6 +70,25 @@ def test_only_target_keys_captured(tmp_path, monkeypatch):
     metrics = {r["metric"] for r in records}
     assert metrics == {"train/grad_norm"}
     assert metrics <= set(TARGET_METRIC_KEYS)
+
+
+def test_non_numeric_target_metric_errors_without_partial_capture(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv(RECORD_DIR_ENV, str(tmp_path))
+    backend = CiHistoryBackend()
+    backend.init(object(), primary=False)
+
+    with caplog.at_level(logging.ERROR, logger="miles.utils.tracking_utils.ci_history"):
+        with pytest.raises(TypeError, match="train/ppo_kl"):
+            backend.log({"train/grad_norm": 1.0, "train/ppo_kl": [0.1], "train/step": 0}, step=0)
+
+    assert "CI history metric 'train/ppo_kl' must be int or float, got list" in caplog.text
+
+    backend.log({"train/grad_norm": 2.0, "train/step": 1}, step=1)
+    backend.finish()
+
+    records = _read_ndjson(os.path.join(tmp_path, os.listdir(tmp_path)[0]))
+    by_metric = {r["metric"]: r["series"] for r in records}
+    assert by_metric["train/grad_norm"] == [[1, 2.0]]
 
 
 def test_record_carries_no_identity(tmp_path, monkeypatch):
