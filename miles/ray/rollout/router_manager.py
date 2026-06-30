@@ -107,9 +107,20 @@ def start_session_server(args):
 
     router_url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
 
-    # spawn (not fork): see start_router for rationale.
+    workers = int(getattr(args, "session_server_workers", 1))
+    if workers > 1:
+        # Opt-in multi-process: a thin router shards sessions across N worker processes.
+        from miles.rollout.session.session_supervisor import SessionServerSupervisor
+
+        supervisor = SessionServerSupervisor(args, router_url, ip, port)
+        supervisor.start()
+        logger.info(f"Multi-process session server launched at {ip}:{port} ({workers} workers)")
+        return supervisor
+
+    # single-process (default): spawn (not fork): see start_router for rationale.
     process = multiprocessing.get_context("spawn").Process(target=run_session_server, args=(args, router_url))
     process.daemon = True
     process.start()
     wait_for_server_ready(ip, port, process, timeout=30)
     logger.info(f"Session server launched at {ip}:{port}")
+    return None
