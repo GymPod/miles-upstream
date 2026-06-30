@@ -1,18 +1,24 @@
 import logging
 
-from .base import BACKEND_REGISTRY, TrackingManager
+from .base import MlflowBackend, PrometheusBackend, TensorboardBackend, TrackingBackend, TrackingManager, WandbBackend
 from .ci_history import RECORD_DIR_ENV, TARGET_METRIC_KEYS, CiHistoryBackend
 
-# Registered here, not in base.py: base must never import a backend module, or
-# it is a circular import (ci_history imports TrackingBackend from base). This
-# package's __init__ is the entry point and already imports CiHistoryBackend, so
-# every consumer that reaches TrackingManager through the package sees it.
-BACKEND_REGISTRY["ci_history"] = (CiHistoryBackend, "ci_enable_metrics_capture")
+# The full registry lives here, not base.py: base must never import a backend
+# module (ci_history imports TrackingBackend from base -> circular). This
+# __init__ is the one place that imports every backend, so it owns the registry.
+BACKEND_REGISTRY: dict[str, tuple[type[TrackingBackend], str]] = {
+    "wandb": (WandbBackend, "use_wandb"),
+    "tensorboard": (TensorboardBackend, "use_tensorboard"),
+    "mlflow": (MlflowBackend, "use_mlflow"),
+    "prometheus": (PrometheusBackend, "use_prometheus"),
+    "ci_history": (CiHistoryBackend, "ci_enable_metrics_capture"),
+}
 
 logger = logging.getLogger(__name__)
-_manager = TrackingManager()
+_manager = TrackingManager(BACKEND_REGISTRY)
 
 __all__ = [
+    "BACKEND_REGISTRY",
     "CiHistoryBackend",
     "RECORD_DIR_ENV",
     "TARGET_METRIC_KEYS",

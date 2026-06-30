@@ -15,12 +15,11 @@ from miles.utils.tracking_utils.ci_history import CiHistoryBackend
 
 
 def test_all_backends_registered():
-    # ci_history registers from tracking_utils/__init__, not base.py (base must
+    # The full registry lives in tracking_utils/__init__, not base.py (base must
     # not back-import a backend -> circular). Guard against the silent-drop
-    # failure mode: if that registration is ever removed or an import is pruned,
-    # the backend vanishes from the registry with no error. Assert the full set.
-    import miles.utils.tracking_utils  # noqa: F401  (import for registration side effect)
-    from miles.utils.tracking_utils.base import BACKEND_REGISTRY
+    # failure mode: if a registry entry is removed or an import is pruned, the
+    # backend vanishes with no error. Assert the full set.
+    from miles.utils.tracking_utils import BACKEND_REGISTRY
 
     assert set(BACKEND_REGISTRY) == {"wandb", "tensorboard", "mlflow", "prometheus", "ci_history"}
     cls, flag = BACKEND_REGISTRY["ci_history"]
