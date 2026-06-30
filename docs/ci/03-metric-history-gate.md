@@ -54,7 +54,7 @@ Shadow-first: collect, store, and evaluate, but **never block a PR** initially â
 
 | Thing                    | Where                                                                                  |
 | ------------------------ | -------------------------------------------------------------------------------------- |
-| Enable capture           | `--ci-enable-metrics-capture` (or set `MILES_CI_GATE_RECORD_DIR`)                      |
+| Enable capture           | set `MILES_CI_GATE_RECORD_DIR` (injected by the CI harness; no CLI flag)               |
 | DB connection            | `NEON_DATABASE_URL` (CI secret)                                                        |
 | Storage contract         | `tests/ci/metric_history/store.py` (+ `sqlite_store.py` offline, `neon_store.py` prod) |
 | Gate logic               | `tests/ci/history_gate.py`                                                             |
