@@ -254,6 +254,17 @@ class SessionRegistry:
         self.sessions[session_id] = LinearTrajectory()
         return session_id
 
+    def create_session_with_id(self, session_id: str) -> None:
+        """Create a session under an id minted by the multi-process router.
+
+        The router mints the id (uuid4 hex) and routes by it, so the owning worker
+        must create under that exact id. Reject a collision so a duplicate CREATE
+        surfaces loudly instead of silently clobbering a live session.
+        """
+        if session_id in self.sessions:
+            raise ValueError(f"session_id already exists: {session_id}")
+        self.sessions[session_id] = LinearTrajectory()
+
     def get_session(self, session_id: str) -> LinearTrajectory:
         session = self.sessions.get(session_id)
         if session is None:

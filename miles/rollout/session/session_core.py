@@ -18,8 +18,15 @@ from dataclasses import dataclass
 from starlette.responses import Response
 
 from miles.rollout.session.linear_trajectory import SessionRegistry
-from miles.rollout.session.session_errors import SessionNotFoundError, TokenizationError, UpstreamResponseError
+from miles.rollout.session.session_errors import (
+    SessionError,
+    SessionNotFoundError,
+    TokenizationError,
+    UpstreamResponseError,
+)
 from miles.rollout.session.session_types import GetSessionResponse, SessionRecord
+from miles.utils.chat_template_utils import get_tito_tokenizer
+from miles.utils.processing_utils import load_tokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +48,26 @@ class ProxyRequest:
 def _render_json(payload) -> bytes:
     """Encode like Starlette's JSONResponse (compact, non-ASCII preserved)."""
     return json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+
+
+def error_response(exc: SessionError) -> Response:
+    """Render a SessionError as the client response."""
+    return Response(content=_render_json({"error": str(exc)}), status_code=exc.status_code, media_type=JSON_MEDIA_TYPE)
+
+
+def build_session_core(backend, args) -> "SessionCore":
+    """Construct a SessionCore (tokenizer + registry) from args."""
+    tokenizer = load_tokenizer(
+        args.hf_checkpoint, chat_template_path=getattr(args, "chat_template_path", None), trust_remote_code=True
+    )
+    tito_tokenizer = get_tito_tokenizer(
+        tokenizer,
+        tokenizer_type=getattr(args, "tito_model", "default"),
+        chat_template_kwargs=getattr(args, "apply_chat_template_kwargs", None),
+        allowed_append_roles=getattr(args, "tito_allowed_append_roles", None),
+    )
+    registry = SessionRegistry(args, tokenizer, tito_tokenizer=tito_tokenizer)
+    return SessionCore(backend, registry, args, getattr(args, "session_server_instance_id", None))
 
 
 def proxy_result_to_response(result: dict) -> Response:
@@ -78,8 +105,13 @@ class SessionCore:
             body["session_server_instance_id"] = self.instance_id
         return Response(content=_render_json(body), status_code=200, media_type=JSON_MEDIA_TYPE)
 
-    async def create_session(self) -> Response:
-        session_id = self.registry.create_session()
+    async def create_session(self, session_id: str | None = None) -> Response:
+        # session_id is None in single-process (mint here); the multi-process router
+        # mints the id (to route by it) and passes it so the owning worker creates under it.
+        if session_id is None:
+            session_id = self.registry.create_session()
+        else:
+            self.registry.create_session_with_id(session_id)
         return Response(content=_render_json({"session_id": session_id}), status_code=200, media_type=JSON_MEDIA_TYPE)
 
     async def get_session(self, session_id: str) -> Response:
