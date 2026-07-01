@@ -113,6 +113,11 @@ class FSDPTrainRayActor(TrainRayActor):
         if precision.keep_fp32_master:
             model = apply_fp32_master(model)
 
+        # re-assert checkpoint over any param from_pretrained clobbered post-load (arch-gated, else no-op)
+        from .adaptations.post_load_fixups import apply_post_load_fixups
+
+        apply_post_load_fixups(model, self.hf_config, self.args.hf_checkpoint)
+
         # post-load packing patches needing the instantiated model (NemotronH); no-op otherwise
         apply_packing(model, self.hf_config, "post_load")
 
