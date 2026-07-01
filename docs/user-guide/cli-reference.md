@@ -173,7 +173,7 @@ Sections mirror the launch-script argument groups.
 | `--rollout-batch-size` | int | – | Prompts per rollout. |
 | `--n-samples-per-prompt` | int | `1` | Responses per prompt. |
 | `--global-batch-size` | int | derived | Samples per optimizer step. |
-| `--num-steps-per-rollout` | int | `1` | Optimizer steps per rollout. |
+| `--num-steps-per-rollout` | int | – | Optimizer steps per rollout. Alternative to `--global-batch-size`; setting one derives the other. |
 | `--over-sampling-batch-size` | int | – | Oversample size for dynamic sampling (DAPO). |
 | `--balance-data` | flag | off | Balance per-rank token count. |
 
