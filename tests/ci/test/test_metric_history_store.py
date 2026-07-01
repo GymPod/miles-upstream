@@ -218,7 +218,7 @@ def test_untrusted_run_never_in_baseline(store):
 def test_baseline_sql_matches_authoritative_shape():
     # Guard against drift from the authoritative query: identity predicates,
     # NULL-equality on sub_label, trusted filter, created_at DESC, LIMIT.
-    from tests.ci.metric_history.sqlite_store import _BASELINE_SQL
+    from tests.ci.metric_history.storage.sqlite_store import _BASELINE_SQL
 
     sql = re.sub(r"\s+", " ", _BASELINE_SQL).strip().lower()
     for fragment in (

@@ -18,12 +18,12 @@ Implementation notes for whoever lands the real driver:
   runs untrusted.
 * ``recent_trusted_values`` must use the authoritative baseline query verbatim
   (``sub_label IS NOT DISTINCT FROM %s``), so its results match
-  :class:`~tests.ci.metric_history.sqlite_store.SQLiteMetricHistoryStore`.
+  :class:`~tests.ci.metric_history.storage.sqlite_store.SQLiteMetricHistoryStore`.
 """
 
 from __future__ import annotations
 
-from tests.ci.metric_history.store import MetricHistoryStore, MetricSample, RunIdentity, RunProvenance
+from tests.ci.metric_history.storage.store import MetricHistoryStore, MetricSample, RunIdentity, RunProvenance
 
 #: Name of the environment variable carrying the Neon Postgres DSN. The value
 #: is provisioned out-of-band as a CI secret and is NOT wired into any workflow
