@@ -11,6 +11,7 @@ Covers:
 import torch
 
 from miles.backends.experimental.fsdp_utils.adaptations.weight_bridge import _qwen3_moe_expand, get_param_transform
+from miles.backends.experimental.fsdp_utils.update_weight_utils import _iter_sync_named_params
 
 
 def test_split_gate_up_proj_rows_and_names():
@@ -62,6 +63,16 @@ def test_param_transform_gating():
     assert not applies("model.layers.0.self_attn.q_proj.weight", torch.zeros(4, 4), "qwen3_moe")
     # 2D tensor named like an expert param is not the batched layout
     assert not applies(name, torch.zeros(6, 4), "qwen3_moe")
+
+
+def test_iter_passthrough_for_non_expert():
+    p = torch.zeros(4, 4)
+    out = list(_iter_sync_named_params("model.embed_tokens.weight", p, "qwen3_moe"))
+    assert len(out) == 1 and out[0][0] == "model.embed_tokens.weight" and out[0][1] is p
+    # expert-named param under a model type that consumes batched layout -> passthrough
+    g = torch.zeros(2, 6, 4)
+    out = list(_iter_sync_named_params("model.layers.0.mlp.experts.gate_up_proj", g, "qwen3_5_moe"))
+    assert len(out) == 1 and out[0][1] is g
 
 
 def test_qwen3_moe_patch_noops_on_batched_structure():
