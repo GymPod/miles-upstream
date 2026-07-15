@@ -34,7 +34,7 @@ from miles.utils.memory_utils import clear_memory
 from miles.utils.test_utils.ft_test_actions import FTTestActionActorExecutor
 from miles.utils.tracking_utils.structured_log import log_structured
 
-from ...utils.misc import filter_keys
+from ...utils.misc import filter_keys, load_function
 from ..training_utils.ci_utils import check_grad_norm, check_kl
 from ..training_utils.data import DataIterator, get_batch
 from ..training_utils.log_utils import aggregate_forward_results, aggregate_train_losses, log_train_step
@@ -317,8 +317,6 @@ def forward_only(
         model_module.eval()
 
     if args.custom_megatron_before_log_prob_hook_path:
-        from miles.utils.misc import load_function
-
         custom_before_log_prob_hook = load_function(args.custom_megatron_before_log_prob_hook_path)
         custom_before_log_prob_hook(args, model, store_prefix)
 
@@ -398,8 +396,6 @@ def train_one_step(
         optimizer.zero_grad()
 
     if args.custom_megatron_before_train_step_hook_path:
-        from miles.utils.misc import load_function
-
         custom_before_train_step_hook = load_function(args.custom_megatron_before_train_step_hook_path)
         custom_before_train_step_hook(args, rollout_id, step_id, model, optimizer, opt_param_scheduler)
 
@@ -708,6 +704,19 @@ def train(
                 enable_forward_pre_hook(model)
                 config.param_sync_func = param_sync_func
                 pre_hook_enabled = True
+
+        if args.custom_megatron_after_train_step_hook_path:
+            custom_after_train_step_hook = load_function(args.custom_megatron_after_train_step_hook_path)
+            custom_after_train_step_hook(
+                args,
+                rollout_id,
+                step_id,
+                model,
+                optimizer,
+                opt_param_scheduler,
+                loss_dict,
+                num_microbatches[step_id],
+            )
 
         if args.enable_mtp_training:
             from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
