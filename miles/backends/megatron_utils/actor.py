@@ -17,7 +17,7 @@ from miles.utils.argparse_utils import inplace_modify_args
 from miles.utils.audit_utils.event_logger.logger import event_logger_context
 from miles.utils.audit_utils.witness.allocator import WitnessInfo
 from miles.utils.context_utils import with_defer
-from miles.utils.distributed_utils import get_gloo_group, init_process_group
+from miles.utils.distributed_utils import get_gloo_group, init_process_group, run_on_local_rank_serialized
 from miles.utils.ft_utils.indep_dp import IndepDPInfo
 from miles.utils.hf_config import load_hf_config
 from miles.utils.memory_utils import clear_memory, print_memory
@@ -117,14 +117,18 @@ class MegatronTrainRayActor(TrainRayActor):
             )
         self.prof = TrainProfiler(args)
 
-        # read config and tokenizer serialized to prevent concurrent writing bug.
-        for i in range(dist.get_world_size()):
-            if i == dist.get_rank():
-                self.hf_config = load_hf_config(args.hf_checkpoint)
-                self.tokenizer = load_tokenizer(
-                    self.args.hf_checkpoint, chat_template_path=self.args.chat_template_path, trust_remote_code=True
-                )
-            dist.barrier(group=get_gloo_group())
+        # Serialize config and tokenizer loads within each node to prevent concurrent cache writes.
+        self.hf_config, self.tokenizer = run_on_local_rank_serialized(
+            lambda: (
+                load_hf_config(args.hf_checkpoint),
+                load_tokenizer(
+                    self.args.hf_checkpoint,
+                    chat_template_path=self.args.chat_template_path,
+                    trust_remote_code=True,
+                ),
+            ),
+            num_local_ranks=args.num_gpus_per_node,
+        )
 
         self.train_parallel_config = {} if args.indep_dp else {"dp_size": get_parallel_state().intra_dp.size}
         dist.barrier(group=get_gloo_group())

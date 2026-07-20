@@ -1,5 +1,7 @@
+import os
+from collections.abc import Callable
 from datetime import timedelta
-from typing import Any
+from typing import Any, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -17,6 +19,7 @@ from torch.distributed.distributed_c10d import (
 from miles.utils.ft_utils.process_group_utils import GeneralPGUtil
 
 GLOO_GROUP = None
+_T = TypeVar("_T")
 
 
 def init_gloo_group():
@@ -33,6 +36,37 @@ def get_gloo_group():
     if GLOO_GROUP is None:
         raise RuntimeError("Gloo group has not been initialized. Call _init_gloo_group() first.")
     return GLOO_GROUP
+
+
+def run_on_local_rank_serialized(operation: Callable[[], _T], *, num_local_ranks: int) -> _T:
+    """Run an operation one local rank at a time across every node.
+
+    Ranks with the same local rank execute concurrently on different nodes. A
+    global barrier after each turn keeps operations serialized within each node.
+
+    Args:
+        operation: Operation to run on this process's local-rank turn.
+        num_local_ranks: Number of possible local ranks on each node.
+
+    Returns:
+        The value returned by ``operation``.
+
+    Raises:
+        ValueError: If the local rank is outside ``num_local_ranks``.
+    """
+    local_rank = int(os.environ["LOCAL_RANK"])
+    if not 0 <= local_rank < num_local_ranks:
+        raise ValueError(f"LOCAL_RANK {local_rank} must be in [0, {num_local_ranks})")
+
+    results: list[_T] = []
+    gloo_group = get_gloo_group()
+    for current_local_rank in range(num_local_ranks):
+        if current_local_rank == local_rank:
+            results.append(operation())
+        dist.barrier(group=gloo_group)
+
+    assert len(results) == 1
+    return results[0]
 
 
 # Copy from pytorch to allow creating multiple main groups.
