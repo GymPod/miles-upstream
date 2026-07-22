@@ -46,3 +46,17 @@ def test_async_post_save_hook_finalizes_on_every_rank(rank: int, expected_events
         actor.save_model(rollout_id=7)
 
     assert events == expected_events
+
+
+def test_finalize_async_save_reports_queue_state() -> None:
+    actor = MegatronTrainRayActor.__new__(MegatronTrainRayActor)
+    actor.args = Namespace(async_save=True, offload_train=False)
+
+    with (
+        patch("megatron.training.async_utils.maybe_finalize_async_save") as finalize,
+        patch("megatron.training.async_utils.is_empty_async_queue", return_value=False),
+    ):
+        completed = actor.finalize_async_save(blocking=False)
+
+    assert completed is False
+    finalize.assert_called_once_with(blocking=False)

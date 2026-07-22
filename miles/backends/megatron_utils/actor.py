@@ -635,6 +635,29 @@ class MegatronTrainRayActor(TrainRayActor):
         if self.args.offload_train:
             destroy_process_groups()
 
+    def finalize_async_save(self, blocking: bool) -> bool:
+        """Finalize a scheduled Megatron checkpoint save on this training rank.
+
+        Args:
+            blocking: Wait for active checkpoint writes when true.
+
+        Returns:
+            Whether no asynchronous checkpoint remains in flight.
+        """
+        if not self.args.async_save:
+            return True
+
+        from megatron.training.async_utils import is_empty_async_queue, maybe_finalize_async_save
+
+        if self.args.offload_train:
+            reload_process_groups()
+        try:
+            maybe_finalize_async_save(blocking=blocking)
+            return is_empty_async_queue()
+        finally:
+            if self.args.offload_train:
+                destroy_process_groups()
+
     @with_logs
     @timer
     def update_weights(self, info: "EnginesAndLock") -> None:
