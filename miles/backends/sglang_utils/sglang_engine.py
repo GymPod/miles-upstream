@@ -181,6 +181,8 @@ class SGLangEngine(RayActor):
         router_ip=None,
         router_port=None,
         engine_info_bootstrap_port=None,
+        *,
+        register_with_router: bool,
     ):
         """Initialize an SGLang server actor.
 
@@ -193,6 +195,8 @@ class SGLangEngine(RayActor):
             router_ip: Router address, or None to use the configured address.
             router_port: Router port, or None to use the configured port.
             engine_info_bootstrap_port: Port used to exchange engine metadata.
+            register_with_router: Whether the initialized engine can be routed
+                immediately.
         """
         if env_report := self.args.env_report:
             collect_and_print_node_env_report(
@@ -243,7 +247,7 @@ class SGLangEngine(RayActor):
         if self.args.rollout_external:
             self._init_external(server_args_dict, external_engine_need_check_fields=external_engine_need_check_fields)
         else:
-            self._init_normal(server_args_dict)
+            self._init_normal(server_args_dict, register_with_router=register_with_router)
 
     def _init_external(self, expect_server_args, external_engine_need_check_fields):
         logger.info(f"Use external SGLang engine (rank={self.rank}, expect_server_args={expect_server_args})")
@@ -269,13 +273,18 @@ class SGLangEngine(RayActor):
         actual_server_args = _get_actual_server_args()
         _sanity_check_server_args(actual_server_args, expect_server_args)
 
-    def _init_normal(self, server_args_dict):
+    def _init_normal(self, server_args_dict, *, register_with_router: bool):
         logger.info(f"Launch HttpServerEngineAdapter at: {self.server_host}:{self.server_port}")
         self.process = launch_server_process(ServerArgs(**server_args_dict))
-        self.register_with_router()
+        if register_with_router:
+            self.register_with_router()
 
     def register_with_router(self):
-        """Register this initialized engine as an available router worker."""
+        """Register this initialized engine as an available router worker.
+
+        Recovery can defer this call until current actor weights have been
+        installed, preventing checkpoint-backed replacements from serving.
+        """
         if (
             self.args.rollout_external
             or self.node_rank != 0

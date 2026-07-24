@@ -121,6 +121,42 @@ def test_router_0_2_unknown_submission_retains_url_identity_for_cleanup(
     kill_process_tree.assert_called_once_with(123)
 
 
+def test_external_wrapper_recovery_does_not_require_router_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine()
+    engine.args.rollout_external = True
+    engine.args.env_report = None
+    engine.args.sglang_router_ip = "127.0.0.1"
+    engine.args.sglang_router_port = 3000
+    engine.rank = 0
+    engine.base_gpu_id = 0
+    engine.sglang_overrides = {}
+    engine.num_gpus_per_engine = 1
+    server_args = {
+        "node_rank": 0,
+        "host": "127.0.0.1",
+        "port": 30000,
+    }
+    compute_server_args = MagicMock(return_value=(server_args, ["host", "port"]))
+    monkeypatch.setattr(sglang_engine_module, "_compute_server_args", compute_server_args)
+    init_external = MagicMock()
+    monkeypatch.setattr(engine, "_init_external", init_external)
+
+    engine.init(
+        dist_init_addr="127.0.0.1:29500",
+        port=30000,
+        nccl_port=29501,
+        host="127.0.0.1",
+        register_with_router=False,
+    )
+
+    init_external.assert_called_once_with(
+        server_args,
+        external_engine_need_check_fields=["host", "port"],
+    )
+
+
 def test_router_0_2_registration_uses_async_worker_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
