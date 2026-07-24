@@ -493,14 +493,40 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--fully-async-max-execution-samples",
+                type=int,
+                default=None,
+                help=(
+                    "Maximum number of executing samples in fully async mode. "
+                    "The value must contain a whole number of prompt groups. "
+                    "None uses rollout_batch_size * n_samples_per_prompt."
+                ),
+            )
+            parser.add_argument(
+                "--fully-async-max-retained-groups",
+                type=int,
+                default=None,
+                help=(
+                    "Maximum number of source-owned prompt groups retained in fully async mode. "
+                    "None uses rollout_batch_size."
+                ),
+            )
+            parser.add_argument(
+                "--fully-async-max-completed-prefetch-groups",
+                type=int,
+                default=None,
+                help=(
+                    "Maximum number of completed prompt groups retained before settlement in fully async mode. "
+                    "None uses rollout_batch_size."
+                ),
+            )
+            parser.add_argument(
                 "--async-max-concurrent-samples",
                 type=int,
                 default=None,
                 help=(
-                    "Maximum number of concurrently generating trajectories in fully async mode, "
-                    "decoupling generation concurrency from the training batch size. None (default) "
-                    "keeps the legacy bound of one training batch worth of trajectories "
-                    "(rollout_batch_size groups, i.e. rollout_batch_size * n_samples_per_prompt)."
+                    "Deprecated alias for --fully-async-max-execution-samples. "
+                    "Use the canonical option for new configurations."
                 ),
             )
             parser.add_argument(
@@ -2393,6 +2419,88 @@ def _resolve_ft_components(args: argparse.Namespace) -> list[str]:
     return list(args.ft_components)
 
 
+def resolve_fully_async_limits(args: argparse.Namespace) -> None:
+    """Resolve and validate count limits for fully asynchronous rollout.
+
+    Args:
+        args: Parsed Miles arguments. This function writes the resolved limits
+            back to the same namespace.
+
+    Raises:
+        ValueError: If a value is not a positive integer, aliases conflict, or
+            the limits violate the execution-group or training-batch bounds.
+    """
+    positive_values = (
+        ("--rollout-batch-size", args.rollout_batch_size),
+        ("--n-samples-per-prompt", args.n_samples_per_prompt),
+        ("--fully-async-max-execution-samples", args.fully_async_max_execution_samples),
+        ("--fully-async-max-retained-groups", args.fully_async_max_retained_groups),
+        ("--fully-async-max-completed-prefetch-groups", args.fully_async_max_completed_prefetch_groups),
+        ("--async-max-concurrent-samples", args.async_max_concurrent_samples),
+    )
+    for option, value in positive_values:
+        if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value <= 0):
+            raise ValueError(f"{option} must be a positive integer, got {value!r}.")
+
+    already_resolved = getattr(args, "_fully_async_limits_resolved", False)
+    execution_samples = args.fully_async_max_execution_samples
+    legacy_execution_samples = None if already_resolved else args.async_max_concurrent_samples
+    if (
+        execution_samples is not None
+        and legacy_execution_samples is not None
+        and execution_samples != legacy_execution_samples
+    ):
+        raise ValueError(
+            f"--async-max-concurrent-samples ({legacy_execution_samples}) conflicts with "
+            f"--fully-async-max-execution-samples ({execution_samples})."
+        )
+    if legacy_execution_samples is not None:
+        logger.warning("--async-max-concurrent-samples is deprecated; use --fully-async-max-execution-samples.")
+    if execution_samples is None:
+        execution_samples = legacy_execution_samples
+    if execution_samples is None:
+        execution_samples = args.rollout_batch_size * args.n_samples_per_prompt
+
+    retained_groups = args.fully_async_max_retained_groups
+    if retained_groups is None:
+        retained_groups = args.rollout_batch_size
+    completed_prefetch_groups = args.fully_async_max_completed_prefetch_groups
+    if completed_prefetch_groups is None:
+        completed_prefetch_groups = args.rollout_batch_size
+
+    if execution_samples < args.n_samples_per_prompt:
+        raise ValueError(
+            f"--fully-async-max-execution-samples ({execution_samples}) must be at least "
+            f"--n-samples-per-prompt ({args.n_samples_per_prompt})."
+        )
+    if execution_samples % args.n_samples_per_prompt != 0:
+        raise ValueError(
+            f"--fully-async-max-execution-samples ({execution_samples}) must be divisible by "
+            f"--n-samples-per-prompt ({args.n_samples_per_prompt})."
+        )
+    if retained_groups < args.rollout_batch_size:
+        raise ValueError(
+            f"--fully-async-max-retained-groups ({retained_groups}) must be at least "
+            f"--rollout-batch-size ({args.rollout_batch_size})."
+        )
+    if completed_prefetch_groups < args.rollout_batch_size:
+        raise ValueError(
+            f"--fully-async-max-completed-prefetch-groups ({completed_prefetch_groups}) must be at least "
+            f"--rollout-batch-size ({args.rollout_batch_size})."
+        )
+    if completed_prefetch_groups > retained_groups:
+        raise ValueError(
+            f"--fully-async-max-completed-prefetch-groups ({completed_prefetch_groups}) must not exceed "
+            f"--fully-async-max-retained-groups ({retained_groups})."
+        )
+
+    args.fully_async_max_execution_samples = execution_samples
+    args.fully_async_max_retained_groups = retained_groups
+    args.fully_async_max_completed_prefetch_groups = completed_prefetch_groups
+    args.async_max_concurrent_samples = execution_samples
+    args._fully_async_limits_resolved = True
+
+
 def miles_validate_args(args):
     validate_dashboard_args(args)
 
@@ -2805,12 +2913,13 @@ def miles_validate_args(args):
         args.disable_grad_buffers_cpu_backup = True
         args.disable_param_buffers_cpu_backup = args.enable_weights_backuper
 
-    if args.async_max_concurrent_samples is not None:
-        assert args.async_max_concurrent_samples >= args.n_samples_per_prompt, (
-            f"--async-max-concurrent-samples ({args.async_max_concurrent_samples}) must be at least "
-            f"--n-samples-per-prompt ({args.n_samples_per_prompt}): the worker submits whole groups, "
-            f"so one group already puts n_samples_per_prompt trajectories in flight"
-        )
+    if (
+        args.fully_async_max_execution_samples is not None
+        or args.fully_async_max_retained_groups is not None
+        or args.fully_async_max_completed_prefetch_groups is not None
+        or args.async_max_concurrent_samples is not None
+    ):
+        resolve_fully_async_limits(args)
 
     if args.eval_function_path is None:
         args.eval_function_path = args.rollout_function_path
