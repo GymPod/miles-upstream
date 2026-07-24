@@ -4,7 +4,6 @@ import logging
 import multiprocessing
 import os
 import time
-from urllib.parse import quote
 
 import requests
 import sglang_router
@@ -14,6 +13,17 @@ from sglang.srt.utils import kill_process_tree
 from urllib3.exceptions import NewConnectionError
 
 from miles.backends.megatron_utils.lora_utils import convert_target_modules_to_hf, lora_base_cpu_backup_enabled
+from miles.backends.sglang_utils.router_worker_client import (
+    ROUTER_OPERATION_TIMEOUT_SECONDS,
+    ROUTER_POLL_INTERVAL_SECONDS,
+    ROUTER_REQUEST_TIMEOUT_SECONDS,
+    RouterWorkerApi,
+    RouterWorkerClient,
+    RouterWorkerRegistration,
+    RouterWorkerSubmissionRejected,
+    RouterWorkerSubmissionUnknown,
+    RouterWorkerType,
+)
 from miles.ray.ray_actor import RayActor
 from miles.utils.env_report import collect_and_print_node_env_report
 from miles.utils.http_utils import get_host_info
@@ -138,6 +148,9 @@ class SGLangEngine(RayActor):
         self.base_gpu_id = base_gpu_id
         self.sglang_overrides = sglang_overrides or {}
         self.num_gpus_per_engine = num_gpus_per_engine
+        self._is_registered_with_router = False
+        self._router_worker_id: str | None = None
+        self._router_registration_submission_unknown = False
 
     def get_topology_info(self) -> dict:
         """Placement facts for the dashboard timeline. ``base_gpu_id`` is
@@ -169,6 +182,18 @@ class SGLangEngine(RayActor):
         router_port=None,
         engine_info_bootstrap_port=None,
     ):
+        """Initialize an SGLang server actor.
+
+        Args:
+            dist_init_addr: Distributed initialization address for the engine.
+            port: HTTP server port.
+            nccl_port: NCCL communication port.
+            host: HTTP server host, or None to use the current node address.
+            disaggregation_bootstrap_port: Bootstrap port for a prefill worker.
+            router_ip: Router address, or None to use the configured address.
+            router_port: Router port, or None to use the configured port.
+            engine_info_bootstrap_port: Port used to exchange engine metadata.
+        """
         if env_report := self.args.env_report:
             collect_and_print_node_env_report(
                 role="rollout",
@@ -213,6 +238,7 @@ class SGLangEngine(RayActor):
         self.node_rank = server_args_dict["node_rank"]
         self.server_host = server_args_dict["host"]  # with [] if ipv6
         self.server_port = server_args_dict["port"]
+        self.disaggregation_bootstrap_port = server_args_dict.get("disaggregation_bootstrap_port")
 
         if self.args.rollout_external:
             self._init_external(server_args_dict, external_engine_need_check_fields=external_engine_need_check_fields)
@@ -246,27 +272,91 @@ class SGLangEngine(RayActor):
     def _init_normal(self, server_args_dict):
         logger.info(f"Launch HttpServerEngineAdapter at: {self.server_host}:{self.server_port}")
         self.process = launch_server_process(ServerArgs(**server_args_dict))
+        self.register_with_router()
 
-        if self.node_rank == 0 and self.router_ip and self.router_port:
-            if parse(sglang_router.__version__) <= parse("0.2.1") or self.args.use_miles_router:
-                assert (
-                    self.worker_type == "regular"
-                ), "pd disaggregation is not supported in old router or miles router."
-                response = requests.post(
-                    f"http://{self.router_ip}:{self.router_port}/add_worker?url=http://{self.server_host}:{self.server_port}"
+    def register_with_router(self):
+        """Register this initialized engine as an available router worker."""
+        if (
+            self.args.rollout_external
+            or self.node_rank != 0
+            or not self.router_ip
+            or not self.router_port
+            or self._is_registered_with_router
+        ):
+            return
+
+        worker_url = f"http://{self.server_host}:{self.server_port}"
+        if parse(sglang_router.__version__) <= parse("0.2.1") or self.args.use_miles_router:
+            assert self.worker_type == "regular", "pd disaggregation is not supported in old router or miles router."
+            if self._router_registration_submission_unknown:
+                raise RouterWorkerSubmissionUnknown(
+                    "The router registration submission result is unknown; "
+                    "the engine generation must be replaced before retrying"
                 )
+            self._router_worker_id = worker_url
+            self._router_registration_submission_unknown = True
+            try:
+                response = requests.post(
+                    f"http://{self.router_ip}:{self.router_port}/add_worker?url={worker_url}",
+                    timeout=ROUTER_REQUEST_TIMEOUT_SECONDS,
+                )
+                response.raise_for_status()
+            except requests.HTTPError as error:
+                status_code = error.response.status_code if error.response is not None else None
+                if status_code is not None and 400 <= status_code < 500 and status_code not in {408, 429}:
+                    self._router_worker_id = None
+                    self._router_registration_submission_unknown = False
+                    raise
+                raise RouterWorkerSubmissionUnknown(
+                    "The router registration submission result is unknown; "
+                    "the engine generation must be replaced before retrying"
+                ) from error
+            except requests.RequestException as error:
+                raise RouterWorkerSubmissionUnknown(
+                    "The router registration submission result is unknown; "
+                    "the engine generation must be replaced before retrying"
+                ) from error
+            self._router_registration_submission_unknown = False
+        else:
+            if self._router_registration_submission_unknown:
+                raise RouterWorkerSubmissionUnknown(
+                    "The router registration submission result is unknown; "
+                    "the engine generation must be replaced before retrying"
+                )
+            bootstrap_port = None
+            if self.worker_type == "prefill":
+                if self.disaggregation_bootstrap_port is None:
+                    raise RuntimeError("Prefill worker requires disaggregation_bootstrap_port")
+                bootstrap_port = self.disaggregation_bootstrap_port
+            client = self._router_worker_client()
+            if self._router_worker_id is None:
+                if parse(sglang_router.__version__) < parse("0.3.0"):
+                    self._router_worker_id = worker_url
+                self._router_registration_submission_unknown = True
+                try:
+                    registration = client.submit_registration(
+                        worker_url=worker_url,
+                        worker_type=RouterWorkerType(self.worker_type),
+                        bootstrap_port=bootstrap_port,
+                    )
+                except RouterWorkerSubmissionRejected:
+                    self._router_worker_id = None
+                    self._router_registration_submission_unknown = False
+                    raise
+                except Exception as error:
+                    raise RouterWorkerSubmissionUnknown(
+                        "The router registration submission result is unknown; "
+                        "the engine generation must be replaced before retrying"
+                    ) from error
+                self._router_worker_id = registration.worker_id
+                self._router_registration_submission_unknown = False
             else:
-                payload = {
-                    "url": f"http://{self.server_host}:{self.server_port}",
-                    "worker_type": self.worker_type,
-                }
-                if self.worker_type == "prefill":
-                    payload["bootstrap_port"] = server_args_dict["disaggregation_bootstrap_port"]
-                response = requests.post(
-                    f"http://{self.router_ip}:{self.router_port}/workers",
-                    json=payload,
+                registration = RouterWorkerRegistration(
+                    worker_id=self._router_worker_id,
+                    url=worker_url,
                 )
-            response.raise_for_status()
+            client.wait_until_active(registration=registration)
+        self._is_registered_with_router = True
 
     def _make_request(self, endpoint: str, payload: dict | None = None):
         """Make a POST request to the specified endpoint with the given payload.
@@ -455,34 +545,50 @@ class SGLangEngine(RayActor):
             return
 
         logger.info(f"Shutdown engine {self.server_host}:{self.server_port}...")
-        if self.node_rank == 0:
-            worker_url = f"http://{self.server_host}:{self.server_port}"
-            response = None
-            if parse(sglang_router.__version__) <= parse("0.2.1") or self.args.use_miles_router:
-                response = requests.post(
-                    f"http://{self.router_ip}:{self.router_port}/remove_worker?url=http://{self.server_host}:{self.server_port}"
-                )
-            elif parse(sglang_router.__version__) < parse("0.3.0"):
-                worker_url = quote(worker_url, safe="")
-                response = requests.delete(f"http://{self.router_ip}:{self.router_port}/workers/{worker_url}")
-            else:
-                try:
-                    all_workers = requests.get(f"http://{self.router_ip}:{self.router_port}/workers").json()["workers"]
-                    for worker in all_workers:
-                        if worker["url"] == worker_url:
-                            worker_id = worker["id"]
-                            response = requests.delete(
-                                f"http://{self.router_ip}:{self.router_port}/workers/{worker_id}"
-                            )
-                            break
-                    else:
-                        logger.warning(f"Worker {worker_url} not found in router during shutdown.")
-                except Exception as e:
-                    logger.warning(f"Failed to fetch workers list or remove worker: {e}")
+        try:
+            if self.node_rank == 0 and (
+                self._is_registered_with_router
+                or self._router_worker_id is not None
+                or self._router_registration_submission_unknown
+            ):
+                worker_url = f"http://{self.server_host}:{self.server_port}"
+                response = None
+                if parse(sglang_router.__version__) <= parse("0.2.1") or self.args.use_miles_router:
+                    response = requests.post(
+                        f"http://{self.router_ip}:{self.router_port}/remove_worker?url={worker_url}",
+                        timeout=ROUTER_REQUEST_TIMEOUT_SECONDS,
+                    )
+                else:
+                    client = self._router_worker_client()
+                    registration = (
+                        client.find_registration_by_url(worker_url=worker_url)
+                        if self._router_worker_id is None
+                        else RouterWorkerRegistration(
+                            worker_id=self._router_worker_id,
+                            url=worker_url,
+                        )
+                    )
+                    if registration is not None:
+                        client.remove(registration=registration)
+                        self._router_registration_submission_unknown = False
 
-            if response is not None:
-                response.raise_for_status()
-        kill_process_tree(self.process.pid)
+                if response is not None:
+                    response.raise_for_status()
+                    self._router_registration_submission_unknown = False
+                self._is_registered_with_router = False
+                self._router_worker_id = None
+        finally:
+            kill_process_tree(self.process.pid)
+
+    def _router_worker_client(self) -> RouterWorkerClient:
+        worker_api = RouterWorkerApi.URL if parse(sglang_router.__version__) < parse("0.3.0") else RouterWorkerApi.UUID
+        return RouterWorkerClient(
+            router_url=f"http://{self.router_ip}:{self.router_port}",
+            worker_api=worker_api,
+            request_timeout_seconds=ROUTER_REQUEST_TIMEOUT_SECONDS,
+            operation_timeout_seconds=ROUTER_OPERATION_TIMEOUT_SECONDS,
+            poll_interval_seconds=ROUTER_POLL_INTERVAL_SECONDS,
+        )
 
     def get_weight_version(self):
         if self.node_rank != 0:
