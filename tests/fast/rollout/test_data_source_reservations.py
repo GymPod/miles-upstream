@@ -53,6 +53,8 @@ def _make_args(tmp_path: Path, *, rollout_shuffle: bool) -> Namespace:
         n_samples_per_prompt=2,
         save=str(tmp_path),
         load=str(tmp_path),
+        save_interval=1,
+        save_trigger_sentinel=None,
         buffer_filter_path=None,
     )
 
@@ -189,6 +191,58 @@ def test_checkpoint_replays_only_work_after_checkpoint_rollout(tmp_path: Path) -
         _reservation(2, prompt="charlie", first_sample_index=4),
     ]
 
+    source.save(rollout_id=6)
+    assert source._acknowledged_reservations == {}
+
+
+def test_no_checkpoint_mode_does_not_retain_acknowledged_history(tmp_path: Path) -> None:
+    args = _make_args(tmp_path, rollout_shuffle=False)
+    args.save_interval = None
+    source = RolloutDataSource(args)
+
+    for rollout_id in range(100):
+        reservations = source.reserve_samples(2)
+        source.acknowledge_reservations(reservations, rollout_id=rollout_id)
+
+    assert source._acknowledged_reservations == {}
+    with pytest.raises(
+        RuntimeError,
+        match="Cannot save durable source reservations without a periodic save interval.",
+    ):
+        source.save(rollout_id=100)
+
+
+def test_no_checkpoint_mode_replays_post_checkpoint_work_after_restart(tmp_path: Path) -> None:
+    checkpoint_args = _make_args(tmp_path, rollout_shuffle=False)
+    checkpoint_source = RolloutDataSource(checkpoint_args)
+    [first] = checkpoint_source.reserve_samples(1)
+    checkpoint_source.acknowledge_reservations([first], rollout_id=0)
+    checkpoint_source.save(rollout_id=0)
+
+    no_checkpoint_args = _make_args(tmp_path, rollout_shuffle=False)
+    no_checkpoint_args.save_interval = None
+    resumed = RolloutDataSource(no_checkpoint_args)
+    resumed.load(rollout_id=0)
+    [post_checkpoint] = resumed.reserve_samples(1)
+    resumed.acknowledge_reservations([post_checkpoint], rollout_id=1)
+
+    restarted = RolloutDataSource(no_checkpoint_args)
+    restarted.load(rollout_id=0)
+    assert restarted.reserve_samples(1) == [post_checkpoint]
+
+
+def test_sentinel_only_checkpointing_rejects_durable_reservations(tmp_path: Path) -> None:
+    args = _make_args(tmp_path, rollout_shuffle=False)
+    args.save_interval = None
+    args.save_trigger_sentinel = str(tmp_path / "save-trigger")
+    source = RolloutDataSource(args)
+
+    with pytest.raises(
+        RuntimeError,
+        match="Durable source reservations require a periodic save interval when a save trigger is configured.",
+    ):
+        source.reserve_samples(1)
+
 
 def test_shuffled_multi_epoch_reservations_reconstruct_exact_groups(tmp_path: Path) -> None:
     args = _make_args(tmp_path, rollout_shuffle=True)
@@ -206,8 +260,23 @@ def test_shuffled_multi_epoch_reservations_reconstruct_exact_groups(tmp_path: Pa
     assert restored.reserve_samples(10) == expected
 
 
-def test_legacy_get_samples_is_immediately_acknowledged(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("save_interval", "use_save_trigger"),
+    [
+        (1, False),
+        (None, False),
+        (None, True),
+    ],
+)
+def test_legacy_get_samples_is_immediately_acknowledged(
+    tmp_path: Path,
+    save_interval: int | None,
+    use_save_trigger: bool,
+) -> None:
     args = _make_args(tmp_path, rollout_shuffle=False)
+    args.save_interval = save_interval
+    if use_save_trigger:
+        args.save_trigger_sentinel = str(tmp_path / "save-trigger")
     source = RolloutDataSource(args)
 
     assert source.get_samples(2) == [
@@ -219,7 +288,7 @@ def test_legacy_get_samples_is_immediately_acknowledged(tmp_path: Path) -> None:
     restored = RolloutDataSource(args)
     restored.load(rollout_id=13)
 
-    assert restored.reserve_samples(1) == [_reservation(2, prompt="charlie", first_sample_index=4)]
+    assert restored.get_samples(1) == [_reservation(2, prompt="charlie", first_sample_index=4).samples]
 
 
 def test_load_accepts_legacy_checkpoint_without_reservation_state(tmp_path: Path) -> None:
