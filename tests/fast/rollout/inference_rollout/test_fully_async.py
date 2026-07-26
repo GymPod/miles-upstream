@@ -13,6 +13,7 @@ from miles.rollout.fully_async.execution import (
     FullyAsyncExecutionRetry,
     FullyAsyncExecutionSuccess,
     FullyAsyncRetryReason,
+    FullyAsyncTerminalPendingError,
 )
 from miles.rollout.fully_async.ownership import ReservationExecutorReceipt
 from miles.rollout.inference_rollout.compatibility import load_rollout_session
@@ -610,5 +611,402 @@ async def test_cancellation_requests_remote_abort_and_waits_for_terminal_generat
     assert outcome == FullyAsyncExecutionRetry(
         executor_receipt=receipt,
         reason=FullyAsyncRetryReason.CANCELLATION_REQUESTED,
+    )
+    await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_uses_a_fresh_terminal_timeout_after_abort_handling_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation_started = asyncio.Event()
+    release_generation = asyncio.Event()
+    abort_started = asyncio.Event()
+
+    async def generate(input: GenerateFnInput) -> GenerateFnOutput:
+        generation_started.set()
+        await release_generation.wait()
+        sample = cast(Sample, input.sample)
+        sample.status = Sample.Status.COMPLETED
+        sample.reward = 1.0
+        return GenerateFnOutput(samples=sample)
+
+    state = _generate_state()
+    state.args.rollout_health_check_timeout = 0.01
+    state.generate_function = generate
+
+    async def request_abort(args: Namespace) -> None:
+        assert args is state.args
+        abort_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            release_generation.set()
+
+    monkeypatch.setattr(fully_async_module, "request_abort", request_abort)
+    executor = InferenceFullyAsyncExecutor(state)
+    reservation = SourceReservation(
+        reservation_id=SourceReservationId("group-0"),
+        samples=[Sample(group_index=0, index=0, prompt="prompt")],
+    )
+    receipt = cast(ReservationExecutorReceipt, object())
+    execution = executor.submit(reservation, receipt)
+    await generation_started.wait()
+
+    execution.request_cancellation()
+    await abort_started.wait()
+    outcome = await asyncio.wait_for(execution.wait_terminal(), timeout=1)
+
+    assert outcome == FullyAsyncExecutionRetry(
+        executor_receipt=receipt,
+        reason=FullyAsyncRetryReason.CANCELLATION_REQUESTED,
+    )
+    await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_rejects_unsupported_terminal_sample_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation_started = asyncio.Event()
+    release_generation = asyncio.Event()
+
+    async def generate(input: GenerateFnInput) -> GenerateFnOutput:
+        generation_started.set()
+        await release_generation.wait()
+        sample = cast(Sample, input.sample)
+        sample.status = cast(Sample.Status, None)
+        sample.reward = 0.0
+        return GenerateFnOutput(samples=sample)
+
+    state = _generate_state()
+    state.generate_function = generate
+
+    async def request_abort(args: Namespace) -> None:
+        assert args is state.args
+        release_generation.set()
+
+    monkeypatch.setattr(fully_async_module, "request_abort", request_abort)
+    executor = InferenceFullyAsyncExecutor(state)
+    reservation = SourceReservation(
+        reservation_id=SourceReservationId("group-0"),
+        samples=[Sample(group_index=0, index=0, prompt="prompt")],
+    )
+    receipt = cast(ReservationExecutorReceipt, object())
+    execution = executor.submit(reservation, receipt)
+    await generation_started.wait()
+
+    execution.request_cancellation()
+    outcome = await execution.wait_terminal()
+
+    assert isinstance(outcome, FullyAsyncExecutionFailure)
+    assert outcome.executor_receipt is receipt
+    assert type(outcome.error) is ValueError
+    assert str(outcome.error) == "Fully async inference returned sample 0 with unsupported status None."
+    await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_fails_loudly_when_generation_does_not_become_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation_started = asyncio.Event()
+    release_generation = asyncio.Event()
+    abort_requested = asyncio.Event()
+
+    async def generate(input: GenerateFnInput) -> GenerateFnOutput:
+        generation_started.set()
+        await release_generation.wait()
+        sample = cast(Sample, input.sample)
+        sample.status = Sample.Status.COMPLETED
+        sample.reward = 1.0
+        return GenerateFnOutput(samples=sample)
+
+    state = _generate_state()
+    state.args.rollout_health_check_timeout = 0.01
+    state.generate_function = generate
+
+    async def request_abort(args: Namespace) -> None:
+        assert args is state.args
+        abort_requested.set()
+
+    monkeypatch.setattr(fully_async_module, "request_abort", request_abort)
+    executor = InferenceFullyAsyncExecutor(state)
+    reservation = SourceReservation(
+        reservation_id=SourceReservationId("group-0"),
+        samples=[Sample(group_index=0, index=0, prompt="prompt")],
+    )
+    receipt = cast(ReservationExecutorReceipt, object())
+    execution = executor.submit(reservation, receipt)
+    await generation_started.wait()
+
+    execution.request_cancellation()
+    terminal_task = asyncio.create_task(execution.wait_terminal())
+    await abort_requested.wait()
+
+    with pytest.raises(FullyAsyncTerminalPendingError) as error:
+        await asyncio.wait_for(terminal_task, timeout=1)
+    assert (
+        str(error.value)
+        == "Fully async inference cancellation did not make the submitted group terminal within 0.01 seconds."
+    )
+    close_task = asyncio.create_task(executor.close())
+    try:
+        with pytest.raises(FullyAsyncTerminalPendingError) as close_error:
+            await asyncio.wait_for(close_task, timeout=1)
+        assert (
+            str(close_error.value)
+            == "Fully async inference executor still has 1 nonterminal group after 0.01 seconds."
+        )
+    finally:
+        release_generation.set()
+        await asyncio.gather(close_task, return_exceptions=True)
+
+    await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_reissues_a_failed_abort_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation_started = asyncio.Event()
+    release_generation = asyncio.Event()
+    abort_error = RuntimeError("abort request failed")
+    abort_attempts: list[Namespace] = []
+
+    async def generate(input: GenerateFnInput) -> GenerateFnOutput:
+        generation_started.set()
+        await release_generation.wait()
+        sample = cast(Sample, input.sample)
+        sample.status = Sample.Status.COMPLETED
+        sample.reward = 1.0
+        return GenerateFnOutput(samples=sample)
+
+    state = _generate_state()
+    state.args.rollout_health_check_timeout = 0.01
+    state.generate_function = generate
+
+    async def request_abort(args: Namespace) -> None:
+        abort_attempts.append(args)
+        if len(abort_attempts) == 1:
+            raise abort_error
+        release_generation.set()
+
+    monkeypatch.setattr(fully_async_module, "request_abort", request_abort)
+    executor = InferenceFullyAsyncExecutor(state)
+    reservation = SourceReservation(
+        reservation_id=SourceReservationId("group-0"),
+        samples=[Sample(group_index=0, index=0, prompt="prompt")],
+    )
+    receipt = cast(ReservationExecutorReceipt, object())
+    execution = executor.submit(reservation, receipt)
+    await generation_started.wait()
+
+    execution.request_cancellation()
+    try:
+        with pytest.raises(FullyAsyncTerminalPendingError) as first_error:
+            await execution.wait_terminal()
+        assert first_error.value.__cause__ is abort_error
+
+        execution.request_cancellation()
+        outcome = await execution.wait_terminal()
+    finally:
+        release_generation.set()
+        await executor.close()
+
+    assert abort_attempts == [state.args, state.args]
+    assert outcome == FullyAsyncExecutionRetry(
+        executor_receipt=receipt,
+        reason=FullyAsyncRetryReason.CANCELLATION_REQUESTED,
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancellation_reissues_a_successful_abort_after_terminal_proof_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation_started = asyncio.Event()
+    release_generation = asyncio.Event()
+    abort_attempts: list[Namespace] = []
+
+    async def generate(input: GenerateFnInput) -> GenerateFnOutput:
+        generation_started.set()
+        await release_generation.wait()
+        sample = cast(Sample, input.sample)
+        sample.status = Sample.Status.COMPLETED
+        sample.reward = 1.0
+        return GenerateFnOutput(samples=sample)
+
+    state = _generate_state()
+    state.args.rollout_health_check_timeout = 0.01
+    state.generate_function = generate
+
+    async def request_abort(args: Namespace) -> None:
+        abort_attempts.append(args)
+        if len(abort_attempts) == 2:
+            release_generation.set()
+
+    monkeypatch.setattr(fully_async_module, "request_abort", request_abort)
+    executor = InferenceFullyAsyncExecutor(state)
+    reservation = SourceReservation(
+        reservation_id=SourceReservationId("group-0"),
+        samples=[Sample(group_index=0, index=0, prompt="prompt")],
+    )
+    receipt = cast(ReservationExecutorReceipt, object())
+    execution = executor.submit(reservation, receipt)
+    await generation_started.wait()
+
+    execution.request_cancellation()
+    try:
+        with pytest.raises(FullyAsyncTerminalPendingError):
+            await execution.wait_terminal()
+
+        execution.request_cancellation()
+        outcome = await execution.wait_terminal()
+    finally:
+        release_generation.set()
+        await executor.close()
+
+    assert abort_attempts == [state.args, state.args]
+    assert outcome == FullyAsyncExecutionRetry(
+        executor_receipt=receipt,
+        reason=FullyAsyncRetryReason.CANCELLATION_REQUESTED,
+    )
+
+
+@pytest.mark.asyncio
+async def test_stale_terminal_timeout_preserves_a_newer_shared_abort_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    both_generations_started = asyncio.Event()
+    release_generations = asyncio.Event()
+    newer_abort_started = asyncio.Event()
+    newer_abort_finished = asyncio.Event()
+    generation_count = 0
+    abort_attempts: list[Namespace] = []
+    first_abort_error = RuntimeError("first abort failed")
+
+    async def generate(input: GenerateFnInput) -> GenerateFnOutput:
+        nonlocal generation_count
+        generation_count += 1
+        if generation_count == 2:
+            both_generations_started.set()
+        await release_generations.wait()
+        sample = cast(Sample, input.sample)
+        sample.status = Sample.Status.COMPLETED
+        sample.reward = 1.0
+        return GenerateFnOutput(samples=sample)
+
+    state = _generate_state()
+    state.args.rollout_health_check_timeout = 0.02
+    state.generate_fn_semaphore = asyncio.Semaphore(2)
+    state.generate_function = generate
+
+    async def request_abort(args: Namespace) -> None:
+        abort_attempts.append(args)
+        if len(abort_attempts) == 1:
+            raise first_abort_error
+        newer_abort_started.set()
+        await asyncio.sleep(0)
+        newer_abort_finished.set()
+
+    monkeypatch.setattr(fully_async_module, "request_abort", request_abort)
+    executor = InferenceFullyAsyncExecutor(state)
+    first_receipt = cast(ReservationExecutorReceipt, object())
+    second_receipt = cast(ReservationExecutorReceipt, object())
+    first_execution = executor.submit(
+        SourceReservation(
+            reservation_id=SourceReservationId("group-0"),
+            samples=[Sample(group_index=0, index=0, prompt="first")],
+        ),
+        first_receipt,
+    )
+    second_execution = executor.submit(
+        SourceReservation(
+            reservation_id=SourceReservationId("group-1"),
+            samples=[Sample(group_index=1, index=1, prompt="second")],
+        ),
+        second_receipt,
+    )
+    try:
+        await asyncio.wait_for(both_generations_started.wait(), timeout=1)
+
+        first_execution.request_cancellation()
+        first_abort_task = executor._cancellation._task
+        assert first_abort_task is not None
+        first_terminal = asyncio.create_task(first_execution.wait_terminal())
+        try:
+            with pytest.raises(RuntimeError) as abort_error:
+                await asyncio.wait_for(asyncio.shield(first_abort_task), timeout=1)
+            assert abort_error.value is first_abort_error
+
+            second_execution.request_cancellation()
+            await asyncio.wait_for(newer_abort_started.wait(), timeout=1)
+            await asyncio.wait_for(newer_abort_finished.wait(), timeout=1)
+
+            done, _ = await asyncio.wait((first_terminal,), timeout=1)
+            assert done == {first_terminal}
+            with pytest.raises(FullyAsyncTerminalPendingError) as terminal_error:
+                await first_terminal
+            assert terminal_error.value.__cause__ is first_abort_error
+
+            second_execution.request_cancellation()
+            await asyncio.sleep(0)
+            assert abort_attempts == [state.args, state.args]
+
+            release_generations.set()
+            outcome = await second_execution.wait_terminal()
+            assert outcome == FullyAsyncExecutionRetry(
+                executor_receipt=second_receipt,
+                reason=FullyAsyncRetryReason.CANCELLATION_REQUESTED,
+            )
+        finally:
+            release_generations.set()
+            await asyncio.gather(first_terminal, return_exceptions=True)
+    finally:
+        release_generations.set()
+        await executor.close()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_preserves_a_terminal_generation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation_started = asyncio.Event()
+    release_generation = asyncio.Event()
+    generation_error = RuntimeError("generation failed during cancellation")
+
+    async def generate(input: GenerateFnInput) -> GenerateFnOutput:
+        generation_started.set()
+        await release_generation.wait()
+        raise generation_error
+
+    state = _generate_state()
+    state.generate_function = generate
+
+    async def request_abort(args: Namespace) -> None:
+        assert args is state.args
+
+    monkeypatch.setattr(fully_async_module, "request_abort", request_abort)
+    executor = InferenceFullyAsyncExecutor(state)
+    reservation = SourceReservation(
+        reservation_id=SourceReservationId("group-0"),
+        samples=[Sample(group_index=0, index=0, prompt="prompt")],
+    )
+    receipt = cast(ReservationExecutorReceipt, object())
+    execution = executor.submit(reservation, receipt)
+    await generation_started.wait()
+
+    execution.request_cancellation()
+    terminal_task = asyncio.create_task(execution.wait_terminal())
+    await asyncio.sleep(0)
+
+    assert terminal_task.done() is False
+
+    release_generation.set()
+    outcome = await terminal_task
+    assert outcome == FullyAsyncExecutionFailure(
+        executor_receipt=receipt,
+        error=generation_error,
     )
     await executor.close()
