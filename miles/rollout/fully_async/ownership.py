@@ -86,7 +86,6 @@ class ReservationTerminalDisposition(Enum):
 
     TRAINABLE = auto()
     CANCELLED = auto()
-    LATE = auto()
 
 
 class ReservationTerminalReceipt(NamedTuple):
@@ -476,13 +475,6 @@ class ReservationOwnership:
                         disposition = ReservationTerminalDisposition.TRAINABLE
                     elif record.state is _ReservationState.CANCELLATION_REQUESTED:
                         disposition = ReservationTerminalDisposition.CANCELLED
-                    elif record.state in (
-                        _ReservationState.TRAINABLE,
-                        _ReservationState.CANCELLED,
-                        _ReservationState.COMMITTED,
-                        _ReservationState.ROLLED_BACK,
-                    ):
-                        disposition = ReservationTerminalDisposition.LATE
                     else:
                         raise RuntimeError(
                             f"Cannot record terminal callback for executor receipt {receipt.receipt_id}; "
@@ -509,8 +501,6 @@ class ReservationOwnership:
                         transitions,
                         strict=True,
                     ):
-                        if disposition is ReservationTerminalDisposition.LATE:
-                            continue
                         record.terminal_receipt = terminal_receipt
                         if disposition is ReservationTerminalDisposition.TRAINABLE:
                             record.state = _ReservationState.TRAINABLE

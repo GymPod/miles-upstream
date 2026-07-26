@@ -399,7 +399,8 @@ def test_completion_after_cancellation_requeues_once_and_is_not_trainable() -> N
     ownership.request_cancellation([executor_receipt], stage_id=stage_id)
 
     terminal_receipts = ownership.record_terminal([executor_receipt], stage_id=stage_id)
-    late_receipts = ownership.record_terminal([executor_receipt], stage_id=stage_id)
+    with pytest.raises(RuntimeError) as duplicate_error:
+        ownership.record_terminal([executor_receipt], stage_id=stage_id)
 
     assert terminal_receipts == [
         ReservationTerminalReceipt(
@@ -407,12 +408,9 @@ def test_completion_after_cancellation_requeues_once_and_is_not_trainable() -> N
             disposition=ReservationTerminalDisposition.CANCELLED,
         )
     ]
-    assert late_receipts == [
-        ReservationTerminalReceipt(
-            executor_receipt=executor_receipt,
-            disposition=ReservationTerminalDisposition.LATE,
-        )
-    ]
+    assert str(duplicate_error.value) == (
+        "Cannot record terminal callback for executor receipt 0; reservation is cancelled."
+    )
     assert data_source.acknowledged == []
     assert data_source.requeued == [[source_reservation]]
 
@@ -427,15 +425,25 @@ def test_trainable_completion_commits_exact_source_reservation() -> None:
     [terminal_receipt] = ownership.record_terminal([executor_receipt], stage_id=stage_id)
 
     ownership.commit_batch([terminal_receipt], rollout_id=11)
-    [late_receipt] = ownership.record_terminal([executor_receipt], stage_id=stage_id)
+    with pytest.raises(RuntimeError) as duplicate_terminal_error:
+        ownership.record_terminal([executor_receipt], stage_id=stage_id)
+    with pytest.raises(RuntimeError) as duplicate_commit_error:
+        ownership.commit_batch([terminal_receipt], rollout_id=12)
+    with pytest.raises(RuntimeError) as commit_rollback_error:
+        ownership.rollback_batch([terminal_receipt])
 
     assert terminal_receipt == ReservationTerminalReceipt(
         executor_receipt=executor_receipt,
         disposition=ReservationTerminalDisposition.TRAINABLE,
     )
-    assert late_receipt == ReservationTerminalReceipt(
-        executor_receipt=executor_receipt,
-        disposition=ReservationTerminalDisposition.LATE,
+    assert str(duplicate_terminal_error.value) == (
+        "Cannot record terminal callback for executor receipt 0; reservation is committed."
+    )
+    assert str(duplicate_commit_error.value) == (
+        "Cannot commit terminal receipt 0; receipt is not exact trainable ownership."
+    )
+    assert str(commit_rollback_error.value) == (
+        "Cannot roll back terminal receipt 0; receipt is not exact trainable ownership."
     )
     assert data_source.acknowledged == [([source_reservation], 11)]
     assert data_source.requeued == []
@@ -452,15 +460,25 @@ def test_trainable_completion_rolls_back_exact_source_reservation() -> None:
     reservation.samples[0].response = "generated output must not replace source replay"
 
     ownership.rollback_batch([terminal_receipt])
-    [late_receipt] = ownership.record_terminal([executor_receipt], stage_id=stage_id)
+    with pytest.raises(RuntimeError) as duplicate_terminal_error:
+        ownership.record_terminal([executor_receipt], stage_id=stage_id)
+    with pytest.raises(RuntimeError) as duplicate_rollback_error:
+        ownership.rollback_batch([terminal_receipt])
+    with pytest.raises(RuntimeError) as rollback_commit_error:
+        ownership.commit_batch([terminal_receipt], rollout_id=12)
 
     assert terminal_receipt == ReservationTerminalReceipt(
         executor_receipt=executor_receipt,
         disposition=ReservationTerminalDisposition.TRAINABLE,
     )
-    assert late_receipt == ReservationTerminalReceipt(
-        executor_receipt=executor_receipt,
-        disposition=ReservationTerminalDisposition.LATE,
+    assert str(duplicate_terminal_error.value) == (
+        "Cannot record terminal callback for executor receipt 0; reservation is rolled_back."
+    )
+    assert str(duplicate_rollback_error.value) == (
+        "Cannot roll back terminal receipt 0; receipt is not exact trainable ownership."
+    )
+    assert str(rollback_commit_error.value) == (
+        "Cannot commit terminal receipt 0; receipt is not exact trainable ownership."
     )
     assert data_source.acknowledged == []
     assert data_source.requeued == [[source_reservation]]
@@ -776,7 +794,7 @@ def test_failed_cancelled_requeue_leaves_terminal_callback_retryable() -> None:
     assert data_source.requeued == [[source_reservation]]
 
 
-def test_late_receipt_from_requeued_attempt_does_not_touch_new_attempt() -> None:
+def test_stale_receipt_from_requeued_attempt_is_rejected_without_touching_new_attempt() -> None:
     first_attempt = _reservation(18)
     data_source = _RecordingDataSource([first_attempt])
     ownership = ReservationOwnership(data_source)
@@ -792,11 +810,14 @@ def test_late_receipt_from_requeued_attempt_does_not_touch_new_attempt() -> None
     second_stage = ReservationStageId("weights-21")
     [second_executor_receipt] = ownership.begin_execution([second_reservation], stage_id=second_stage)
 
-    late_receipts = ownership.record_terminal([first_executor_receipt], stage_id=first_stage)
+    with pytest.raises(RuntimeError) as stale_error:
+        ownership.record_terminal([first_executor_receipt], stage_id=first_stage)
     second_terminal_receipts = ownership.record_terminal([second_executor_receipt], stage_id=second_stage)
     ownership.commit_batch(second_terminal_receipts, rollout_id=14)
 
-    assert late_receipts == [ReservationTerminalReceipt(first_executor_receipt, ReservationTerminalDisposition.LATE)]
+    assert str(stale_error.value) == (
+        "Cannot record terminal callback for executor receipt 0; reservation is cancelled."
+    )
     assert second_terminal_receipts == [
         ReservationTerminalReceipt(second_executor_receipt, ReservationTerminalDisposition.TRAINABLE)
     ]
@@ -1024,7 +1045,7 @@ def test_cancellation_and_terminal_callback_race_is_serialized() -> None:
     assert data_source.acknowledged == []
 
 
-def test_duplicate_terminal_callback_race_records_one_trainable_result() -> None:
+def test_duplicate_terminal_callback_race_records_one_result_and_rejects_the_duplicate() -> None:
     source_reservation = _reservation(23)
     data_source = _RecordingDataSource([source_reservation])
     ownership = ReservationOwnership(data_source)
@@ -1033,22 +1054,29 @@ def test_duplicate_terminal_callback_race_records_one_trainable_result() -> None
     [executor_receipt] = ownership.begin_execution([reservation], stage_id=stage_id)
     start = threading.Barrier(2)
 
-    def record_terminal() -> ReservationTerminalReceipt:
+    def record_terminal() -> ReservationTerminalReceipt | RuntimeError:
         start.wait(timeout=5)
-        [terminal_receipt] = ownership.record_terminal([executor_receipt], stage_id=stage_id)
-        return terminal_receipt
+        try:
+            [terminal_receipt] = ownership.record_terminal([executor_receipt], stage_id=stage_id)
+            return terminal_receipt
+        except RuntimeError as error:
+            return error
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         first_future = executor.submit(record_terminal)
         second_future = executor.submit(record_terminal)
-        terminal_receipts = [
+        outcomes = [
             first_future.result(timeout=5),
             second_future.result(timeout=5),
         ]
 
-    assert sorted(terminal_receipts, key=lambda receipt: receipt.disposition.name) == [
-        ReservationTerminalReceipt(executor_receipt, ReservationTerminalDisposition.LATE),
+    terminal_receipts = [outcome for outcome in outcomes if isinstance(outcome, ReservationTerminalReceipt)]
+    duplicate_errors = [outcome for outcome in outcomes if isinstance(outcome, RuntimeError)]
+    assert terminal_receipts == [
         ReservationTerminalReceipt(executor_receipt, ReservationTerminalDisposition.TRAINABLE),
+    ]
+    assert [str(error) for error in duplicate_errors] == [
+        "Cannot record terminal callback for executor receipt 0; reservation is trainable."
     ]
     assert data_source.acknowledged == []
     assert data_source.requeued == []
