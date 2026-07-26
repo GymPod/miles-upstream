@@ -1,12 +1,15 @@
 import abc
 import copy
+import hashlib
+import json
 import logging
 import os
 import random
+import tempfile
 import threading
 from collections.abc import Sequence
 from pathlib import Path
-from typing import NamedTuple, NewType
+from typing import Literal, NamedTuple, NewType
 
 import torch
 
@@ -43,9 +46,20 @@ class _SourceReservationRecord(FrozenStrictBaseModel):
     sampling_seeds: tuple[int, ...]
 
 
+class _SourceReservationCheckpoint(FrozenStrictBaseModel):
+    schema_version: Literal[1]
+    source_config_hash: str
+    replay: tuple[_SourceReservationRecord, ...]
+
+
 class _OutstandingReservation(NamedTuple):
     record: _SourceReservationRecord
     attempt: SourceReservation
+
+
+class _AcknowledgedReservation(NamedTuple):
+    record: _SourceReservationRecord
+    rollout_id: int
 
 
 class DataSource(abc.ABC):
@@ -141,7 +155,9 @@ class RolloutDataSource(DataSource):
         self.metadata = {}
         self._reservation_lock = threading.RLock()
         self._outstanding_reservations: dict[SourceReservationId, _OutstandingReservation] = {}
+        self._acknowledged_reservations: dict[SourceReservationId, _AcknowledgedReservation] = {}
         self._replay_reservations: list[_SourceReservationRecord] = []
+        self._last_saved_rollout_id: int | None = None
         self._permutation_epoch_id: int | None = None
         self._permutation: tuple[int, ...] = ()
 
@@ -175,6 +191,8 @@ class RolloutDataSource(DataSource):
                 self._set_dataset_epoch(self.epoch_id)
         else:
             self.dataset = None
+        self._dataset_fingerprint = self._build_dataset_fingerprint()
+        self._source_config_hash = self._build_source_config_hash()
 
     def get_samples(self, num_samples):
         with self._reservation_lock:
@@ -241,9 +259,19 @@ class RolloutDataSource(DataSource):
         self._require_durable_reservations()
         with self._reservation_lock:
             self._validate_rollout_id(rollout_id)
+            if self._last_saved_rollout_id is not None and rollout_id <= self._last_saved_rollout_id:
+                raise ValueError(
+                    f"Reservation rollout_id {rollout_id} must be newer than "
+                    f"published checkpoint {self._last_saved_rollout_id}."
+                )
             outstanding = self._get_outstanding_reservations_locked(reservations)
             for owned in outstanding:
-                del self._outstanding_reservations[owned.record.reservation_id]
+                reservation_id = owned.record.reservation_id
+                del self._outstanding_reservations[reservation_id]
+                self._acknowledged_reservations[reservation_id] = _AcknowledgedReservation(
+                    record=owned.record,
+                    rollout_id=rollout_id,
+                )
 
     def requeue_reservations(self, reservations: Sequence[SourceReservation]) -> None:
         """Return exact reservation attempts to the replay queue."""
@@ -334,6 +362,34 @@ class RolloutDataSource(DataSource):
             samples.append(sample)
         return SourceReservation(reservation_id=record.reservation_id, samples=samples)
 
+    def _build_dataset_fingerprint(self) -> str | None:
+        if self.dataset is None:
+            return None
+
+        return self.dataset.fingerprint
+
+    def _build_source_config_hash(self) -> str:
+        configuration = {
+            "prompt_data": getattr(self.args, "prompt_data", None),
+            "hf_checkpoint": getattr(self.args, "hf_checkpoint", None),
+            "chat_template_path": getattr(self.args, "chat_template_path", None),
+            "rollout_max_prompt_len": getattr(self.args, "rollout_max_prompt_len", None),
+            "input_key": getattr(self.args, "input_key", None),
+            "multimodal_keys": getattr(self.args, "multimodal_keys", None),
+            "label_key": getattr(self.args, "label_key", None),
+            "metadata_key": getattr(self.args, "metadata_key", None),
+            "tool_key": getattr(self.args, "tool_key", None),
+            "apply_chat_template": getattr(self.args, "apply_chat_template", None),
+            "apply_chat_template_kwargs": getattr(self.args, "apply_chat_template_kwargs", None),
+            "rollout_seed": self.args.rollout_seed,
+            "rollout_shuffle": self.args.rollout_shuffle,
+            "n_samples_per_prompt": self.args.n_samples_per_prompt,
+            "dataset_size": len(self.dataset) if self.dataset is not None else None,
+            "dataset_fingerprint": self._dataset_fingerprint,
+        }
+        encoded = json.dumps(configuration, sort_keys=True, default=str, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode()).hexdigest()
+
     def add_samples(self, samples: list[list[Sample]]):
         raise RuntimeError(f"Cannot add samples to {self.__class__.__name__}. This is a read-only data source.")
 
@@ -341,16 +397,60 @@ class RolloutDataSource(DataSource):
         if not self.args.rollout_global_dataset:
             return
 
-        state_dict = {
-            "sample_offset": self.sample_offset,
-            "epoch_id": self.epoch_id,
-            "sample_group_index": self.sample_group_index,
-            "sample_index": self.sample_index,
-            "metadata": self.metadata,
-        }
-        path = os.path.join(self.args.save, f"rollout/global_dataset_state_dict_{rollout_id}.pt")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        torch.save(state_dict, path)
+        with self._reservation_lock:
+            self._validate_rollout_id(rollout_id)
+            if self._last_saved_rollout_id is not None and rollout_id < self._last_saved_rollout_id:
+                raise ValueError(
+                    f"Source checkpoint rollout_id must not move backward from "
+                    f"{self._last_saved_rollout_id} to {rollout_id}."
+                )
+
+            replay = [
+                *self._replay_reservations,
+                *(owned.record for owned in self._outstanding_reservations.values()),
+                *(
+                    acknowledged.record
+                    for acknowledged in self._acknowledged_reservations.values()
+                    if acknowledged.rollout_id > rollout_id
+                ),
+            ]
+            reservation_ids = [record.reservation_id for record in replay]
+            if len(reservation_ids) != len(set(reservation_ids)):
+                raise RuntimeError(f"Source reservation ownership is duplicated at checkpoint: {reservation_ids}.")
+            replay.sort(key=lambda record: record.group_index)
+
+            state_dict = {
+                "sample_offset": self.sample_offset,
+                "epoch_id": self.epoch_id,
+                "sample_group_index": self.sample_group_index,
+                "sample_index": self.sample_index,
+                "metadata": self.metadata,
+                "source_reservations": _SourceReservationCheckpoint(
+                    schema_version=1,
+                    source_config_hash=self._source_config_hash,
+                    replay=tuple(replay),
+                ).model_dump(mode="python"),
+            }
+            path = os.path.join(self.args.save, f"rollout/global_dataset_state_dict_{rollout_id}.pt")
+            directory = os.path.dirname(path)
+            os.makedirs(directory, exist_ok=True)
+            descriptor, temporary_path = tempfile.mkstemp(
+                dir=directory,
+                prefix=f".{os.path.basename(path)}.",
+                suffix=".tmp",
+            )
+            os.close(descriptor)
+            try:
+                torch.save(state_dict, temporary_path)
+                os.replace(temporary_path, path)
+            finally:
+                Path(temporary_path).unlink(missing_ok=True)
+            self._acknowledged_reservations = {
+                reservation_id: acknowledged
+                for reservation_id, acknowledged in self._acknowledged_reservations.items()
+                if acknowledged.rollout_id > rollout_id
+            }
+            self._last_saved_rollout_id = rollout_id
 
     def load(self, rollout_id=None):
         if not self.args.rollout_global_dataset:
@@ -359,22 +459,194 @@ class RolloutDataSource(DataSource):
         if self.args.load is None:
             return
 
+        if isinstance(rollout_id, int) and not isinstance(rollout_id, bool) and rollout_id == -1:
+            return
+        if rollout_id is not None:
+            self._validate_rollout_id(rollout_id)
         path = os.path.join(self.args.load, f"rollout/global_dataset_state_dict_{rollout_id}.pt")
         if not os.path.exists(path):
             logger.info(f"Checkpoint {path} does not exist.")
             return
 
-        logger.info(f"load metadata from {path}")
-        logger.info(f"load metadata: {self.metadata}")
-        state_dict = torch.load(path)
-        self.sample_offset = state_dict.get("sample_offset", 0)
-        self.epoch_id = state_dict.get("epoch_id", 0)
-        self.sample_group_index = state_dict.get("sample_group_index", 0)
-        self.sample_index = state_dict.get("sample_index", 0)
-        self.metadata = state_dict.get("metadata", {})
+        with self._reservation_lock:
+            logger.info(f"load metadata from {path}")
+            logger.info(f"load metadata: {self.metadata}")
+            state_dict = torch.load(path)
+            if "source_reservations" in state_dict:
+                reservation_state = _SourceReservationCheckpoint.model_validate(state_dict["source_reservations"])
+            else:
+                reservation_state = _SourceReservationCheckpoint(
+                    schema_version=1,
+                    source_config_hash=self._source_config_hash,
+                    replay=(),
+                )
+            if reservation_state.source_config_hash != self._source_config_hash:
+                raise ValueError("Source reservation checkpoint configuration does not match the current data source.")
 
-        if self.args.rollout_global_dataset and self.args.rollout_shuffle:
-            self._set_dataset_epoch(self.epoch_id)
+            cursor_fields = ("sample_offset", "epoch_id", "sample_group_index", "sample_index")
+            missing_cursor_fields = [field for field in cursor_fields if field not in state_dict]
+            if missing_cursor_fields:
+                raise ValueError(f"Checkpoint is missing source cursor fields: {missing_cursor_fields}.")
+
+            reservation_ids = [record.reservation_id for record in reservation_state.replay]
+            if len(reservation_ids) != len(set(reservation_ids)):
+                raise ValueError(f"Checkpoint contains duplicate source reservation identities: {reservation_ids}.")
+
+            sample_offset = state_dict["sample_offset"]
+            epoch_id = state_dict["epoch_id"]
+            sample_group_index = state_dict["sample_group_index"]
+            sample_index = state_dict["sample_index"]
+            self._validate_loaded_cursor_types(
+                sample_offset=sample_offset,
+                epoch_id=epoch_id,
+                sample_group_index=sample_group_index,
+                sample_index=sample_index,
+            )
+            if "source_reservations" not in state_dict:
+                epoch_id, sample_offset = self._normalize_legacy_cursor(sample_group_index)
+            self._validate_loaded_checkpoint(
+                sample_offset=sample_offset,
+                epoch_id=epoch_id,
+                sample_group_index=sample_group_index,
+                sample_index=sample_index,
+                reservation_state=reservation_state,
+            )
+
+            self.sample_offset = sample_offset
+            self.epoch_id = epoch_id
+            self.sample_group_index = sample_group_index
+            self.sample_index = sample_index
+            self.metadata = state_dict.get("metadata", {})
+            self._replay_reservations = sorted(reservation_state.replay, key=lambda record: record.group_index)
+            self._outstanding_reservations = {}
+            self._acknowledged_reservations = {}
+            self._last_saved_rollout_id = rollout_id
+
+            if self.args.rollout_global_dataset and self.args.rollout_shuffle:
+                self._set_dataset_epoch(self.epoch_id)
+
+    @staticmethod
+    def _validate_loaded_cursor_types(
+        *,
+        sample_offset: int,
+        epoch_id: int,
+        sample_group_index: int,
+        sample_index: int,
+    ) -> None:
+        cursor_values = {
+            "sample_offset": sample_offset,
+            "epoch_id": epoch_id,
+            "sample_group_index": sample_group_index,
+            "sample_index": sample_index,
+        }
+        for name, value in cursor_values.items():
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"Checkpoint {name} must be a nonnegative integer, got {value!r}.")
+
+    def _normalize_legacy_cursor(self, sample_group_index: int) -> tuple[int, int]:
+        if self.dataset is None:
+            raise RuntimeError("A durable source checkpoint requires rollout_global_dataset.")
+        if len(self.dataset) == 0:
+            if sample_group_index != 0:
+                raise ValueError("An empty rollout dataset cannot have a nonzero legacy group frontier.")
+            return 0, 0
+        return divmod(sample_group_index, len(self.dataset))
+
+    def _validate_loaded_checkpoint(
+        self,
+        *,
+        sample_offset: int,
+        epoch_id: int,
+        sample_group_index: int,
+        sample_index: int,
+        reservation_state: _SourceReservationCheckpoint,
+    ) -> None:
+        if self.dataset is None:
+            raise RuntimeError("A durable source checkpoint requires rollout_global_dataset.")
+        if sample_offset > len(self.dataset):
+            raise ValueError(f"Checkpoint sample offset {sample_offset} exceeds dataset size {len(self.dataset)}.")
+
+        dataset_size = len(self.dataset)
+        expected_group_frontier = epoch_id * dataset_size + sample_offset
+        if sample_group_index != expected_group_frontier:
+            raise ValueError(
+                f"Checkpoint group frontier {sample_group_index} does not match dataset cursor "
+                f"at epoch {epoch_id} offset {sample_offset} for dataset size {dataset_size}."
+            )
+
+        expected_sample_frontier = sample_group_index * self.args.n_samples_per_prompt
+        if sample_index != expected_sample_frontier:
+            raise ValueError(
+                f"Checkpoint sample frontier {sample_index} does not match group frontier "
+                f"{sample_group_index} with {self.args.n_samples_per_prompt} samples per prompt."
+            )
+
+        for record in reservation_state.replay:
+            if record.group_index < 0:
+                raise ValueError(
+                    f"Checkpoint replay reservation group index must be nonnegative: {record.group_index}."
+                )
+            if record.group_index >= sample_group_index:
+                raise ValueError(
+                    f"Checkpoint replay reservation {record.group_index} "
+                    f"is not behind group frontier {sample_group_index}."
+                )
+            if record.reservation_id != str(record.group_index):
+                raise ValueError(
+                    f"Checkpoint replay reservation identity {record.reservation_id} "
+                    f"does not match group index {record.group_index}."
+                )
+
+            if dataset_size == 0:
+                raise ValueError("Checkpoint cannot replay a reservation from an empty rollout dataset.")
+            expected_epoch_id, expected_epoch_offset = divmod(record.group_index, dataset_size)
+            if record.epoch_id != expected_epoch_id or record.epoch_offset != expected_epoch_offset:
+                raise ValueError(
+                    f"Checkpoint replay reservation {record.group_index} has source position "
+                    f"epoch {record.epoch_id} offset {record.epoch_offset}, expected "
+                    f"epoch {expected_epoch_id} offset {expected_epoch_offset}."
+                )
+
+            if any(index >= sample_index for index in record.sample_indices):
+                raise ValueError(
+                    f"Checkpoint replay reservation {record.group_index} has sample indices "
+                    f"{record.sample_indices} that are not behind sample frontier {sample_index}."
+                )
+            first_sample_index = record.group_index * self.args.n_samples_per_prompt
+            expected_sample_indices = tuple(
+                range(first_sample_index, first_sample_index + self.args.n_samples_per_prompt)
+            )
+            if record.sample_indices != expected_sample_indices:
+                raise ValueError(
+                    f"Checkpoint replay reservation {record.group_index} has sample indices "
+                    f"{record.sample_indices}, expected {expected_sample_indices}."
+                )
+            expected_sampling_seeds = tuple(
+                self.args.rollout_seed + replica_index for replica_index in range(self.args.n_samples_per_prompt)
+            )
+            if record.sampling_seeds != expected_sampling_seeds:
+                raise ValueError(
+                    f"Checkpoint replay reservation {record.group_index} has sampling seeds "
+                    f"{record.sampling_seeds}, expected {expected_sampling_seeds}."
+                )
+
+            if record.dataset_index is None:
+                raise ValueError(f"Checkpoint replay reservation {record.group_index} has no dataset identity.")
+            if not 0 <= record.dataset_index < len(self.dataset):
+                raise ValueError(
+                    f"Checkpoint replay reservation {record.group_index} has dataset index "
+                    f"{record.dataset_index} outside dataset size {len(self.dataset)}."
+                )
+            expected_dataset_index = self._expected_dataset_index(
+                epoch_id=record.epoch_id,
+                epoch_offset=record.epoch_offset,
+            )
+            if record.dataset_index != expected_dataset_index:
+                raise ValueError(
+                    f"Checkpoint replay reservation {record.group_index} has dataset index "
+                    f"{record.dataset_index}, expected {expected_dataset_index} for "
+                    f"epoch {record.epoch_id} offset {record.epoch_offset}."
+                )
 
     def _expected_dataset_index(self, *, epoch_id: int, epoch_offset: int) -> int:
         if not self.args.rollout_shuffle:
