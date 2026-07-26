@@ -664,6 +664,239 @@ async def test_cancelled_partial_construction_waits_for_cleanup() -> None:
     assert close_completed.is_set()
 
 
+async def test_cancelled_sync_construction_releases_worker_after_close_failure() -> None:
+    construction_started = threading.Event()
+    release_construction = threading.Event()
+    worker_threads: list[threading.Thread] = []
+    close_attempts = 0
+
+    class SlowSyncRolloutFn:
+        def __init__(self, constructor_input: RolloutFnConstructorInput) -> None:
+            worker_threads.append(threading.current_thread())
+            construction_started.set()
+            assert release_construction.wait(timeout=5)
+
+        def __call__(self, rollout_input: RolloutFnInput) -> RolloutFnTrainOutput:
+            return RolloutFnTrainOutput(samples=[], metrics=None)
+
+        def close(self) -> None:
+            nonlocal close_attempts
+            close_attempts += 1
+            if close_attempts == 1:
+                raise RuntimeError("construction cleanup failed")
+
+    constructor_input = RolloutFnConstructorInput(
+        args=Namespace(),
+        data_source=MagicMock(spec=DataSource),
+    )
+    with function_registry.temporary("test:cancelled_sync_construction", SlowSyncRolloutFn):
+        session = load_rollout_session(
+            constructor_input,
+            train_path="test:cancelled_sync_construction",
+            eval_path="test:cancelled_sync_construction",
+        )
+        acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=68))
+        assert await asyncio.to_thread(construction_started.wait, 1)
+
+        acquire_task.cancel()
+        release_construction.set()
+        with pytest.raises(asyncio.CancelledError) as cancellation:
+            await acquire_task
+
+        await session.close()
+
+    assert isinstance(cancellation.value.__cause__, RuntimeError)
+    assert str(cancellation.value.__cause__) == "construction cleanup failed"
+    assert close_attempts == 2
+    assert len(worker_threads) == 1
+    assert not worker_threads[0].is_alive()
+
+
+async def test_repeated_cancellation_does_not_repeat_construction_cleanup() -> None:
+    construction_started = threading.Event()
+    release_construction = threading.Event()
+    close_started = threading.Event()
+    release_close = threading.Event()
+    worker_threads: list[threading.Thread] = []
+    close_attempts = 0
+
+    class SlowSyncRolloutFn:
+        def __init__(self, constructor_input: RolloutFnConstructorInput) -> None:
+            worker_threads.append(threading.current_thread())
+            construction_started.set()
+            assert release_construction.wait(timeout=5)
+
+        def __call__(self, rollout_input: RolloutFnInput) -> RolloutFnTrainOutput:
+            return RolloutFnTrainOutput(samples=[], metrics=None)
+
+        def close(self) -> None:
+            nonlocal close_attempts
+            close_attempts += 1
+            if close_attempts > 1:
+                raise RuntimeError("construction cleanup repeated")
+            close_started.set()
+            assert release_close.wait(timeout=5)
+
+    constructor_input = RolloutFnConstructorInput(
+        args=Namespace(),
+        data_source=MagicMock(spec=DataSource),
+    )
+    with function_registry.temporary("test:repeated_cancel_sync_construction", SlowSyncRolloutFn):
+        session = load_rollout_session(
+            constructor_input,
+            train_path="test:repeated_cancel_sync_construction",
+            eval_path="test:repeated_cancel_sync_construction",
+        )
+        acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=71))
+        assert await asyncio.to_thread(construction_started.wait, 1)
+
+        acquire_task.cancel()
+        release_construction.set()
+        assert await asyncio.to_thread(close_started.wait, 1)
+        acquire_task.cancel()
+        release_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await acquire_task
+
+        await session.close()
+
+    assert close_attempts == 1
+    assert len(worker_threads) == 1
+    assert not worker_threads[0].is_alive()
+
+
+async def test_cancelled_sync_eval_construction_retries_failed_cleanup() -> None:
+    eval_construction_started = threading.Event()
+    release_eval_construction = threading.Event()
+    eval_worker_threads: list[threading.Thread] = []
+    train_close_attempts = 0
+    eval_close_attempts = 0
+
+    class TrainRolloutFn:
+        def __init__(self, constructor_input: RolloutFnConstructorInput) -> None:
+            return
+
+        async def __call__(self, rollout_input: RolloutFnInput) -> RolloutFnTrainOutput:
+            return RolloutFnTrainOutput(samples=[], metrics=None)
+
+        def close(self) -> None:
+            nonlocal train_close_attempts
+            train_close_attempts += 1
+
+    class SlowEvalRolloutFn:
+        def __init__(self, constructor_input: RolloutFnConstructorInput) -> None:
+            eval_worker_threads.append(threading.current_thread())
+            eval_construction_started.set()
+            assert release_eval_construction.wait(timeout=5)
+
+        def __call__(self, rollout_input: RolloutFnInput) -> RolloutFnEvalOutput:
+            return RolloutFnEvalOutput(data={})
+
+        def close(self) -> None:
+            nonlocal eval_close_attempts
+            eval_close_attempts += 1
+            if eval_close_attempts == 1:
+                raise RuntimeError("eval construction cleanup failed")
+
+    constructor_input = RolloutFnConstructorInput(
+        args=Namespace(),
+        data_source=MagicMock(spec=DataSource),
+    )
+    with (
+        function_registry.temporary("test:cancelled_sync_eval_train", TrainRolloutFn),
+        function_registry.temporary("test:cancelled_sync_eval", SlowEvalRolloutFn),
+    ):
+        session = load_rollout_session(
+            constructor_input,
+            train_path="test:cancelled_sync_eval_train",
+            eval_path="test:cancelled_sync_eval",
+        )
+        evaluate_task = asyncio.create_task(session.evaluate(rollout_id=70))
+        assert await asyncio.to_thread(eval_construction_started.wait, 1)
+
+        evaluate_task.cancel()
+        release_eval_construction.set()
+        with pytest.raises(asyncio.CancelledError) as cancellation:
+            await evaluate_task
+
+        await session.close()
+
+    assert isinstance(cancellation.value.__cause__, RuntimeError)
+    assert str(cancellation.value.__cause__) == "eval construction cleanup failed"
+    assert train_close_attempts == 1
+    assert eval_close_attempts == 2
+    assert len(eval_worker_threads) == 1
+    assert not eval_worker_threads[0].is_alive()
+
+
+async def test_initialization_waiter_rechecks_partial_cleanup_failure() -> None:
+    construction_started = threading.Event()
+    release_construction = threading.Event()
+    train_constructions = 0
+    train_close_attempts = 0
+    eval_constructions = 0
+
+    class TrainRolloutFn:
+        def __init__(self, constructor_input: RolloutFnConstructorInput) -> None:
+            nonlocal train_constructions
+            train_constructions += 1
+            construction_started.set()
+            assert release_construction.wait(timeout=5)
+
+        def __call__(self, rollout_input: RolloutFnInput) -> RolloutFnTrainOutput:
+            return RolloutFnTrainOutput(samples=[], metrics=None)
+
+        def close(self) -> None:
+            nonlocal train_close_attempts
+            train_close_attempts += 1
+            if train_close_attempts == 1:
+                raise RuntimeError("train close failed")
+
+    class EvalRolloutFn:
+        def __init__(self, constructor_input: RolloutFnConstructorInput) -> None:
+            nonlocal eval_constructions
+            eval_constructions += 1
+            if eval_constructions == 1:
+                raise RuntimeError("eval construction failed")
+
+        async def __call__(self, rollout_input: RolloutFnInput) -> RolloutFnEvalOutput:
+            return RolloutFnEvalOutput(data={})
+
+    constructor_input = RolloutFnConstructorInput(
+        args=Namespace(),
+        data_source=MagicMock(spec=DataSource),
+    )
+    with (
+        function_registry.temporary("test:initialization_waiter_train", TrainRolloutFn),
+        function_registry.temporary("test:initialization_waiter_eval", EvalRolloutFn),
+    ):
+        session = load_rollout_session(
+            constructor_input,
+            train_path="test:initialization_waiter_train",
+            eval_path="test:initialization_waiter_eval",
+        )
+        acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=69))
+        assert await asyncio.to_thread(construction_started.wait, 1)
+        evaluate_task = asyncio.create_task(session.evaluate(rollout_id=69))
+        await asyncio.sleep(0)
+
+        release_construction.set()
+        with pytest.raises(RuntimeError) as construction_error:
+            await acquire_task
+        with pytest.raises(RuntimeError) as waiter_error:
+            await evaluate_task
+
+        await session.close()
+
+    assert str(construction_error.value) == "eval construction failed"
+    assert isinstance(construction_error.value.__cause__, RuntimeError)
+    assert str(construction_error.value.__cause__) == "train close failed"
+    assert str(waiter_error.value) == "Rollout session is closed."
+    assert train_constructions == 1
+    assert eval_constructions == 1
+    assert train_close_attempts == 2
+
+
 async def test_rollout_session_closes_both_instances_exactly_once() -> None:
     instances: list[object] = []
     closed_instance_ids: list[int] = []
@@ -698,6 +931,38 @@ async def test_rollout_session_closes_both_instances_exactly_once() -> None:
 
     assert len(instances) == 2
     assert closed_instance_ids == [0, 1]
+
+
+async def test_async_rollout_instances_run_sync_close_on_the_actor_thread() -> None:
+    actor_thread_id = threading.get_ident()
+    close_thread_ids: list[int] = []
+
+    class AsyncRolloutFn:
+        def __init__(self, constructor_input: RolloutFnConstructorInput) -> None:
+            return
+
+        async def __call__(self, rollout_input: RolloutFnInput) -> RolloutFnOutput:
+            if rollout_input.evaluation:
+                return RolloutFnEvalOutput(data={}, metrics=None)
+            return RolloutFnTrainOutput(samples=[], metrics=None)
+
+        def close(self) -> None:
+            close_thread_ids.append(threading.get_ident())
+
+    constructor_input = RolloutFnConstructorInput(
+        args=Namespace(),
+        data_source=MagicMock(spec=DataSource),
+    )
+    with function_registry.temporary("test:async_sync_close", AsyncRolloutFn):
+        session = load_rollout_session(
+            constructor_input,
+            train_path="test:async_sync_close",
+            eval_path="test:async_sync_close",
+        )
+        await session.evaluate(rollout_id=0)
+        await session.close()
+
+    assert close_thread_ids == [actor_thread_id, actor_thread_id]
 
 
 async def test_rollout_session_rejects_close_with_an_open_batch_lease() -> None:
@@ -763,6 +1028,179 @@ async def test_rollout_session_rejects_operations_after_close() -> None:
         assert str(checkpoint_error.value) == "Rollout session is closed."
 
     assert calls == []
+
+
+async def test_cancelled_sync_rollout_waits_for_terminal_thread_completion() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    completed = threading.Event()
+
+    def sync_rollout_fn(
+        args: Namespace,
+        rollout_id: int,
+        data_source: DataSource,
+        evaluation: bool,
+    ) -> RolloutFnTrainOutput:
+        started.set()
+        release.wait()
+        completed.set()
+        return RolloutFnTrainOutput(samples=[], metrics={"rollout_id": rollout_id})
+
+    constructor_input = RolloutFnConstructorInput(
+        args=Namespace(),
+        data_source=MagicMock(spec=DataSource),
+    )
+    with function_registry.temporary("test:cancelled_sync_rollout", sync_rollout_fn):
+        session = load_rollout_session(
+            constructor_input,
+            train_path="test:cancelled_sync_rollout",
+            eval_path="test:cancelled_sync_rollout",
+        )
+        acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=29))
+        assert await asyncio.to_thread(started.wait, 1)
+
+        acquire_task.cancel()
+        await asyncio.sleep(0)
+
+        finished_before_release = acquire_task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await acquire_task
+
+        assert not finished_before_release
+        assert completed.is_set()
+        await session.close()
+
+
+async def test_rollout_session_serializes_calls_to_the_train_instance() -> None:
+    call_rollout_ids: list[int] = []
+    first_call_started = asyncio.Event()
+    release_calls = asyncio.Event()
+
+    class SerialRolloutFn:
+        def __init__(self, constructor_input: RolloutFnConstructorInput) -> None:
+            return
+
+        async def __call__(self, rollout_input: RolloutFnInput) -> RolloutFnOutput:
+            call_rollout_ids.append(rollout_input.rollout_id)
+            if len(call_rollout_ids) == 1:
+                first_call_started.set()
+            await release_calls.wait()
+            if rollout_input.evaluation:
+                return RolloutFnEvalOutput(data={}, metrics=None)
+            return RolloutFnTrainOutput(samples=[], metrics=None)
+
+    constructor_input = RolloutFnConstructorInput(
+        args=Namespace(),
+        data_source=MagicMock(spec=DataSource),
+    )
+    with function_registry.temporary("test:serial_rollout_session", SerialRolloutFn):
+        session = load_rollout_session(
+            constructor_input,
+            train_path="test:serial_rollout_session",
+            eval_path="test:serial_rollout_session",
+        )
+        first_task = asyncio.create_task(session.acquire_train_batch(rollout_id=31))
+        await first_call_started.wait()
+        second_task = asyncio.create_task(session.acquire_train_batch(rollout_id=32))
+        await asyncio.sleep(0)
+
+        calls_before_release = list(call_rollout_ids)
+        release_calls.set()
+        first_lease, second_lease = await asyncio.gather(first_task, second_task)
+
+        first_lease.commit()
+        second_lease.commit()
+        await session.close()
+
+    assert calls_before_release == [31]
+    assert call_rollout_ids == [31, 32]
+
+
+async def test_checkpoint_waits_for_in_flight_train_acquisition() -> None:
+    train_started = asyncio.Event()
+    release_train = asyncio.Event()
+
+    class CheckpointRolloutFn:
+        def __init__(self, constructor_input: RolloutFnConstructorInput) -> None:
+            return
+
+        async def __call__(self, rollout_input: RolloutFnInput) -> RolloutFnOutput:
+            if rollout_input.evaluation:
+                return RolloutFnEvalOutput(data={}, metrics=None)
+            train_started.set()
+            await release_train.wait()
+            return RolloutFnTrainOutput(samples=[], metrics=None)
+
+    constructor_input = RolloutFnConstructorInput(
+        args=Namespace(),
+        data_source=MagicMock(spec=DataSource),
+    )
+    with function_registry.temporary("test:checkpoint_waits_for_train", CheckpointRolloutFn):
+        session = load_rollout_session(
+            constructor_input,
+            train_path="test:checkpoint_waits_for_train",
+            eval_path="test:checkpoint_waits_for_train",
+        )
+        acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=37))
+        await train_started.wait()
+        checkpoint_task = asyncio.create_task(session.prepare_checkpoint(rollout_id=37))
+        await asyncio.sleep(0)
+
+        checkpoint_finished_before_train = checkpoint_task.done()
+        release_train.set()
+        lease = await acquire_task
+        with pytest.raises(RuntimeError) as exc_info:
+            await checkpoint_task
+        assert str(exc_info.value) == "Cannot prepare checkpoint 37 with open train batch leases: [37]."
+
+        lease.commit()
+        await session.close()
+
+    assert not checkpoint_finished_before_train
+
+
+async def test_close_waits_for_in_flight_train_acquisition() -> None:
+    train_started = asyncio.Event()
+    release_train = asyncio.Event()
+
+    class ClosableRolloutFn:
+        def __init__(self, constructor_input: RolloutFnConstructorInput) -> None:
+            return
+
+        async def __call__(self, rollout_input: RolloutFnInput) -> RolloutFnOutput:
+            if rollout_input.evaluation:
+                return RolloutFnEvalOutput(data={}, metrics=None)
+            train_started.set()
+            await release_train.wait()
+            return RolloutFnTrainOutput(samples=[], metrics=None)
+
+    constructor_input = RolloutFnConstructorInput(
+        args=Namespace(),
+        data_source=MagicMock(spec=DataSource),
+    )
+    with function_registry.temporary("test:close_waits_for_train", ClosableRolloutFn):
+        session = load_rollout_session(
+            constructor_input,
+            train_path="test:close_waits_for_train",
+            eval_path="test:close_waits_for_train",
+        )
+        acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=41))
+        await train_started.wait()
+        close_task = asyncio.create_task(session.close())
+        await asyncio.sleep(0)
+
+        close_finished_before_train = close_task.done()
+        release_train.set()
+        lease = await acquire_task
+        with pytest.raises(RuntimeError) as exc_info:
+            await close_task
+        assert str(exc_info.value) == "Cannot close rollout session with open train batch leases: [41]."
+
+        lease.commit()
+        await session.close()
+
+    assert not close_finished_before_train
 
 
 async def test_cancelled_close_waits_for_both_instances_to_close() -> None:
