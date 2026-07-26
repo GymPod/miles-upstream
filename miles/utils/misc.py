@@ -3,9 +3,10 @@ import importlib
 import logging
 import re
 import subprocess
-from collections.abc import Sequence
+from argparse import Namespace
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, cast
 
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -13,6 +14,8 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from miles.utils.http_utils import is_port_available
 
 logger = logging.getLogger(__name__)
+
+AgentAbortHook = Callable[[Namespace], Awaitable[None]]
 
 
 # Mainly used for test purpose where `load_function` needs to load many in-flight generated functions
@@ -62,7 +65,7 @@ def load_function(path):
     return getattr(module, attr)
 
 
-async def call_agent_abort_hook(args) -> None:
+async def call_agent_abort_hook(args: Namespace) -> None:
     """Invoke the agent plugin's optional abort hook, if it defines one.
 
     When oversampling collects enough samples, the rollout aborts SGLang, but an
@@ -71,6 +74,12 @@ async def call_agent_abort_hook(args) -> None:
     agent integration knows how to tell its backend to stop, so we look for a
     sibling ``abort`` callable in the same module as the configured agent function
     and call it. Backends that don't expose one are left to drain as before.
+
+    Args:
+        args: Parsed Miles arguments containing the custom agent function path.
+
+    Raises:
+        BaseException: If the configured abort hook cannot complete.
     """
     agent_function_path = getattr(args, "custom_agent_function_path", None)
     if not agent_function_path:
@@ -79,15 +88,29 @@ async def call_agent_abort_hook(args) -> None:
     module_path, _, _ = agent_function_path.rpartition(".")
     if not module_path:
         return
-    try:
-        abort_hook = load_function(f"{module_path}.abort")
-    except (AttributeError, ModuleNotFoundError):
-        return  # plugin doesn't expose an abort hook; nothing to tear down
+    registered_agent = function_registry.get(agent_function_path)
+    abort_hook = function_registry.get(f"{module_path}.abort")
+    if abort_hook is not None:
+        await cast(AgentAbortHook, abort_hook)(args)
+        return
 
     try:
-        await abort_hook(args)
-    except Exception as e:
-        logger.warning(f"Agent abort hook {module_path}.abort failed: {e}")
+        module = importlib.import_module(module_path)
+    except ModuleNotFoundError as error:
+        missing_module = error.name
+        target_module_is_missing = missing_module is not None and (
+            module_path == missing_module or module_path.startswith(f"{missing_module}.")
+        )
+        if registered_agent is not None and target_module_is_missing:
+            return  # registry-only agent paths do not have an importable sibling module
+        raise
+
+    try:
+        abort_hook = module.abort
+    except AttributeError:
+        return  # plugin doesn't expose an abort hook; nothing to tear down
+
+    await cast(AgentAbortHook, abort_hook)(args)
 
 
 class SingletonMeta(type):
