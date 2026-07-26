@@ -116,4 +116,8 @@ class FullyAsyncExecutor(abc.ABC):
 
     @abc.abstractmethod
     async def close(self) -> None:
-        """Close executor resources after every submitted attempt is terminal."""
+        """Close executor resources after every submitted attempt is terminal.
+
+        A call that raises must remain safe to retry. Repeated calls after
+        successful closure must succeed.
+        """
