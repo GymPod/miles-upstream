@@ -21,6 +21,7 @@ delays (5s / 10s / 20s) without actually waiting.  The trick:
 This lets us simulate 20 seconds of polling in <1ms of real time.
 """
 
+import asyncio
 import multiprocessing
 import socket
 import threading
@@ -28,7 +29,9 @@ import time
 from unittest.mock import patch
 
 import pytest
+import ray
 
+import miles.utils.http_utils as http_utils
 from miles.utils.http_utils import wait_for_server_ready
 
 
@@ -128,6 +131,61 @@ class _FakeSocket:
 
     def __exit__(self, *args):
         pass
+
+
+class _RecordingRemotePost:
+    def __init__(self, object_ref: asyncio.Future[object], dispatched: asyncio.Event) -> None:
+        self._object_ref = object_ref
+        self._dispatched = dispatched
+
+    def remote(
+        self,
+        url: str,
+        payload: object,
+        max_retries: int,
+        *,
+        action: str,
+        headers: object | None,
+    ) -> asyncio.Future[object]:
+        self._dispatched.set()
+        return self._object_ref
+
+
+class _RecordingPostActor:
+    def __init__(self, object_ref: asyncio.Future[object], dispatched: asyncio.Event) -> None:
+        self.do_post = _RecordingRemotePost(object_ref, dispatched)
+
+
+@pytest.mark.asyncio
+async def test_distributed_post_cancellation_cancels_remote_ray_task(monkeypatch):
+    object_ref: asyncio.Future[object] = asyncio.get_running_loop().create_future()
+    dispatched = asyncio.Event()
+    cancelled_refs: list[object] = []
+    local_calls = 0
+
+    def record_cancel(ref: object) -> None:
+        cancelled_refs.append(ref)
+
+    async def record_local_post(*args: object, **kwargs: object) -> object:
+        nonlocal local_calls
+        local_calls += 1
+        return {}
+
+    monkeypatch.setattr(http_utils, "_distributed_post_enabled", True)
+    monkeypatch.setattr(http_utils, "_post_actors", [_RecordingPostActor(object_ref, dispatched)])
+    monkeypatch.setattr(http_utils, "_post_actor_idx", 0)
+    monkeypatch.setattr(http_utils, "_post", record_local_post)
+    monkeypatch.setattr(ray, "cancel", record_cancel)
+
+    post_task = asyncio.create_task(http_utils.post("http://worker.test/generate", {"prompt": "test"}))
+    await dispatched.wait()
+    post_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await post_task
+
+    assert cancelled_refs == [object_ref]
+    assert local_calls == 0
 
 
 class TestWaitForServerReadySimulatedDelays:

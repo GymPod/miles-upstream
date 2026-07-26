@@ -9,6 +9,7 @@ import socket
 import time
 
 import httpx
+import ray
 
 from miles.utils.logging_utils import configure_logger_raw
 
@@ -303,7 +304,15 @@ async def post(url, payload, max_retries=60, action="post", headers=None):
         try:
             actor = _next_actor()
             if actor is not None:
-                return await actor.do_post.remote(url, payload, max_retries, action=action, headers=headers)
+                object_ref = actor.do_post.remote(url, payload, max_retries, action=action, headers=headers)
+                try:
+                    return await object_ref
+                except asyncio.CancelledError as cancellation:
+                    try:
+                        ray.cancel(object_ref)
+                    except BaseException as cancellation_error:
+                        raise cancellation from cancellation_error
+                    raise
         except Exception as e:
             logger.info(f"[http_utils] Distributed POST failed, falling back to local: {e} (url={url})")
             # fall through to local
