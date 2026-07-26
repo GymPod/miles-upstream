@@ -100,6 +100,83 @@ class _RecordingRolloutSession(RolloutSession):
         self._events.append("session_close")
 
 
+class _BlockingCloseRolloutSession(_RecordingRolloutSession):
+    def __init__(
+        self,
+        *,
+        events: list[str],
+        close_started: asyncio.Event,
+        allow_close: asyncio.Event,
+    ) -> None:
+        super().__init__(
+            lease=None,
+            eval_output=RolloutFnEvalOutput(data={}, metrics=None),
+            events=events,
+        )
+        self._close_started = close_started
+        self._allow_close = allow_close
+
+    async def close(self) -> None:
+        self._events.append("session_close_started")
+        self._close_started.set()
+        await self._allow_close.wait()
+        self._events.append("session_close_finished")
+
+
+class _FailingOnceCloseRolloutSession(_RecordingRolloutSession):
+    def __init__(self, *, events: list[str], close_error: BaseException) -> None:
+        super().__init__(
+            lease=None,
+            eval_output=RolloutFnEvalOutput(data={}, metrics=None),
+            events=events,
+        )
+        self._close_error: BaseException | None = close_error
+
+    async def close(self) -> None:
+        if self._close_error is not None:
+            close_error = self._close_error
+            self._close_error = None
+            self._events.append("session_close_failed")
+            raise close_error
+        self._events.append("session_close_succeeded")
+
+
+class _RecordingCloseableDataSource:
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+
+    def close(self) -> None:
+        self._events.append("data_source_close")
+
+
+class _FailingCloseableDataSource(_RecordingCloseableDataSource):
+    def __init__(self, events: list[str], close_error: BaseException) -> None:
+        super().__init__(events)
+        self._close_error = close_error
+
+    def close(self) -> None:
+        super().close()
+        raise self._close_error
+
+
+class _RecordingDisposable:
+    def __init__(self, events: list[str], event: str) -> None:
+        self._events = events
+        self._event = event
+
+    def dispose(self) -> None:
+        self._events.append(self._event)
+
+
+class _RecordingHealthMonitor:
+    def __init__(self, events: list[str], event: str) -> None:
+        self._events = events
+        self._event = event
+
+    def stop(self) -> None:
+        self._events.append(self._event)
+
+
 @pytest.fixture
 def patch_low_level(monkeypatch):
     """Replace, in the test process:
@@ -945,3 +1022,251 @@ class TestEval:
         await manager.eval(rollout_id=10)
 
         assert events == []
+
+
+@pytest.mark.asyncio
+class TestDispose:
+    async def test_resource_failure_does_not_skip_later_cleanup(
+        self,
+        ray_local_mode,
+        placement_group_factory,
+        tmp_path,
+        patch_low_level,
+        monkeypatch,
+    ):
+        import miles.ray.rollout.rollout_manager as rmgr
+
+        class DataSourceFailure(BaseException):
+            pass
+
+        class FailingDataSource:
+            def close(self) -> None:
+                events.append("data_source_close_failed")
+                raise failure
+
+        class RecordingMetricChecker:
+            def dispose(self) -> None:
+                events.append("metric_checker_dispose")
+
+        class FailingMonitor:
+            def stop(self) -> None:
+                events.append("first_monitor_stop_failed")
+                raise RuntimeError("monitor stop failed")
+
+        class RecordingMonitor:
+            def stop(self) -> None:
+                events.append("second_monitor_stop")
+
+        args = _make_test_args(tmp_path, models=[("actor", True)])
+        args.debug_train_only = True
+        pg = placement_group_factory(2)
+        manager = _make_manager(args, pg)
+        events: list[str] = []
+        failure = DataSourceFailure("data source close failed")
+        manager.rollout_session = _RecordingRolloutSession(
+            lease=None,
+            eval_output=RolloutFnEvalOutput(data={}, metrics=None),
+            events=events,
+        )
+        manager.data_source = FailingDataSource()
+        manager._metric_checker = RecordingMetricChecker()
+        manager._health_monitors = [FailingMonitor(), RecordingMonitor()]
+        monkeypatch.setattr(
+            rmgr.event_analyzer,
+            "run_analysis_from_args",
+            lambda args: events.append("event_analysis"),
+        )
+
+        with pytest.raises(DataSourceFailure) as exc_info:
+            await manager.dispose()
+
+        assert exc_info.value is failure
+        assert events == [
+            "session_close",
+            "data_source_close_failed",
+            "event_analysis",
+            "metric_checker_dispose",
+            "first_monitor_stop_failed",
+            "second_monitor_stop",
+        ]
+
+    async def test_close_failure_preserves_resources_for_dispose_retry(
+        self,
+        ray_local_mode,
+        placement_group_factory,
+        tmp_path,
+        patch_low_level,
+        monkeypatch,
+    ):
+        import miles.ray.rollout.rollout_manager as rmgr
+
+        class CloseFailure(BaseException):
+            pass
+
+        args = _make_test_args(tmp_path, models=[("actor", True)])
+        args.debug_train_only = True
+        pg = placement_group_factory(2)
+        manager = _make_manager(args, pg)
+        events: list[str] = []
+        failure = CloseFailure("session close failed")
+        manager.rollout_session = _FailingOnceCloseRolloutSession(events=events, close_error=failure)
+        manager.data_source = _RecordingCloseableDataSource(events)
+        monkeypatch.setattr(
+            rmgr.event_analyzer,
+            "run_analysis_from_args",
+            lambda args: events.append("event_analysis"),
+        )
+
+        with pytest.raises(CloseFailure) as exc_info:
+            await manager.dispose()
+
+        assert exc_info.value is failure
+        assert events == ["session_close_failed"]
+
+        await manager.dispose()
+
+        assert events == [
+            "session_close_failed",
+            "session_close_succeeded",
+            "data_source_close",
+            "event_analysis",
+        ]
+
+    async def test_cleanup_failure_does_not_skip_remaining_resources(
+        self,
+        ray_local_mode,
+        placement_group_factory,
+        tmp_path,
+        patch_low_level,
+        monkeypatch,
+    ):
+        import miles.ray.rollout.rollout_manager as rmgr
+
+        args = _make_test_args(tmp_path, models=[("actor", True)])
+        args.debug_train_only = True
+        pg = placement_group_factory(2)
+        manager = _make_manager(args, pg)
+        events: list[str] = []
+        failure = RuntimeError("data source close failed")
+        manager.rollout_session = _RecordingRolloutSession(
+            lease=None,
+            eval_output=RolloutFnEvalOutput(data={}, metrics=None),
+            events=events,
+        )
+        manager.data_source = _FailingCloseableDataSource(events, failure)
+        manager._metric_checker = _RecordingDisposable(events, "metric_checker_dispose")
+        manager._health_monitors = [
+            _RecordingHealthMonitor(events, "first_health_monitor_stop"),
+            _RecordingHealthMonitor(events, "second_health_monitor_stop"),
+        ]
+        monkeypatch.setattr(
+            rmgr.event_analyzer,
+            "run_analysis_from_args",
+            lambda args: events.append("event_analysis"),
+        )
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await manager.dispose()
+
+        assert exc_info.value is failure
+        assert events == [
+            "session_close",
+            "data_source_close",
+            "event_analysis",
+            "metric_checker_dispose",
+            "first_health_monitor_stop",
+            "second_health_monitor_stop",
+        ]
+
+    async def test_waits_for_session_close_before_remaining_cleanup(
+        self,
+        ray_local_mode,
+        placement_group_factory,
+        tmp_path,
+        patch_low_level,
+        monkeypatch,
+    ):
+        import miles.ray.rollout.rollout_manager as rmgr
+
+        args = _make_test_args(tmp_path, models=[("actor", True)])
+        args.debug_train_only = True
+        pg = placement_group_factory(2)
+        manager = _make_manager(args, pg)
+        events: list[str] = []
+        close_started = asyncio.Event()
+        allow_close = asyncio.Event()
+        manager.rollout_session = _BlockingCloseRolloutSession(
+            events=events,
+            close_started=close_started,
+            allow_close=allow_close,
+        )
+        manager.data_source = _RecordingCloseableDataSource(events)
+        monkeypatch.setattr(
+            rmgr.event_analyzer,
+            "run_analysis_from_args",
+            lambda args: events.append("event_analysis"),
+        )
+
+        dispose_task = asyncio.create_task(manager.dispose())
+        await close_started.wait()
+
+        assert dispose_task.done() is False
+        assert events == ["session_close_started"]
+
+        allow_close.set()
+        await dispose_task
+
+        assert events == [
+            "session_close_started",
+            "session_close_finished",
+            "data_source_close",
+            "event_analysis",
+        ]
+
+    async def test_cancellation_waits_for_session_then_completes_cleanup(
+        self,
+        ray_local_mode,
+        placement_group_factory,
+        tmp_path,
+        patch_low_level,
+        monkeypatch,
+    ):
+        import miles.ray.rollout.rollout_manager as rmgr
+
+        args = _make_test_args(tmp_path, models=[("actor", True)])
+        args.debug_train_only = True
+        pg = placement_group_factory(2)
+        manager = _make_manager(args, pg)
+        events: list[str] = []
+        close_started = asyncio.Event()
+        allow_close = asyncio.Event()
+        manager.rollout_session = _BlockingCloseRolloutSession(
+            events=events,
+            close_started=close_started,
+            allow_close=allow_close,
+        )
+        manager.data_source = _RecordingCloseableDataSource(events)
+        monkeypatch.setattr(
+            rmgr.event_analyzer,
+            "run_analysis_from_args",
+            lambda args: events.append("event_analysis"),
+        )
+
+        dispose_task = asyncio.create_task(manager.dispose())
+        await close_started.wait()
+        dispose_task.cancel()
+        await asyncio.sleep(0)
+
+        assert dispose_task.done() is False
+        assert events == ["session_close_started"]
+
+        allow_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await dispose_task
+
+        assert events == [
+            "session_close_started",
+            "session_close_finished",
+            "data_source_close",
+            "event_analysis",
+        ]
