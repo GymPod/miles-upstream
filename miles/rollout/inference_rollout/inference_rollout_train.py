@@ -13,29 +13,81 @@ from miles.rollout.generate_utils.prefill_logprobs import recompute_samples_roll
 from miles.rollout.inference_rollout.inference_rollout_common import GenerateState, generate_and_rm_group
 from miles.utils import dumper_utils
 from miles.utils.http_utils import get, post
-from miles.utils.misc import as_completed_async, call_agent_abort_hook, load_function
+from miles.utils.misc import call_agent_abort_hook, load_function
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
 
 
-async def abort(state: GenerateState, pendings: set, rollout_id: int) -> list[list[Sample]]:
+async def _request_inference_abort(args: Namespace) -> list[BaseException]:
+    try:
+        urls = await get_worker_urls(args)
+        logger.info(f"Abort request for {urls}")
+        abort_results = await asyncio.gather(
+            *[post(f"{url}/abort_request", {"abort_all": True}) for url in urls],
+            return_exceptions=True,
+        )
+        return [result for result in abort_results if isinstance(result, BaseException)]
+    except BaseException as error:
+        return [error]
+
+
+async def _request_agent_abort(args: Namespace) -> list[BaseException]:
+    try:
+        await call_agent_abort_hook(args)
+    except BaseException as error:
+        return [error]
+    return []
+
+
+async def request_abort(args: Namespace) -> None:
+    """Request deployment-wide termination from inference and agent integration.
+
+    Every worker behind the configured router receives ``abort_all``. The
+    optional agent abort hook runs concurrently with those requests.
+
+    Args:
+        args: Parsed Miles arguments for the active inference deployment.
+
+    Raises:
+        BaseException: The first inference or agent abort failure after every
+            operation settles.
+    """
+    # Start both independent abort paths before waiting for either path to settle.
+    inference_errors, agent_errors = await asyncio.gather(
+        _request_inference_abort(args),
+        _request_agent_abort(args),
+    )
+    errors = [*inference_errors, *agent_errors]
+
+    if errors:
+        raise errors[0]
+
+
+async def abort(
+    state: GenerateState,
+    pendings: set[asyncio.Task[list[Sample]]],
+    rollout_id: int,
+) -> list[list[Sample]]:
     args = state.args
 
     assert not state.aborted
     state.aborted = True
-
-    urls = await get_worker_urls(args)
-    logger.info(f"Abort request for {urls}")
-    await asyncio.gather(*[post(f"{url}/abort_request", {"abort_all": True}) for url in urls])
-
-    # Let the agent integration tear down its in-flight trials so they stop hitting
-    # SGLang, instead of running on until their own max_seq_len / timeout.
-    await call_agent_abort_hook(args)
+    abort_error: BaseException | None = None
+    try:
+        await request_abort(args)
+    except BaseException as error:
+        abort_error = error
 
     # make sure all the pending tasks are finished
     aborted_samples = []
-    async for group in as_completed_async(pendings):
+    pending_errors: list[BaseException] = []
+    for pending in asyncio.as_completed(pendings):
+        try:
+            group = await pending
+        except BaseException as error:
+            pending_errors.append(error)
+            continue
         if not args.partial_rollout:
             continue
 
@@ -47,6 +99,13 @@ async def abort(state: GenerateState, pendings: set, rollout_id: int) -> list[li
 
     if args.partial_rollout:
         logger.info(f"Collected {sum(len(x) for x in aborted_samples)} partial samples into the data buffer")
+
+    if abort_error is not None:
+        if pending_errors:
+            raise abort_error from pending_errors[0]
+        raise abort_error
+    if pending_errors:
+        raise pending_errors[0]
 
     return aborted_samples
 
@@ -60,7 +119,10 @@ async def get_worker_urls(args: Namespace):
         return [worker["url"] for worker in response["workers"]]
 
 
-def submit_generate_tasks(state: GenerateState, samples: list[list[Sample]]):
+def submit_generate_tasks(
+    state: GenerateState,
+    samples: list[list[Sample]],
+) -> list[asyncio.Task[list[Sample]]]:
     return [
         asyncio.create_task(
             # submit a group of samples as a single task.
@@ -91,9 +153,9 @@ async def generate_rollout_async(
     # target_data_size is the total number of valid samples to get
     target_data_size = args.rollout_batch_size
 
-    pendings = set()
-    data = []
-    all_data = []
+    pendings: set[asyncio.Task[list[Sample]]] = set()
+    data: list[list[Sample]] = []
+    all_data: list[list[Sample]] = []
     do_print = True
     pbar = tqdm(total=target_data_size * args.n_samples_per_prompt, desc="Rollout generation")
     while len(data) < target_data_size:
