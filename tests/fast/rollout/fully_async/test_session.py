@@ -1,4 +1,5 @@
 import asyncio
+from argparse import Namespace
 from collections.abc import Sequence
 from typing import cast
 
@@ -13,6 +14,8 @@ from miles.rollout.fully_async.execution import (
 )
 from miles.rollout.fully_async.ownership import ReservationExecutorReceipt
 from miles.rollout.fully_async.scheduler import _FullyAsyncScheduler
+from miles.rollout.fully_async.session import FullyAsyncRolloutSession
+from miles.rollout.rollout_session import BatchRollbackReason
 from miles.utils.types import Sample
 
 
@@ -156,6 +159,24 @@ async def _wait_for_executions(executor: _ControlledExecutor, count: int) -> Non
     await asyncio.wait_for(wait(), timeout=1)
 
 
+def _session() -> tuple[FullyAsyncRolloutSession, _RecordingDataSource, _ControlledExecutor]:
+    data_source = _RecordingDataSource()
+    executor = _ControlledExecutor()
+    session = FullyAsyncRolloutSession(
+        args=Namespace(
+            rollout_batch_size=1,
+            n_samples_per_prompt=1,
+            fully_async_max_execution_samples=1,
+            fully_async_max_retained_groups=1,
+            fully_async_max_completed_prefetch_groups=1,
+            async_max_concurrent_samples=None,
+        ),
+        data_source=data_source,
+        executor=executor,
+    )
+    return session, data_source, executor
+
+
 def test_execution_outcomes_bind_terminal_results_to_exact_receipts() -> None:
     receipt = cast(ReservationExecutorReceipt, object())
     error = RuntimeError("execution failed")
@@ -262,3 +283,50 @@ async def test_completed_capacity_halts_admission_until_batch_settlement() -> No
     second_batch = await scheduler.acquire_batch()
     scheduler.rollback_batch(second_batch)
     await scheduler.close()
+
+
+async def test_managed_session_commits_a_train_batch_lease() -> None:
+    session, data_source, executor = _session()
+    acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=21))
+    await _wait_for_executions(executor, 1)
+    executor.executions[0].succeed()
+    lease = await acquire_task
+
+    assert lease.output.samples == [executor.executions[0].reservation.samples]
+    assert lease.output.metrics is None
+
+    lease.commit()
+    assert data_source.acknowledged == [([executor.executions[0].reservation], 21)]
+    await session.close()
+
+
+async def test_checkpoint_rejects_an_open_lease_then_succeeds_after_settlement() -> None:
+    session, _, executor = _session()
+    acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=22))
+    await _wait_for_executions(executor, 1)
+    executor.executions[0].succeed()
+    lease = await acquire_task
+
+    with pytest.raises(RuntimeError) as checkpoint_error:
+        await session.prepare_checkpoint(rollout_id=22)
+    assert str(checkpoint_error.value) == "Cannot prepare checkpoint 22 with open train batch leases: [22]."
+
+    lease.rollback(BatchRollbackReason.HANDOFF_FAILED)
+    assert await session.prepare_checkpoint(rollout_id=22) is None
+    await session.close()
+
+
+async def test_close_rejects_an_open_lease_then_retries_after_settlement() -> None:
+    session, data_source, executor = _session()
+    acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=23))
+    await _wait_for_executions(executor, 1)
+    executor.executions[0].succeed()
+    lease = await acquire_task
+
+    with pytest.raises(RuntimeError) as close_error:
+        await session.close()
+    assert str(close_error.value) == "Cannot close rollout session with open train batch leases: [23]."
+
+    lease.rollback(BatchRollbackReason.HANDOFF_FAILED)
+    await session.close()
+    assert data_source.requeued == [[executor.executions[0].reservation]]
