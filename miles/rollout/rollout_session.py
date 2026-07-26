@@ -122,7 +122,11 @@ class TrainBatchLease(abc.ABC):
 
 
 class RolloutSession(abc.ABC):
-    """Own the lifecycle and batch handoff for one train/eval rollout pair."""
+    """Own the lifecycle and batch handoff for one train/eval rollout pair.
+
+    Explicit session classes loaded from rollout function paths must accept one
+    ``RolloutFnConstructorInput`` positional argument.
+    """
 
     @abc.abstractmethod
     async def acquire_train_batch(self, rollout_id: int) -> TrainBatchLease:
