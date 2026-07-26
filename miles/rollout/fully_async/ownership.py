@@ -49,6 +49,9 @@ class _ReservationState(Enum):
     RESERVED = auto()
     EXECUTING = auto()
     CANCELLATION_REQUESTED = auto()
+    TRAINABLE = auto()
+    CANCELLED = auto()
+    COMMITTED = auto()
     ROLLED_BACK = auto()
 
 
@@ -58,6 +61,7 @@ class _ReservationRecord:
     state: _ReservationState
     stage_id: ReservationStageId | None
     executor_receipt: ReservationExecutorReceipt | None
+    terminal_receipt: ReservationTerminalReceipt | None
 
 
 @dataclass(frozen=True, eq=False)
@@ -67,7 +71,7 @@ class ReservationExecutorReceipt:
     Attributes:
         receipt_id: Owner-local identity for this execution attempt.
         reservation_id: Stable source identity for the prompt group.
-        stage_id: Policy stage that submitted the execution.
+        stage_id: Execution stage that submitted the attempt.
     """
 
     receipt_id: ReservationReceiptId
@@ -75,6 +79,26 @@ class ReservationExecutorReceipt:
     stage_id: ReservationStageId
     _owner_token: object = field(repr=False)
     _record: _ReservationRecord = field(repr=False)
+
+
+class ReservationTerminalDisposition(Enum):
+    """Result of applying one terminal executor callback."""
+
+    TRAINABLE = auto()
+    CANCELLED = auto()
+    LATE = auto()
+
+
+class ReservationTerminalReceipt(NamedTuple):
+    """Record how ownership handled one terminal executor callback.
+
+    Attributes:
+        executor_receipt: Exact execution attempt that became terminal.
+        disposition: Ownership transition selected for that callback.
+    """
+
+    executor_receipt: ReservationExecutorReceipt
+    disposition: ReservationTerminalDisposition
 
 
 class _PoisonedTransition(NamedTuple):
@@ -230,6 +254,7 @@ class ReservationOwnership:
                         state=_ReservationState.RESERVED,
                         stage_id=None,
                         executor_receipt=None,
+                        terminal_receipt=None,
                     )
                     for reservation in reservations
                 }
@@ -288,7 +313,7 @@ class ReservationOwnership:
 
         Args:
             reservations: Exact reserved attempts to execute.
-            stage_id: Policy stage that will execute the groups.
+            stage_id: Execution stage that will execute the groups.
 
         Returns:
             Identity-sensitive receipts for terminal executor callbacks.
@@ -377,7 +402,7 @@ class ReservationOwnership:
 
         Args:
             receipts: Exact active executor receipts to cancel.
-            stage_id: Policy stage that owns the executions.
+            stage_id: Execution stage that owns the attempts.
         """
         attempts = list(receipts)
         self._validate_stage_id(stage_id)
@@ -412,6 +437,182 @@ class ReservationOwnership:
             self._poison_interrupted_transition(progress, error)
             raise
 
+    @_serialize_transition
+    def record_terminal(
+        self,
+        receipts: Sequence[ReservationExecutorReceipt],
+        *,
+        stage_id: ReservationStageId,
+    ) -> list[ReservationTerminalReceipt]:
+        """Apply terminal executor callbacks without releasing early.
+
+        Args:
+            receipts: Exact executor receipts whose work reached a terminal
+                state.
+            stage_id: Execution stage that owns the attempts.
+
+        Returns:
+            One disposition per input receipt in input order.
+        """
+        attempts = list(receipts)
+        self._validate_stage_id(stage_id)
+        progress = _TransitionProgress(
+            operation="record terminal callbacks",
+            source_started=False,
+            state_may_have_changed=False,
+        )
+        try:
+            with self._lock:
+                self._ensure_usable()
+                self._validate_unique_executor_receipts(attempts)
+                transitions: list[tuple[_ReservationRecord, ReservationTerminalDisposition]] = []
+                for receipt in attempts:
+                    record = self._require_executor_receipt_authority(
+                        receipt,
+                        stage_id=stage_id,
+                        operation="record terminal callback for",
+                    )
+                    if record.state is _ReservationState.EXECUTING:
+                        disposition = ReservationTerminalDisposition.TRAINABLE
+                    elif record.state is _ReservationState.CANCELLATION_REQUESTED:
+                        disposition = ReservationTerminalDisposition.CANCELLED
+                    elif record.state in (
+                        _ReservationState.TRAINABLE,
+                        _ReservationState.CANCELLED,
+                        _ReservationState.COMMITTED,
+                        _ReservationState.ROLLED_BACK,
+                    ):
+                        disposition = ReservationTerminalDisposition.LATE
+                    else:
+                        raise RuntimeError(
+                            f"Cannot record terminal callback for executor receipt {receipt.receipt_id}; "
+                            f"reservation is {record.state.name.lower()}."
+                        )
+                    transitions.append((record, disposition))
+
+                cancelled = [
+                    record.reservation
+                    for record, disposition in transitions
+                    if disposition is ReservationTerminalDisposition.CANCELLED
+                ]
+                terminal_receipts = [
+                    ReservationTerminalReceipt(
+                        executor_receipt=receipt,
+                        disposition=disposition,
+                    )
+                    for receipt, (_, disposition) in zip(attempts, transitions, strict=True)
+                ]
+
+                def apply_terminal_transitions() -> None:
+                    for terminal_receipt, (record, disposition) in zip(
+                        terminal_receipts,
+                        transitions,
+                        strict=True,
+                    ):
+                        if disposition is ReservationTerminalDisposition.LATE:
+                            continue
+                        record.terminal_receipt = terminal_receipt
+                        if disposition is ReservationTerminalDisposition.TRAINABLE:
+                            record.state = _ReservationState.TRAINABLE
+                        else:
+                            record.state = _ReservationState.CANCELLED
+                            del self._records[record.reservation.reservation_id]
+
+                if cancelled:
+                    progress.operation = "record cancelled terminal callbacks"
+                    self._apply_source_transition(
+                        progress=progress,
+                        source_transition=lambda: self._data_source.requeue_reservations(cancelled),
+                        local_transition=apply_terminal_transitions,
+                    )
+                else:
+                    self._apply_local_transition(
+                        progress=progress,
+                        transition=apply_terminal_transitions,
+                    )
+                return terminal_receipts
+        except BaseException as error:
+            self._poison_interrupted_transition(progress, error)
+            raise
+
+    @_serialize_transition
+    def commit_batch(
+        self,
+        receipts: Sequence[ReservationTerminalReceipt],
+        *,
+        rollout_id: int,
+    ) -> None:
+        """Acknowledge exact trainable reservations after batch publication.
+
+        Args:
+            receipts: Exact trainable terminal receipts in the batch.
+            rollout_id: Training rollout that accepted the reservations.
+        """
+        terminal_receipts = list(receipts)
+        progress = _TransitionProgress(
+            operation="commit trainable reservations",
+            source_started=False,
+            state_may_have_changed=False,
+        )
+        try:
+            with self._lock:
+                self._ensure_usable()
+                records = self._require_trainable_receipts(terminal_receipts, operation="commit")
+                source_reservations = [record.reservation for record in records]
+
+                def release_records() -> None:
+                    for record in records:
+                        record.state = _ReservationState.COMMITTED
+                        del self._records[record.reservation.reservation_id]
+
+                self._apply_source_transition(
+                    progress=progress,
+                    source_transition=lambda: self._data_source.acknowledge_reservations(
+                        source_reservations,
+                        rollout_id=rollout_id,
+                    ),
+                    local_transition=release_records,
+                )
+            return
+        except BaseException as error:
+            self._poison_interrupted_transition(progress, error)
+            raise
+
+    @_serialize_transition
+    def rollback_batch(self, receipts: Sequence[ReservationTerminalReceipt]) -> None:
+        """Requeue exact trainable reservations after batch rejection.
+
+        Args:
+            receipts: Exact trainable terminal receipts to return for pristine
+                replay.
+        """
+        terminal_receipts = list(receipts)
+        progress = _TransitionProgress(
+            operation="roll back trainable reservations",
+            source_started=False,
+            state_may_have_changed=False,
+        )
+        try:
+            with self._lock:
+                self._ensure_usable()
+                records = self._require_trainable_receipts(terminal_receipts, operation="roll back")
+                source_reservations = [record.reservation for record in records]
+
+                def release_records() -> None:
+                    for record in records:
+                        record.state = _ReservationState.ROLLED_BACK
+                        del self._records[record.reservation.reservation_id]
+
+                self._apply_source_transition(
+                    progress=progress,
+                    source_transition=lambda: self._data_source.requeue_reservations(source_reservations),
+                    local_transition=release_records,
+                )
+            return
+        except BaseException as error:
+            self._poison_interrupted_transition(progress, error)
+            raise
+
     def _require_reservations(
         self,
         reservations: list[SourceReservation],
@@ -427,7 +628,8 @@ class ReservationOwnership:
             record = self._records.get(reservation.reservation_id)
             if record is None or record.reservation is not reservation or record.state is not expected_state:
                 raise RuntimeError(
-                    f"Source reservation {reservation.reservation_id} is not an exact {expected_state.name.lower()} attempt owned here."
+                    f"Source reservation {reservation.reservation_id} is not an exact "
+                    f"{expected_state.name.lower()} attempt owned here."
                 )
             records.append(record)
         return records
@@ -452,7 +654,8 @@ class ReservationOwnership:
             if record.state not in allowed_states:
                 expected_states = ", ".join(state.name.lower() for state in allowed_states)
                 raise RuntimeError(
-                    f"Cannot {operation} executor receipt {receipt.receipt_id}; expected stage {stage_id!r} in states {expected_states}."
+                    f"Cannot {operation} executor receipt {receipt.receipt_id}; "
+                    f"expected stage {stage_id!r} in states {expected_states}."
                 )
             records.append(record)
         return records
@@ -472,7 +675,8 @@ class ReservationOwnership:
             or record.stage_id != stage_id
         ):
             raise RuntimeError(
-                f"Cannot {operation} executor receipt {receipt.receipt_id}; receipt is not owned by stage {stage_id!r}."
+                f"Cannot {operation} executor receipt {receipt.receipt_id}; "
+                f"receipt is not owned by stage {stage_id!r}."
             )
         return record
 
@@ -482,15 +686,46 @@ class ReservationOwnership:
         if len(receipt_ids) != len(set(receipt_ids)):
             raise ValueError(f"Executor receipt batch contains duplicate identities: {receipt_ids}.")
 
+    def _require_trainable_receipts(
+        self,
+        receipts: list[ReservationTerminalReceipt],
+        *,
+        operation: str,
+    ) -> list[_ReservationRecord]:
+        receipt_ids = [receipt.executor_receipt.receipt_id for receipt in receipts]
+        if len(receipt_ids) != len(set(receipt_ids)):
+            raise ValueError(f"Terminal receipt batch contains duplicate identities: {receipt_ids}.")
+
+        records: list[_ReservationRecord] = []
+        for receipt in receipts:
+            executor_receipt = receipt.executor_receipt
+            record = executor_receipt._record
+            if (
+                executor_receipt._owner_token is not self._owner_token
+                or record.executor_receipt is not executor_receipt
+                or record.terminal_receipt is not receipt
+                or receipt.disposition is not ReservationTerminalDisposition.TRAINABLE
+                or record.state is not _ReservationState.TRAINABLE
+            ):
+                raise RuntimeError(
+                    f"Cannot {operation} terminal receipt {executor_receipt.receipt_id}; "
+                    "receipt is not exact trainable ownership."
+                )
+            records.append(record)
+        return records
+
     def _ensure_usable(self) -> None:
         if self._poisoned_identity_conflicts is not None:
             raise ReservationIdentityConflictError(
-                f"Reservation ownership is poisoned by distinct attempts with the same identities: {list(self._poisoned_identity_conflicts)}."
+                "Reservation ownership is poisoned by distinct attempts with the same identities: "
+                f"{list(self._poisoned_identity_conflicts)}."
             )
         if self._poisoned_transition is not None:
             transition = self._poisoned_transition
             raise ReservationOwnershipPoisonedError(
-                f"Reservation ownership is poisoned because transition {transition.operation!r} may have partially completed after {transition.error!r}. Recover from a durable checkpoint."
+                "Reservation ownership is poisoned because transition "
+                f"{transition.operation!r} may have partially completed after {transition.error!r}. "
+                "Recover from a durable checkpoint."
             ) from transition.error
 
     def _apply_local_transition(
