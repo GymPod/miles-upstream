@@ -13,6 +13,7 @@ from miles.utils.arguments import (
     _resolve_ft_components,
     get_miles_extra_args_provider,
     miles_validate_args,
+    resolve_fully_async_limits,
 )
 from miles.utils.misc import function_registry
 
@@ -172,6 +173,306 @@ def test_custom_megatron_post_save_hook_path_requires_save():
         match="'--save' is required when custom_megatron_post_save_hook_path is set.",
     ):
         miles_validate_args(args)
+
+
+class TestFullyAsyncLimitValidation:
+    def _parse(self, extra: list[str]) -> argparse.Namespace:
+        parser = argparse.ArgumentParser()
+        get_miles_extra_args_provider()(parser)
+        return parser.parse_args(REQUIRED_ARGS + extra)
+
+    def test_raw_defaults_do_not_change_ordinary_arguments(self) -> None:
+        args = self._parse(["--num-rollout", "1"])
+
+        assert (
+            args.fully_async_max_execution_samples,
+            args.fully_async_max_retained_groups,
+            args.fully_async_max_completed_prefetch_groups,
+            args.async_max_concurrent_samples,
+        ) == (None, None, None, None)
+
+        miles_validate_args(args)
+        assert (
+            args.fully_async_max_execution_samples,
+            args.fully_async_max_retained_groups,
+            args.fully_async_max_completed_prefetch_groups,
+            args.async_max_concurrent_samples,
+        ) == (None, None, None, None)
+
+    def test_resolves_conservative_defaults_for_fully_async_mode(self) -> None:
+        args = self._parse(["--rollout-batch-size", "2", "--n-samples-per-prompt", "4"])
+
+        resolve_fully_async_limits(args)
+
+        assert (
+            args.fully_async_max_execution_samples,
+            args.fully_async_max_retained_groups,
+            args.fully_async_max_completed_prefetch_groups,
+            args.async_max_concurrent_samples,
+        ) == (8, 2, 2, 8)
+
+    def test_accepts_all_boundary_equalities(self) -> None:
+        args = self._parse(
+            [
+                "--rollout-batch-size",
+                "2",
+                "--n-samples-per-prompt",
+                "4",
+                "--fully-async-max-execution-samples",
+                "4",
+                "--fully-async-max-retained-groups",
+                "2",
+                "--fully-async-max-completed-prefetch-groups",
+                "2",
+            ]
+        )
+
+        resolve_fully_async_limits(args)
+
+        assert (
+            args.fully_async_max_execution_samples,
+            args.fully_async_max_retained_groups,
+            args.fully_async_max_completed_prefetch_groups,
+            args.async_max_concurrent_samples,
+        ) == (4, 2, 2, 4)
+
+    @pytest.mark.parametrize(
+        ("extra", "expected_error"),
+        [
+            (
+                ["--rollout-batch-size", "0"],
+                "--rollout-batch-size must be a positive integer, got 0.",
+            ),
+            (
+                ["--n-samples-per-prompt", "0"],
+                "--n-samples-per-prompt must be a positive integer, got 0.",
+            ),
+            (
+                ["--fully-async-max-execution-samples", "0"],
+                "--fully-async-max-execution-samples must be a positive integer, got 0.",
+            ),
+            (
+                ["--fully-async-max-retained-groups", "0"],
+                "--fully-async-max-retained-groups must be a positive integer, got 0.",
+            ),
+            (
+                ["--fully-async-max-completed-prefetch-groups", "0"],
+                "--fully-async-max-completed-prefetch-groups must be a positive integer, got 0.",
+            ),
+            (
+                ["--fully-async-max-execution-samples", "-1"],
+                "--fully-async-max-execution-samples must be a positive integer, got -1.",
+            ),
+            (
+                ["--fully-async-max-retained-groups", "-1"],
+                "--fully-async-max-retained-groups must be a positive integer, got -1.",
+            ),
+            (
+                ["--fully-async-max-completed-prefetch-groups", "-1"],
+                "--fully-async-max-completed-prefetch-groups must be a positive integer, got -1.",
+            ),
+            (
+                ["--async-max-concurrent-samples", "-1"],
+                "--async-max-concurrent-samples must be a positive integer, got -1.",
+            ),
+            (
+                ["--n-samples-per-prompt", "4", "--fully-async-max-execution-samples", "3"],
+                ("--fully-async-max-execution-samples (3) must be at least " "--n-samples-per-prompt (4)."),
+            ),
+            (
+                ["--n-samples-per-prompt", "8", "--fully-async-max-execution-samples", "9"],
+                ("--fully-async-max-execution-samples (9) must be divisible by " "--n-samples-per-prompt (8)."),
+            ),
+            (
+                ["--rollout-batch-size", "3", "--fully-async-max-retained-groups", "2"],
+                ("--fully-async-max-retained-groups (2) must be at least " "--rollout-batch-size (3)."),
+            ),
+            (
+                ["--rollout-batch-size", "3", "--fully-async-max-completed-prefetch-groups", "2"],
+                ("--fully-async-max-completed-prefetch-groups (2) must be at least " "--rollout-batch-size (3)."),
+            ),
+            (
+                [
+                    "--rollout-batch-size",
+                    "2",
+                    "--fully-async-max-retained-groups",
+                    "3",
+                    "--fully-async-max-completed-prefetch-groups",
+                    "4",
+                ],
+                (
+                    "--fully-async-max-completed-prefetch-groups (4) must not exceed "
+                    "--fully-async-max-retained-groups (3)."
+                ),
+            ),
+        ],
+    )
+    def test_rejects_invalid_limits(self, extra: list[str], expected_error: str) -> None:
+        args = self._parse(extra)
+
+        with pytest.raises(ValueError) as error:
+            resolve_fully_async_limits(args)
+
+        assert str(error.value) == expected_error
+
+    def test_rejects_boolean_limit(self) -> None:
+        args = self._parse([])
+        args.fully_async_max_execution_samples = True
+
+        with pytest.raises(ValueError) as error:
+            resolve_fully_async_limits(args)
+
+        assert str(error.value) == "--fully-async-max-execution-samples must be a positive integer, got True."
+
+    def test_deprecated_execution_alias_maps_to_canonical_limit(self, caplog: pytest.LogCaptureFixture) -> None:
+        args = self._parse(
+            [
+                "--rollout-batch-size",
+                "2",
+                "--n-samples-per-prompt",
+                "4",
+                "--async-max-concurrent-samples",
+                "12",
+            ]
+        )
+
+        with caplog.at_level(logging.WARNING, logger="miles.utils.arguments"):
+            resolve_fully_async_limits(args)
+
+        assert (
+            args.fully_async_max_execution_samples,
+            args.fully_async_max_retained_groups,
+            args.fully_async_max_completed_prefetch_groups,
+            args.async_max_concurrent_samples,
+        ) == (12, 2, 2, 12)
+        assert [record.message for record in caplog.records] == [
+            "--async-max-concurrent-samples is deprecated; use --fully-async-max-execution-samples."
+        ]
+
+    @pytest.mark.parametrize(
+        ("extra", "expected_warnings"),
+        [
+            ([], []),
+            (["--fully-async-max-execution-samples", "12"], []),
+            (
+                ["--async-max-concurrent-samples", "12"],
+                ["--async-max-concurrent-samples is deprecated; use --fully-async-max-execution-samples."],
+            ),
+        ],
+    )
+    def test_repeated_resolution_is_stable_and_does_not_invent_warnings(
+        self,
+        extra: list[str],
+        expected_warnings: list[str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        args = self._parse(["--rollout-batch-size", "2", "--n-samples-per-prompt", "4", *extra])
+
+        with caplog.at_level(logging.WARNING, logger="miles.utils.arguments"):
+            resolve_fully_async_limits(args)
+            first_values = (
+                args.fully_async_max_execution_samples,
+                args.fully_async_max_retained_groups,
+                args.fully_async_max_completed_prefetch_groups,
+                args.async_max_concurrent_samples,
+            )
+            resolve_fully_async_limits(args)
+
+        assert first_values == (
+            args.fully_async_max_execution_samples,
+            args.fully_async_max_retained_groups,
+            args.fully_async_max_completed_prefetch_groups,
+            args.async_max_concurrent_samples,
+        )
+        assert [record.message for record in caplog.records] == expected_warnings
+
+    def test_equal_deprecated_and_canonical_execution_limits_are_valid(self, caplog: pytest.LogCaptureFixture) -> None:
+        args = self._parse(
+            [
+                "--n-samples-per-prompt",
+                "4",
+                "--fully-async-max-execution-samples",
+                "8",
+                "--async-max-concurrent-samples",
+                "8",
+            ]
+        )
+
+        with caplog.at_level(logging.WARNING, logger="miles.utils.arguments"):
+            resolve_fully_async_limits(args)
+
+        assert args.fully_async_max_execution_samples == 8
+        assert args.async_max_concurrent_samples == 8
+        assert [record.message for record in caplog.records] == [
+            "--async-max-concurrent-samples is deprecated; use --fully-async-max-execution-samples."
+        ]
+
+    def test_conflicting_deprecated_and_canonical_execution_limits_fail(self) -> None:
+        args = self._parse(
+            [
+                "--fully-async-max-execution-samples",
+                "8",
+                "--async-max-concurrent-samples",
+                "16",
+            ]
+        )
+
+        with pytest.raises(ValueError) as error:
+            resolve_fully_async_limits(args)
+
+        assert str(error.value) == (
+            "--async-max-concurrent-samples (16) conflicts with " "--fully-async-max-execution-samples (8)."
+        )
+
+    def test_global_validation_resolves_explicit_fully_async_limits(self) -> None:
+        args = self._parse(
+            [
+                "--num-rollout",
+                "1",
+                "--fully-async-max-execution-samples",
+                "64",
+                "--fully-async-max-retained-groups",
+                "64",
+                "--fully-async-max-completed-prefetch-groups",
+                "64",
+            ]
+        )
+
+        miles_validate_args(args)
+
+        assert (
+            args.fully_async_max_execution_samples,
+            args.fully_async_max_retained_groups,
+            args.fully_async_max_completed_prefetch_groups,
+            args.async_max_concurrent_samples,
+        ) == (64, 64, 64, 64)
+
+    def test_global_validation_resolves_deprecated_execution_alias(self, caplog: pytest.LogCaptureFixture) -> None:
+        args = self._parse(
+            [
+                "--num-rollout",
+                "1",
+                "--rollout-batch-size",
+                "2",
+                "--n-samples-per-prompt",
+                "4",
+                "--async-max-concurrent-samples",
+                "12",
+            ]
+        )
+
+        with caplog.at_level(logging.WARNING, logger="miles.utils.arguments"):
+            miles_validate_args(args)
+
+        assert (
+            args.fully_async_max_execution_samples,
+            args.fully_async_max_retained_groups,
+            args.fully_async_max_completed_prefetch_groups,
+            args.async_max_concurrent_samples,
+        ) == (12, 2, 2, 12)
+        assert [record.message for record in caplog.records] == [
+            "--async-max-concurrent-samples is deprecated; use --fully-async-max-execution-samples."
+        ]
 
 
 class TestMultiLoRAValidation:
