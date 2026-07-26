@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -35,6 +36,18 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 logger = logging.getLogger(__name__)
+
+
+async def _await_task_terminal(task: asyncio.Task[None]) -> None:
+    while True:
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                task.result()
+                return
+        else:
+            return
 
 
 @ray.remote
@@ -96,14 +109,62 @@ class RolloutManager:
     def get_router_address(self) -> tuple[str, int]:
         return self.args.sglang_router_ip, self.args.sglang_router_port
 
-    def dispose(self):
+    async def dispose(self):
+        close_task = asyncio.create_task(self.rollout_session.close())
+        cancellation: asyncio.CancelledError | None = None
+        close_error: BaseException | None = None
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError as error:
+            cancellation = error
+            try:
+                await _await_task_terminal(close_task)
+            except BaseException as error:
+                close_error = error
+        except BaseException as error:
+            close_error = error
+
+        if close_error is not None:
+            if cancellation is not None:
+                raise cancellation from close_error
+            raise close_error
+
+        cleanup_error: BaseException | None = None
+        try:
+            self._dispose_resources()
+        except BaseException as error:
+            cleanup_error = error
+
+        if cancellation is not None:
+            if cleanup_error is not None:
+                raise cancellation from cleanup_error
+            raise cancellation
+        if cleanup_error is not None:
+            raise cleanup_error
+
+    def _dispose_resources(self) -> None:
+        cleanup_errors: list[BaseException] = []
         if (close := getattr(self.data_source, "close", None)) is not None:
-            close()
-        event_analyzer.run_analysis_from_args(self.args)
+            try:
+                close()
+            except BaseException as error:
+                cleanup_errors.append(error)
+        try:
+            event_analyzer.run_analysis_from_args(self.args)
+        except BaseException as error:
+            cleanup_errors.append(error)
         if self._metric_checker is not None:
-            self._metric_checker.dispose()
+            try:
+                self._metric_checker.dispose()
+            except BaseException as error:
+                cleanup_errors.append(error)
         for monitor in self._health_monitors:
-            monitor.stop()
+            try:
+                monitor.stop()
+            except BaseException as error:
+                cleanup_errors.append(error)
+        if cleanup_errors:
+            raise cleanup_errors[0]
 
     # -------------------------- data generation -----------------------------
 
