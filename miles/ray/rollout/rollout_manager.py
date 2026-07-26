@@ -242,7 +242,8 @@ class RolloutManager:
 
     # -------------------------- checkpointing -----------------------------
 
-    def save(self, rollout_id):
+    async def save(self, rollout_id):
+        await self.rollout_session.prepare_checkpoint(rollout_id)
         if self.args.rollout_global_dataset:
             self.data_source.save(rollout_id)
         event_logger_checkpoint.snapshot(self.args, rollout_id)
