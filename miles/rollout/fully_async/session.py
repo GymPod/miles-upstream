@@ -131,6 +131,15 @@ class FullyAsyncRolloutSession(RolloutSession):
         except BaseException as error:
             scheduler_error = error
 
+        executor_error: BaseException | None = None
+        if not self._open_leases and not self._scheduler.has_active_executions and not self._executor_closed:
+            try:
+                await self._executor.close()
+            except BaseException as error:
+                executor_error = error
+            else:
+                self._executor_closed = True
+
         if self._open_leases:
             open_rollout_ids = sorted(self._open_leases)
             lease_error = RuntimeError(
@@ -138,14 +147,17 @@ class FullyAsyncRolloutSession(RolloutSession):
             )
             if scheduler_error is not None:
                 raise lease_error from scheduler_error
+            if executor_error is not None:
+                raise lease_error from executor_error
             raise lease_error
 
         if scheduler_error is not None:
+            if executor_error is not None:
+                raise scheduler_error from executor_error
             raise scheduler_error
 
-        if not self._executor_closed:
-            await self._executor.close()
-            self._executor_closed = True
+        if executor_error is not None:
+            raise executor_error
 
         self._closed = self._executor_closed
 

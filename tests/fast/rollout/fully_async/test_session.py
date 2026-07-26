@@ -1,6 +1,7 @@
 import asyncio
 from argparse import Namespace
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import cast
 
 import pytest
@@ -9,8 +10,12 @@ from miles.rollout.data_source import DataSource, SourceReservation, SourceReser
 from miles.rollout.fully_async.execution import (
     FullyAsyncExecution,
     FullyAsyncExecutionFailure,
+    FullyAsyncExecutionOutcome,
+    FullyAsyncExecutionRetry,
     FullyAsyncExecutionSuccess,
     FullyAsyncExecutor,
+    FullyAsyncRetryReason,
+    FullyAsyncTerminalPendingError,
 )
 from miles.rollout.fully_async.ownership import ReservationExecutorReceipt
 from miles.rollout.fully_async.scheduler import _FullyAsyncScheduler
@@ -22,9 +27,12 @@ from miles.utils.types import Sample
 class _RecordingDataSource(DataSource):
     def __init__(self) -> None:
         self.next_reservation_id = 0
+        self.replay_ids: list[SourceReservationId] = []
+        self.issued: list[SourceReservation] = []
         self.outstanding: dict[SourceReservationId, SourceReservation] = {}
         self.acknowledged: list[tuple[list[SourceReservation], int]] = []
         self.requeued: list[list[SourceReservation]] = []
+        self.requeue_error: BaseException | None = None
 
     def get_samples(self, num_samples: int) -> list[list[Sample]]:
         raise AssertionError("Bounded scheduling must reserve source groups.")
@@ -41,8 +49,11 @@ class _RecordingDataSource(DataSource):
     def reserve_samples(self, num_groups: int) -> list[SourceReservation]:
         reservations = []
         for _ in range(num_groups):
-            reservation_id = SourceReservationId(self.next_reservation_id)
-            self.next_reservation_id += 1
+            if self.replay_ids:
+                reservation_id = self.replay_ids.pop(0)
+            else:
+                reservation_id = SourceReservationId(self.next_reservation_id)
+                self.next_reservation_id += 1
             reservation = SourceReservation(
                 reservation_id=reservation_id,
                 samples=[
@@ -53,6 +64,7 @@ class _RecordingDataSource(DataSource):
                     )
                 ],
             )
+            self.issued.append(reservation)
             self.outstanding[reservation_id] = reservation
             reservations.append(reservation)
         return reservations
@@ -69,7 +81,10 @@ class _RecordingDataSource(DataSource):
 
     def requeue_reservations(self, reservations: Sequence[SourceReservation]) -> None:
         attempts = list(reservations)
+        if self.requeue_error is not None:
+            raise self.requeue_error
         self._settle(attempts)
+        self.replay_ids.extend(reservation.reservation_id for reservation in attempts)
         self.requeued.append(attempts)
 
     def _settle(self, reservations: list[SourceReservation]) -> None:
@@ -85,49 +100,120 @@ class _ControlledExecution(FullyAsyncExecution):
         self,
         reservation: SourceReservation,
         receipt: ReservationExecutorReceipt,
+        *,
+        cancel_completes: bool,
     ) -> None:
         self.reservation = reservation
         self.receipt = receipt
-        self.result: asyncio.Future[
-            FullyAsyncExecutionSuccess | FullyAsyncExecutionFailure
-        ] = asyncio.get_running_loop().create_future()
+        self.cancel_completes = cancel_completes
+        self.cancellation_requests = 0
+        self.result: asyncio.Future[FullyAsyncExecutionOutcome] = asyncio.get_running_loop().create_future()
 
     def request_cancellation(self) -> None:
-        if not self.result.done():
+        self.cancellation_requests += 1
+        if self.cancel_completes and not self.result.done():
             self.result.set_result(
-                FullyAsyncExecutionFailure(
+                FullyAsyncExecutionRetry(
                     executor_receipt=self.receipt,
-                    error=asyncio.CancelledError(),
+                    reason=FullyAsyncRetryReason.CANCELLATION_REQUESTED,
                 )
             )
 
-    async def wait_terminal(self) -> FullyAsyncExecutionSuccess | FullyAsyncExecutionFailure:
+    async def wait_terminal(self) -> FullyAsyncExecutionOutcome:
         return await self.result
 
-    def succeed(self) -> None:
+    def succeed(
+        self,
+        *,
+        receipt: ReservationExecutorReceipt | None = None,
+        samples: list[Sample] | None = None,
+    ) -> None:
         self.result.set_result(
             FullyAsyncExecutionSuccess(
+                executor_receipt=self.receipt if receipt is None else receipt,
+                samples=self.reservation.samples if samples is None else samples,
+            )
+        )
+
+    def fail(self, error: BaseException) -> None:
+        self.result.set_result(
+            FullyAsyncExecutionFailure(
                 executor_receipt=self.receipt,
-                samples=self.reservation.samples,
+                error=error,
+            )
+        )
+
+    def retry(self, reason: FullyAsyncRetryReason) -> None:
+        self.result.set_result(
+            FullyAsyncExecutionRetry(
+                executor_receipt=self.receipt,
+                reason=reason,
             )
         )
 
 
 class _ControlledExecutor(FullyAsyncExecutor):
-    def __init__(self) -> None:
+    def __init__(self, *, cancel_completes: bool = True) -> None:
+        self.cancel_completes = cancel_completes
         self.executions: list[_ControlledExecution] = []
+        self.close_calls = 0
 
     def submit(
         self,
         reservation: SourceReservation,
         receipt: ReservationExecutorReceipt,
     ) -> FullyAsyncExecution:
-        execution = _ControlledExecution(reservation, receipt)
+        execution = _ControlledExecution(
+            reservation,
+            receipt,
+            cancel_completes=self.cancel_completes,
+        )
         self.executions.append(execution)
         return execution
 
     async def close(self) -> None:
-        return
+        self.close_calls += 1
+
+
+class _RetryableTerminalExecution(_ControlledExecution):
+    def __init__(
+        self,
+        reservation: SourceReservation,
+        receipt: ReservationExecutorReceipt,
+    ) -> None:
+        super().__init__(reservation, receipt, cancel_completes=False)
+        self.observation_attempts = 0
+        self.retry_result: asyncio.Future[FullyAsyncExecutionOutcome] = asyncio.get_running_loop().create_future()
+
+    async def wait_terminal(self) -> FullyAsyncExecutionOutcome:
+        self.observation_attempts += 1
+        if self.observation_attempts == 1:
+            while self.cancellation_requests == 0:
+                await asyncio.sleep(0)
+            raise FullyAsyncTerminalPendingError("terminal proof is pending")
+        return await self.retry_result
+
+    def complete_retry(self) -> None:
+        self.retry_result.set_result(
+            FullyAsyncExecutionRetry(
+                executor_receipt=self.receipt,
+                reason=FullyAsyncRetryReason.CANCELLATION_REQUESTED,
+            )
+        )
+
+
+class _RetryableTerminalExecutor(_ControlledExecutor):
+    def __init__(self) -> None:
+        super().__init__(cancel_completes=False)
+
+    def submit(
+        self,
+        reservation: SourceReservation,
+        receipt: ReservationExecutorReceipt,
+    ) -> FullyAsyncExecution:
+        execution = _RetryableTerminalExecution(reservation, receipt)
+        self.executions.append(execution)
+        return execution
 
 
 def _scheduler(
@@ -159,9 +245,12 @@ async def _wait_for_executions(executor: _ControlledExecutor, count: int) -> Non
     await asyncio.wait_for(wait(), timeout=1)
 
 
-def _session() -> tuple[FullyAsyncRolloutSession, _RecordingDataSource, _ControlledExecutor]:
+def _session(
+    *,
+    cancel_completes: bool = True,
+) -> tuple[FullyAsyncRolloutSession, _RecordingDataSource, _ControlledExecutor]:
     data_source = _RecordingDataSource()
-    executor = _ControlledExecutor()
+    executor = _ControlledExecutor(cancel_completes=cancel_completes)
     session = FullyAsyncRolloutSession(
         args=Namespace(
             rollout_batch_size=1,
@@ -183,9 +272,18 @@ def test_execution_outcomes_bind_terminal_results_to_exact_receipts() -> None:
 
     success = FullyAsyncExecutionSuccess(executor_receipt=receipt, samples=[])
     failure = FullyAsyncExecutionFailure(executor_receipt=receipt, error=error)
+    retry = FullyAsyncExecutionRetry(
+        executor_receipt=receipt,
+        reason=FullyAsyncRetryReason.EXECUTION_ABORTED,
+    )
 
     assert success == (receipt, [])
     assert failure == (receipt, error)
+    assert retry == (receipt, FullyAsyncRetryReason.EXECUTION_ABORTED)
+    assert list(FullyAsyncRetryReason) == [
+        FullyAsyncRetryReason.EXECUTION_ABORTED,
+        FullyAsyncRetryReason.CANCELLATION_REQUESTED,
+    ]
 
 
 def test_execution_interfaces_require_submit_terminal_cancellation_and_close() -> None:
@@ -193,6 +291,7 @@ def test_execution_interfaces_require_submit_terminal_cancellation_and_close() -
         FullyAsyncExecution()
     with pytest.raises(TypeError):
         FullyAsyncExecutor()
+    assert issubclass(FullyAsyncTerminalPendingError, RuntimeError)
 
 
 async def test_successful_batch_is_sorted_and_retained_until_commit() -> None:
@@ -215,9 +314,7 @@ async def test_successful_batch_is_sorted_and_retained_until_commit() -> None:
 
     scheduler.commit_batch(batch, rollout_id=7)
 
-    assert data_source.acknowledged == [
-        ([executor.executions[0].reservation, executor.executions[1].reservation], 7)
-    ]
+    assert data_source.acknowledged == [(data_source.issued[:2], 7)]
     await scheduler.close()
 
 
@@ -273,15 +370,41 @@ async def test_completed_capacity_halts_admission_until_batch_settlement() -> No
     executor.executions[0].succeed()
     first_batch = await first_acquire
 
-    await _wait_for_executions(executor, 2)
-    executor.executions[1].succeed()
     await asyncio.sleep(0)
-    assert len(executor.executions) == 2
+    assert len(executor.executions) == 1
 
     scheduler.commit_batch(first_batch, rollout_id=9)
-    await _wait_for_executions(executor, 3)
+    await _wait_for_executions(executor, 2)
+    executor.executions[1].succeed()
     second_batch = await scheduler.acquire_batch()
     scheduler.rollback_batch(second_batch)
+    await scheduler.close()
+
+
+async def test_completed_capacity_requeues_terminal_overflow_without_cancelling_siblings() -> None:
+    scheduler, data_source, executor = _scheduler(
+        groups_per_batch=1,
+        execution_samples=2,
+        retained_groups=2,
+        completed_groups=1,
+    )
+    first_acquire = asyncio.create_task(scheduler.acquire_batch())
+    await _wait_for_executions(executor, 2)
+
+    executor.executions[0].succeed()
+    first_batch = await first_acquire
+    executor.executions[1].succeed()
+
+    async def wait_for_requeue() -> None:
+        while not data_source.requeued:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_requeue(), timeout=1)
+
+    assert data_source.requeued == [[data_source.issued[1]]]
+    assert [execution.cancellation_requests for execution in executor.executions] == [0, 0]
+
+    scheduler.commit_batch(first_batch, rollout_id=10)
     await scheduler.close()
 
 
@@ -296,7 +419,7 @@ async def test_managed_session_commits_a_train_batch_lease() -> None:
     assert lease.output.metrics is None
 
     lease.commit()
-    assert data_source.acknowledged == [([executor.executions[0].reservation], 21)]
+    assert data_source.acknowledged == [([data_source.issued[0]], 21)]
     await session.close()
 
 
@@ -329,4 +452,141 @@ async def test_close_rejects_an_open_lease_then_retries_after_settlement() -> No
 
     lease.rollback(BatchRollbackReason.HANDOFF_FAILED)
     await session.close()
-    assert data_source.requeued == [[executor.executions[0].reservation]]
+    assert data_source.requeued == [[data_source.issued[0]]]
+
+
+async def test_execution_failure_requeues_the_attempt_and_fails_loudly() -> None:
+    session, data_source, executor = _session()
+    acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=24))
+    await _wait_for_executions(executor, 1)
+    failure = RuntimeError("execution failed")
+    executor.executions[0].fail(failure)
+
+    with pytest.raises(RuntimeError) as acquisition_error:
+        await acquire_task
+    assert acquisition_error.value is failure
+    assert data_source.requeued == [[data_source.issued[0]]]
+    await session.close()
+
+
+async def test_terminal_retry_requeues_and_keeps_producing() -> None:
+    session, data_source, executor = _session()
+    acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=25))
+    await _wait_for_executions(executor, 1)
+    first_execution = executor.executions[0]
+
+    first_execution.retry(FullyAsyncRetryReason.EXECUTION_ABORTED)
+    await _wait_for_executions(executor, 2)
+    replay_execution = executor.executions[1]
+
+    assert data_source.requeued == [[data_source.issued[0]]]
+    assert replay_execution.reservation.reservation_id == first_execution.reservation.reservation_id
+    assert replay_execution.reservation is not first_execution.reservation
+
+    replay_execution.succeed()
+    lease = await acquire_task
+    lease.commit()
+    await session.close()
+
+
+async def test_close_cancels_active_execution_before_requeue_and_executor_close() -> None:
+    session, data_source, executor = _session()
+    acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=26))
+    await _wait_for_executions(executor, 1)
+    execution = executor.executions[0]
+
+    await session.close()
+
+    assert execution.cancellation_requests == 1
+    assert data_source.requeued == [[data_source.issued[0]]]
+    assert executor.close_calls == 1
+    with pytest.raises(RuntimeError) as acquisition_error:
+        await acquire_task
+    assert str(acquisition_error.value) == "Rollout session is closed."
+
+
+async def test_close_retries_terminal_observation_without_releasing_ownership() -> None:
+    data_source = _RecordingDataSource()
+    executor = _RetryableTerminalExecutor()
+    session = FullyAsyncRolloutSession(
+        args=Namespace(
+            rollout_batch_size=1,
+            n_samples_per_prompt=1,
+            fully_async_max_execution_samples=1,
+            fully_async_max_retained_groups=1,
+            fully_async_max_completed_prefetch_groups=1,
+            async_max_concurrent_samples=None,
+        ),
+        data_source=data_source,
+        executor=executor,
+    )
+    acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=27))
+    await _wait_for_executions(executor, 1)
+    execution = cast(_RetryableTerminalExecution, executor.executions[0])
+
+    with pytest.raises(FullyAsyncTerminalPendingError) as first_close_error:
+        await session.close()
+    assert str(first_close_error.value) == "terminal proof is pending"
+    assert execution.observation_attempts == 1
+    assert data_source.requeued == []
+    assert data_source.outstanding == {data_source.issued[0].reservation_id: data_source.issued[0]}
+
+    execution.complete_retry()
+    await session.close()
+
+    assert execution.observation_attempts == 2
+    assert data_source.requeued == [[data_source.issued[0]]]
+    assert executor.close_calls == 1
+    with pytest.raises(RuntimeError):
+        await acquire_task
+
+
+async def test_mismatched_terminal_receipt_poison_retains_source_ownership() -> None:
+    session, data_source, executor = _session()
+    acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=28))
+    await _wait_for_executions(executor, 1)
+    execution = executor.executions[0]
+    execution.succeed(receipt=replace(execution.receipt))
+
+    with pytest.raises(RuntimeError) as acquisition_error:
+        await acquire_task
+    with pytest.raises(RuntimeError) as close_error:
+        await session.close()
+
+    expected_error = "Execution receipt 0 did not return its exact terminal receipt."
+    assert str(acquisition_error.value) == expected_error
+    assert str(close_error.value) == expected_error
+    assert data_source.requeued == []
+    assert data_source.outstanding == {data_source.issued[0].reservation_id: data_source.issued[0]}
+    assert executor.close_calls == 0
+
+
+async def test_shutdown_retries_requeue_then_preserves_generation_failure() -> None:
+    session, data_source, executor = _session(cancel_completes=False)
+    acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=29))
+    await _wait_for_executions(executor, 1)
+    execution = executor.executions[0]
+    generation_error = RuntimeError("generation failed during shutdown")
+    requeue_error = RuntimeError("terminal requeue failed")
+    data_source.requeue_error = requeue_error
+
+    first_close = asyncio.create_task(session.close())
+    while execution.cancellation_requests == 0:
+        await asyncio.sleep(0)
+    execution.fail(generation_error)
+
+    with pytest.raises(RuntimeError) as first_close_error:
+        await first_close
+    assert first_close_error.value is requeue_error
+    assert data_source.requeued == []
+
+    data_source.requeue_error = None
+    with pytest.raises(RuntimeError) as retry_close_error:
+        await session.close()
+    assert retry_close_error.value is generation_error
+    assert data_source.requeued == [[data_source.issued[0]]]
+    assert executor.close_calls == 1
+
+    await session.close()
+    with pytest.raises(RuntimeError):
+        await acquire_task
