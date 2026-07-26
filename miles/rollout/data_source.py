@@ -158,6 +158,8 @@ class RolloutDataSource(DataSource):
         self._acknowledged_reservations: dict[SourceReservationId, _AcknowledgedReservation] = {}
         self._replay_reservations: list[_SourceReservationRecord] = []
         self._last_saved_rollout_id: int | None = None
+        self._reservation_checkpoints_enabled = args.save_interval is not None
+        self._durable_reservations_started = False
         self._permutation_epoch_id: int | None = None
         self._permutation: tuple[int, ...] = ()
 
@@ -220,7 +222,10 @@ class RolloutDataSource(DataSource):
         """
         self._require_durable_reservations()
         with self._reservation_lock:
-            return self._reserve_samples_locked(num_groups)
+            reservations = self._reserve_samples_locked(num_groups)
+            if reservations:
+                self._durable_reservations_started = True
+            return reservations
 
     def _reserve_samples_locked(self, num_groups: int) -> list[SourceReservation]:
         if num_groups < 0:
@@ -268,10 +273,11 @@ class RolloutDataSource(DataSource):
             for owned in outstanding:
                 reservation_id = owned.record.reservation_id
                 del self._outstanding_reservations[reservation_id]
-                self._acknowledged_reservations[reservation_id] = _AcknowledgedReservation(
-                    record=owned.record,
-                    rollout_id=rollout_id,
-                )
+                if self._reservation_checkpoints_enabled:
+                    self._acknowledged_reservations[reservation_id] = _AcknowledgedReservation(
+                        record=owned.record,
+                        rollout_id=rollout_id,
+                    )
 
     def requeue_reservations(self, reservations: Sequence[SourceReservation]) -> None:
         """Return exact reservation attempts to the replay queue."""
@@ -308,6 +314,10 @@ class RolloutDataSource(DataSource):
             raise RuntimeError(
                 f"{self.__class__.__name__} does not support durable source reservations "
                 "when rollout_global_dataset is disabled."
+            )
+        if not self._reservation_checkpoints_enabled and self.args.save_trigger_sentinel is not None:
+            raise RuntimeError(
+                "Durable source reservations require a periodic save interval when a save trigger is configured."
             )
 
     @staticmethod
@@ -398,6 +408,8 @@ class RolloutDataSource(DataSource):
             return
 
         with self._reservation_lock:
+            if self._durable_reservations_started and not self._reservation_checkpoints_enabled:
+                raise RuntimeError("Cannot save durable source reservations without a periodic save interval.")
             self._validate_rollout_id(rollout_id)
             if self._last_saved_rollout_id is not None and rollout_id < self._last_saved_rollout_id:
                 raise ValueError(
