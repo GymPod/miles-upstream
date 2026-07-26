@@ -141,6 +141,20 @@ class _FailingOnceCloseRolloutSession(_RecordingRolloutSession):
         self._events.append("session_close_succeeded")
 
 
+class _FailingCheckpointRolloutSession(_RecordingRolloutSession):
+    def __init__(self, *, events: list[str], checkpoint_error: BaseException) -> None:
+        super().__init__(
+            lease=None,
+            eval_output=RolloutFnEvalOutput(data={}, metrics=None),
+            events=events,
+        )
+        self._checkpoint_error = checkpoint_error
+
+    async def prepare_checkpoint(self, rollout_id: int) -> None:
+        self._events.append(f"prepare_checkpoint:{rollout_id}")
+        raise self._checkpoint_error
+
+
 class _RecordingCloseableDataSource:
     def __init__(self, events: list[str]) -> None:
         self._events = events
@@ -175,6 +189,14 @@ class _RecordingHealthMonitor:
 
     def stop(self) -> None:
         self._events.append(self._event)
+
+
+class _RecordingCheckpointDataSource:
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+
+    def save(self, rollout_id: int) -> None:
+        self._events.append(f"data_source_save:{rollout_id}")
 
 
 @pytest.fixture
@@ -1022,6 +1044,90 @@ class TestEval:
         await manager.eval(rollout_id=10)
 
         assert events == []
+
+
+@pytest.mark.asyncio
+class TestSave:
+    @pytest.mark.parametrize(
+        ("rollout_global_dataset", "expected_events"),
+        [
+            (
+                True,
+                ["prepare_checkpoint:13", "data_source_save:13", "event_snapshot:13"],
+            ),
+            (
+                False,
+                ["prepare_checkpoint:13", "event_snapshot:13"],
+            ),
+        ],
+    )
+    async def test_prepares_session_before_source_and_event_checkpoint(
+        self,
+        rollout_global_dataset,
+        expected_events,
+        ray_local_mode,
+        placement_group_factory,
+        tmp_path,
+        patch_low_level,
+        monkeypatch,
+    ):
+        import miles.ray.rollout.rollout_manager as rmgr
+
+        args = _make_test_args(tmp_path, models=[("actor", True)])
+        args.debug_train_only = True
+        args.rollout_global_dataset = rollout_global_dataset
+        pg = placement_group_factory(2)
+        manager = _make_manager(args, pg)
+        events: list[str] = []
+        manager.rollout_session = _RecordingRolloutSession(
+            lease=None,
+            eval_output=RolloutFnEvalOutput(data={}, metrics=None),
+            events=events,
+        )
+        manager.data_source = _RecordingCheckpointDataSource(events)
+        monkeypatch.setattr(
+            rmgr.event_logger_checkpoint,
+            "snapshot",
+            lambda args, rollout_id: events.append(f"event_snapshot:{rollout_id}"),
+        )
+
+        await manager.save(rollout_id=13)
+
+        assert events == expected_events
+
+    async def test_preparation_failure_prevents_checkpoint_publication(
+        self,
+        ray_local_mode,
+        placement_group_factory,
+        tmp_path,
+        patch_low_level,
+        monkeypatch,
+    ):
+        import miles.ray.rollout.rollout_manager as rmgr
+
+        args = _make_test_args(tmp_path, models=[("actor", True)])
+        args.debug_train_only = True
+        args.rollout_global_dataset = True
+        pg = placement_group_factory(2)
+        manager = _make_manager(args, pg)
+        events: list[str] = []
+        failure = RuntimeError("checkpoint preparation failed")
+        manager.rollout_session = _FailingCheckpointRolloutSession(
+            events=events,
+            checkpoint_error=failure,
+        )
+        manager.data_source = _RecordingCheckpointDataSource(events)
+        monkeypatch.setattr(
+            rmgr.event_logger_checkpoint,
+            "snapshot",
+            lambda args, rollout_id: events.append(f"event_snapshot:{rollout_id}"),
+        )
+
+        with pytest.raises(RuntimeError) as error:
+            await manager.save(rollout_id=17)
+
+        assert error.value is failure
+        assert events == ["prepare_checkpoint:17"]
 
 
 @pytest.mark.asyncio
