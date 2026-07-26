@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -16,17 +15,12 @@ from miles.ray.rollout.router_manager import start_session_server
 from miles.ray.rollout.server_cell import get_cell_indexer_of_id_map
 from miles.ray.rollout.train_data_conversion import convert_samples_to_train_data, split_train_data_by_dp
 from miles.ray.utils import Lock
-from miles.rollout.base_types import (
-    RolloutFnConstructorInput,
-    RolloutFnEvalInput,
-    RolloutFnTrainInput,
-    call_rollout_fn,
-)
-from miles.rollout.inference_rollout.compatibility import call_rollout_function, load_rollout_function
+from miles.rollout.base_types import RolloutFnConstructorInput
+from miles.rollout.inference_rollout.compatibility import load_rollout_session
+from miles.rollout.rollout_session import BatchRollbackReason
 from miles.utils.audit_utils.event_analyzer import analyzer as event_analyzer
 from miles.utils.audit_utils.event_logger import checkpoint as event_logger_checkpoint
 from miles.utils.audit_utils.process_identity import RolloutManagerProcessIdentity
-from miles.utils.environ import enable_experimental_rollout_refactor
 from miles.utils.health_monitor import RolloutHealthMonitor
 from miles.utils.http_utils import init_http_client
 from miles.utils.logging_utils import configure_logger
@@ -59,14 +53,12 @@ class RolloutManager:
         data_source_cls = load_function(self.args.data_source_path)
         self.data_source = data_source_cls(args)
 
-        self.use_experimental_refactor = enable_experimental_rollout_refactor()
-        if self.use_experimental_refactor:
-            input = RolloutFnConstructorInput(args=args, data_source=self.data_source)
-            self.generate_rollout = load_rollout_function(input, self.args.rollout_function_path)
-            self.eval_generate_rollout = load_rollout_function(input, self.args.eval_function_path)
-        else:
-            self.generate_rollout = load_function(self.args.rollout_function_path)
-            self.eval_generate_rollout = load_function(self.args.eval_function_path)
+        constructor_input = RolloutFnConstructorInput(args=args, data_source=self.data_source)
+        self.rollout_session = load_rollout_session(
+            constructor_input,
+            train_path=self.args.rollout_function_path,
+            eval_path=self.args.eval_function_path,
+        )
         self.custom_reward_post_process_func = None
         if (x := self.args.custom_reward_post_process_path) is not None:
             self.custom_reward_post_process_func = load_function(x)
@@ -124,23 +116,54 @@ class RolloutManager:
         dashboard_hooks.register_engines(self.servers)
         if (get_buffer_length := getattr(self.data_source, "get_buffer_length", None)) is not None:
             dashboard_hooks.report_data_buffer(get_buffer_length())
-        with timer("rollout"):
-            data, metadata, metrics = await self._get_rollout_data(rollout_id=rollout_id)
-        save_debug_rollout_data(self.args, data, rollout_id=rollout_id, evaluation=False, metadata=metadata)
-        log_rollout_data(rollout_id, self.args, data, metrics, time.time() - start_time)
-        data = convert_samples_to_train_data(
-            self.args,
-            data,
-            metadata=metadata,
-            custom_convert_samples_to_train_data_func=self.custom_convert_samples_to_train_data_func,
-            custom_reward_post_process_func=self.custom_reward_post_process_func,
-        )
-        sample_indices = data.get("sample_indices")
-        if self.args.delay_split_train_data_by_dp:
-            data_ref = Box(ray.put(data))
-        else:
-            data_ref = split_train_data_by_dp(self.args, data, self.train_parallel_config["dp_size"])
-        return dict(sample_indices=sample_indices, data_ref=data_ref)
+
+        lease = None
+        try:
+            with timer("rollout"):
+                if self.args.load_debug_rollout_data:
+                    data, metadata = load_debug_rollout_data(self.args, rollout_id=rollout_id)
+                    metrics = None
+                else:
+                    lease = await self.rollout_session.acquire_train_batch(rollout_id)
+                    output = lease.output
+                    data = output.samples
+                    metrics = output.metrics
+                    data, metadata = postprocess_rollout_data(
+                        self.args, data, train_parallel_config=self.train_parallel_config
+                    )
+                    if RolloutDataInjectionUtil.should_inject(self.args, rollout_id):
+                        generated_data = data
+                        data, metadata = RolloutDataInjectionUtil.load(self.args, rollout_id=rollout_id)
+                        RolloutDataInjectionUtil.assert_matches_generated(
+                            self.args, generated=generated_data, injected=data, rollout_id=rollout_id
+                        )
+                        metrics = None
+            save_debug_rollout_data(self.args, data, rollout_id=rollout_id, evaluation=False, metadata=metadata)
+            log_rollout_data(rollout_id, self.args, data, metrics, time.time() - start_time)
+            data = convert_samples_to_train_data(
+                self.args,
+                data,
+                metadata=metadata,
+                custom_convert_samples_to_train_data_func=self.custom_convert_samples_to_train_data_func,
+                custom_reward_post_process_func=self.custom_reward_post_process_func,
+            )
+            sample_indices = data.get("sample_indices")
+            if self.args.delay_split_train_data_by_dp:
+                data_ref = Box(ray.put(data))
+            else:
+                data_ref = split_train_data_by_dp(self.args, data, self.train_parallel_config["dp_size"])
+            result = dict(sample_indices=sample_indices, data_ref=data_ref)
+        except BaseException as handoff_error:
+            if lease is not None:
+                try:
+                    lease.rollback(BatchRollbackReason.HANDOFF_FAILED)
+                except BaseException as rollback_error:
+                    raise handoff_error from rollback_error
+            raise
+
+        if lease is not None:
+            lease.commit()
+        return result
 
     async def eval(self, rollout_id):
         if self.args.debug_train_only:
@@ -149,52 +172,12 @@ class RolloutManager:
         self._health_monitoring_resume()
 
         with timer("eval_rollout"):
-            if self.use_experimental_refactor:
-                result = await asyncio.to_thread(
-                    call_rollout_function, self.eval_generate_rollout, RolloutFnEvalInput(rollout_id=rollout_id)
-                )
-            else:
-                result = await asyncio.to_thread(
-                    call_rollout_fn,
-                    self.eval_generate_rollout,
-                    self.args,
-                    rollout_id,
-                    self.data_source,
-                    evaluation=True,
-                )
+            result = await self.rollout_session.evaluate(rollout_id)
         data = result.data
         save_debug_rollout_data(self.args, data, rollout_id=rollout_id, evaluation=True)
         metrics = log_eval_rollout_data(rollout_id, self.args, data, result.metrics)
         if self._metric_checker is not None:
             self._metric_checker.on_eval(metrics)
-
-    async def _get_rollout_data(self, rollout_id):
-        if self.args.load_debug_rollout_data:
-            data, metadata = load_debug_rollout_data(self.args, rollout_id=rollout_id)
-            metrics = None
-        else:
-            if self.use_experimental_refactor:
-                data = await asyncio.to_thread(
-                    call_rollout_function, self.generate_rollout, RolloutFnTrainInput(rollout_id=rollout_id)
-                )
-            else:
-                data = await asyncio.to_thread(
-                    call_rollout_fn, self.generate_rollout, self.args, rollout_id, self.data_source, evaluation=False
-                )
-            metrics = data.metrics
-            data = data.samples
-            data, metadata = postprocess_rollout_data(
-                self.args, data, train_parallel_config=self.train_parallel_config
-            )
-            if RolloutDataInjectionUtil.should_inject(self.args, rollout_id):
-                generated_data = data
-                data, metadata = RolloutDataInjectionUtil.load(self.args, rollout_id=rollout_id)
-                RolloutDataInjectionUtil.assert_matches_generated(
-                    self.args, generated=generated_data, injected=data, rollout_id=rollout_id
-                )
-                metrics = None
-
-        return data, metadata, metrics
 
     # -------------------------- checkpointing -----------------------------
 

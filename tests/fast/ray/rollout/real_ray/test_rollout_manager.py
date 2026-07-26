@@ -20,7 +20,84 @@ import ray
 from tests.fast.ray.rollout.conftest import make_args, make_samples_grouped
 
 from miles.ray.rollout.rollout_manager import RolloutManager
-from miles.rollout.base_types import RolloutFnEvalInput, RolloutFnEvalOutput, RolloutFnTrainInput, RolloutFnTrainOutput
+from miles.rollout.base_types import RolloutFnConstructorInput, RolloutFnEvalOutput, RolloutFnTrainOutput
+from miles.rollout.rollout_session import (
+    BatchRollbackReason,
+    BatchRollbackUnsupportedError,
+    RolloutSession,
+    TrainBatchLease,
+)
+
+
+class _RollbackFailure(BaseException):
+    pass
+
+
+class _RecordingTrainBatchLease(TrainBatchLease):
+    def __init__(
+        self,
+        *,
+        rollout_id: int,
+        output: RolloutFnTrainOutput,
+        events: list[str],
+        commit_error: BaseException | None,
+        rollback_error: BaseException | None,
+    ) -> None:
+        super().__init__(rollout_id=rollout_id, output=output)
+        self._events = events
+        self._commit_error = commit_error
+        self._rollback_error = rollback_error
+
+    def _commit(self) -> None:
+        self._events.append(f"commit:{self.rollout_id}")
+        if self._commit_error is not None:
+            raise self._commit_error
+
+    def _rollback(self, reason: BatchRollbackReason) -> None:
+        self._events.append(f"rollback:{reason.name}")
+        if self._rollback_error is not None:
+            raise self._rollback_error
+
+
+class _CancelAfterCommitLease(_RecordingTrainBatchLease):
+    def _commit(self) -> None:
+        super()._commit()
+        task = asyncio.current_task()
+        assert task is not None
+        asyncio.get_running_loop().call_soon(task.cancel)
+
+
+class _RecordingRolloutSession(RolloutSession):
+    def __init__(
+        self,
+        *,
+        lease: TrainBatchLease | None,
+        eval_output: RolloutFnEvalOutput,
+        events: list[str],
+    ) -> None:
+        self._lease = lease
+        self._eval_output = eval_output
+        self._events = events
+        self.train_loop: asyncio.AbstractEventLoop | None = None
+        self.eval_loop: asyncio.AbstractEventLoop | None = None
+
+    async def acquire_train_batch(self, rollout_id: int) -> TrainBatchLease:
+        self.train_loop = asyncio.get_running_loop()
+        self._events.append(f"acquire:{rollout_id}")
+        if self._lease is None:
+            raise AssertionError("Test session has no train batch lease.")
+        return self._lease
+
+    async def evaluate(self, rollout_id: int) -> RolloutFnEvalOutput:
+        self.eval_loop = asyncio.get_running_loop()
+        self._events.append(f"evaluate:{rollout_id}")
+        return self._eval_output
+
+    async def prepare_checkpoint(self, rollout_id: int) -> None:
+        self._events.append(f"prepare_checkpoint:{rollout_id}")
+
+    async def close(self) -> None:
+        self._events.append("session_close")
 
 
 @pytest.fixture
@@ -29,7 +106,7 @@ def patch_low_level(monkeypatch):
     - ``SGLangEngine`` → ``MockSGLangEngine`` so created actors are mocks.
     - addr allocator → deterministic stub.
     - ``init_tracking`` / ``init_http_client`` / ``start_session_server`` /
-      ``load_function`` / ``load_rollout_function`` → no-ops (the production
+      ``load_function`` / ``load_rollout_session`` → no-ops (the production
       defaults touch wandb / network / not-importable default function paths)."""
     import miles.ray.rollout.rollout_manager as rmgr
     import miles.ray.rollout.rollout_server as rsrv
@@ -67,7 +144,15 @@ def patch_low_level(monkeypatch):
     monkeypatch.setattr(rmgr, "init_http_client", lambda args: None)
     monkeypatch.setattr(rmgr, "start_session_server", lambda args: None)
     monkeypatch.setattr(rmgr, "load_function", lambda path: lambda *a, **kw: None)
-    monkeypatch.setattr(rmgr, "load_rollout_function", lambda input, path: lambda *a, **kw: None)
+    monkeypatch.setattr(
+        rmgr,
+        "load_rollout_session",
+        lambda *a, **kw: _RecordingRolloutSession(
+            lease=None,
+            eval_output=RolloutFnEvalOutput(data={}, metrics=None),
+            events=[],
+        ),
+    )
     # generate()/eval() drive these — production hits wandb / tensorboard.
     monkeypatch.setattr(rmgr, "log_rollout_data", lambda *a, **kw: None)
     monkeypatch.setattr(rmgr, "log_eval_rollout_data", lambda *a, **kw: None)
@@ -76,6 +161,13 @@ def patch_low_level(monkeypatch):
 
 def _make_manager(args, pg):
     return RolloutManager.__ray_actor_class__(args, pg)
+
+
+def _make_train_output() -> RolloutFnTrainOutput:
+    return RolloutFnTrainOutput(
+        samples=[make_samples_grouped(n_groups=2, group_size=4)],
+        metrics={"my_metric": 1.23},
+    )
 
 
 def _write_sglang_config(tmp_path, *, models: list[tuple[str, bool]]) -> str:
@@ -138,6 +230,49 @@ async def _assert_engine_dies(actor_handle, *, deadline_s: float = 15.0, poll_in
 
 @pytest.mark.asyncio
 class TestRolloutManagerInit:
+    async def test_init_constructs_one_rollout_session_with_train_and_eval_paths(
+        self,
+        ray_local_mode,
+        placement_group_factory,
+        tmp_path,
+        patch_low_level,
+        monkeypatch,
+    ):
+        import miles.ray.rollout.rollout_manager as rmgr
+
+        args = _make_test_args(tmp_path, models=[("actor", True)])
+        args.debug_train_only = True
+        pg = placement_group_factory(2)
+        events: list[str] = []
+        session = _RecordingRolloutSession(
+            lease=None,
+            eval_output=RolloutFnEvalOutput(data={}, metrics=None),
+            events=events,
+        )
+        captured: list[tuple[RolloutFnConstructorInput, str, str]] = []
+
+        def fake_load_rollout_session(
+            constructor_input: RolloutFnConstructorInput,
+            *,
+            train_path: str,
+            eval_path: str,
+        ) -> RolloutSession:
+            captured.append((constructor_input, train_path, eval_path))
+            return session
+
+        monkeypatch.setattr(rmgr, "load_rollout_session", fake_load_rollout_session)
+
+        manager = _make_manager(args, pg)
+
+        assert manager.rollout_session is session
+        assert captured == [
+            (
+                RolloutFnConstructorInput(args=args, data_source=manager.data_source),
+                args.rollout_function_path,
+                args.eval_function_path,
+            )
+        ]
+
     async def test_init_creates_live_mock_engines_via_real_start_rollout_servers(
         self,
         ray_local_mode,
@@ -479,48 +614,60 @@ class TestRecoverUpdatableEngines:
 @pytest.mark.asyncio
 class TestGenerate:
     """``generate(rollout_id)`` is the trainer's per-iteration rollout entry
-    point. It must (1) advance ``self.rollout_id``, (2) call the rollout
-    function with ``RolloutFnTrainInput(rollout_id=N)``, (3) postprocess +
-    convert + DP-split the returned samples. Nothing else covers this path."""
+    point. It must retain the session's lease through postprocessing,
+    conversion, and Ray publication before settling the handoff."""
 
-    async def test_invokes_rollout_fn_with_correct_input_and_returns_dp_split(
+    async def test_commits_session_lease_after_real_dp_publication(
         self,
         ray_local_mode,
         placement_group_factory,
         tmp_path,
         patch_low_level,
+        monkeypatch,
     ):
         args = _make_test_args(tmp_path, models=[("actor", True)])
         # global_batch_size = number of samples we'll produce (postprocess
         # trims to a multiple, so equality avoids losing samples).
         args.global_batch_size = 8
+        args.debug_train_only = True
         pg = placement_group_factory(2)
 
         manager = _make_manager(args, pg)
         manager.train_parallel_config = {"dp_size": 2}
+        events: list[str] = []
+        lease = _RecordingTrainBatchLease(
+            rollout_id=42,
+            output=_make_train_output(),
+            events=events,
+            commit_error=None,
+            rollback_error=None,
+        )
+        session = _RecordingRolloutSession(
+            lease=lease,
+            eval_output=RolloutFnEvalOutput(data={}, metrics=None),
+            events=events,
+        )
+        manager.rollout_session = session
+        original_ray_put = ray.put
 
-        captured: list = []
+        def recording_ray_put(value):
+            object_ref = original_ray_put(value)
+            events.append("ray_put")
+            return object_ref
 
-        def fake_rollout_fn(input):
-            captured.append(input)
-            return RolloutFnTrainOutput(
-                samples=[make_samples_grouped(n_groups=2, group_size=4)],
-                metrics={"my_metric": 1.23},
-            )
-
-        manager.generate_rollout = fake_rollout_fn
+        monkeypatch.setattr(ray, "put", recording_ray_put)
 
         result = await manager.generate(rollout_id=42)
 
         assert manager.rollout_id == 42
-        assert len(captured) == 1
-        assert isinstance(captured[0], RolloutFnTrainInput)
-        assert captured[0].rollout_id == 42
+        assert session.train_loop is asyncio.get_running_loop()
+        assert events == ["acquire:42", "ray_put", "ray_put", "commit:42"]
         # generate returns {"sample_indices": ..., "data_ref": ...};
         # split_train_data_by_dp returns Box(ObjectRef) per dp rank
         assert set(result) == {"sample_indices", "data_ref"}
         data_refs = result["data_ref"]
         assert len(data_refs) == 2
+        assert all(isinstance(box.inner, ray.ObjectRef) for box in data_refs)
         partitions = ray.get([box.inner for box in data_refs])
         for partition in partitions:
             assert "tokens" in partition
@@ -529,10 +676,147 @@ class TestGenerate:
             # 8 samples / 2 dp = 4 per rank
             assert len(partition["tokens"]) == 4
 
+    @pytest.mark.parametrize(
+        "rollback_failure",
+        [
+            pytest.param(
+                BatchRollbackUnsupportedError(
+                    rollout_id=17,
+                    reason=BatchRollbackReason.HANDOFF_FAILED,
+                ),
+                id="unsupported",
+            ),
+            pytest.param(_RollbackFailure("rollback failed"), id="base-exception"),
+        ],
+    )
+    async def test_rolls_back_output_access_and_preserves_error_if_rollback_fails(
+        self,
+        ray_local_mode,
+        placement_group_factory,
+        tmp_path,
+        patch_low_level,
+        rollback_failure: BaseException,
+    ):
+        class HandoffFailure(BaseException):
+            pass
 
-@pytest.mark.asyncio
-class TestEval:
-    async def test_invokes_eval_fn_with_eval_input(
+        failure = HandoffFailure("output access failed")
+
+        class OutputFailureLease(_RecordingTrainBatchLease):
+            @property
+            def output(self) -> RolloutFnTrainOutput:
+                raise failure
+
+        args = _make_test_args(tmp_path, models=[("actor", True)])
+        args.global_batch_size = 8
+        args.debug_train_only = True
+        pg = placement_group_factory(2)
+        manager = _make_manager(args, pg)
+        manager.train_parallel_config = {"dp_size": 2}
+        events: list[str] = []
+        lease = OutputFailureLease(
+            rollout_id=17,
+            output=_make_train_output(),
+            events=events,
+            commit_error=None,
+            rollback_error=rollback_failure,
+        )
+        manager.rollout_session = _RecordingRolloutSession(
+            lease=lease,
+            eval_output=RolloutFnEvalOutput(data={}, metrics=None),
+            events=events,
+        )
+
+        with pytest.raises(HandoffFailure) as exc_info:
+            await manager.generate(rollout_id=17)
+
+        assert exc_info.value is failure
+        assert exc_info.value.__cause__ is rollback_failure
+        assert events == ["acquire:17", "rollback:HANDOFF_FAILED"]
+
+    async def test_rolls_back_when_publication_is_cancelled(
+        self,
+        ray_local_mode,
+        placement_group_factory,
+        tmp_path,
+        patch_low_level,
+        monkeypatch,
+    ):
+        args = _make_test_args(tmp_path, models=[("actor", True)])
+        args.global_batch_size = 8
+        args.debug_train_only = True
+        pg = placement_group_factory(2)
+        manager = _make_manager(args, pg)
+        manager.train_parallel_config = {"dp_size": 2}
+        events: list[str] = []
+        lease = _RecordingTrainBatchLease(
+            rollout_id=23,
+            output=_make_train_output(),
+            events=events,
+            commit_error=None,
+            rollback_error=None,
+        )
+        manager.rollout_session = _RecordingRolloutSession(
+            lease=lease,
+            eval_output=RolloutFnEvalOutput(data={}, metrics=None),
+            events=events,
+        )
+        original_ray_put = ray.put
+        put_count = 0
+
+        def cancel_second_ray_put(value):
+            nonlocal put_count
+            put_count += 1
+            events.append(f"ray_put:{put_count}")
+            if put_count == 2:
+                raise asyncio.CancelledError
+            return original_ray_put(value)
+
+        monkeypatch.setattr(ray, "put", cancel_second_ray_put)
+
+        with pytest.raises(asyncio.CancelledError):
+            await manager.generate(rollout_id=23)
+
+        assert events == ["acquire:23", "ray_put:1", "ray_put:2", "rollback:HANDOFF_FAILED"]
+
+    async def test_does_not_roll_back_failed_commit(
+        self,
+        ray_local_mode,
+        placement_group_factory,
+        tmp_path,
+        patch_low_level,
+    ):
+        class CommitFailure(BaseException):
+            pass
+
+        args = _make_test_args(tmp_path, models=[("actor", True)])
+        args.global_batch_size = 8
+        args.debug_train_only = True
+        pg = placement_group_factory(2)
+        manager = _make_manager(args, pg)
+        manager.train_parallel_config = {"dp_size": 2}
+        events: list[str] = []
+        failure = CommitFailure("commit failed")
+        lease = _RecordingTrainBatchLease(
+            rollout_id=29,
+            output=_make_train_output(),
+            events=events,
+            commit_error=failure,
+            rollback_error=None,
+        )
+        manager.rollout_session = _RecordingRolloutSession(
+            lease=lease,
+            eval_output=RolloutFnEvalOutput(data={}, metrics=None),
+            events=events,
+        )
+
+        with pytest.raises(CommitFailure) as exc_info:
+            await manager.generate(rollout_id=29)
+
+        assert exc_info.value is failure
+        assert events == ["acquire:29", "commit:29"]
+
+    async def test_has_no_suspension_after_commit(
         self,
         ray_local_mode,
         placement_group_factory,
@@ -540,26 +824,101 @@ class TestEval:
         patch_low_level,
     ):
         args = _make_test_args(tmp_path, models=[("actor", True)])
+        args.global_batch_size = 8
+        args.delay_split_train_data_by_dp = True
+        args.debug_train_only = True
+        pg = placement_group_factory(2)
+        manager = _make_manager(args, pg)
+        manager.train_parallel_config = {"dp_size": 2}
+        events: list[str] = []
+        lease = _CancelAfterCommitLease(
+            rollout_id=31,
+            output=_make_train_output(),
+            events=events,
+            commit_error=None,
+            rollback_error=None,
+        )
+        manager.rollout_session = _RecordingRolloutSession(
+            lease=lease,
+            eval_output=RolloutFnEvalOutput(data={}, metrics=None),
+            events=events,
+        )
+
+        generate_task = asyncio.create_task(manager.generate(rollout_id=31))
+        result = await generate_task
+
+        assert generate_task.cancelled() is False
+        assert events == ["acquire:31", "commit:31"]
+        assert set(result) == {"sample_indices", "data_ref"}
+        assert isinstance(result["data_ref"].inner, ray.ObjectRef)
+
+    async def test_debug_data_bypasses_session_acquisition(
+        self,
+        ray_local_mode,
+        placement_group_factory,
+        tmp_path,
+        patch_low_level,
+        monkeypatch,
+    ):
+        import miles.ray.rollout.rollout_manager as rmgr
+
+        args = _make_test_args(tmp_path, models=[("actor", True)])
+        args.global_batch_size = 8
+        args.load_debug_rollout_data = "unused_{rollout_id}.pt"
+        args.debug_train_only = True
+        pg = placement_group_factory(2)
+        manager = _make_manager(args, pg)
+        manager.train_parallel_config = {"dp_size": 2}
+        events: list[str] = []
+        manager.rollout_session = _RecordingRolloutSession(
+            lease=None,
+            eval_output=RolloutFnEvalOutput(data={}, metrics=None),
+            events=events,
+        )
+        debug_samples = make_samples_grouped(n_groups=2, group_size=4)
+        monkeypatch.setattr(
+            rmgr,
+            "load_debug_rollout_data",
+            lambda args, rollout_id: (debug_samples, {}),
+        )
+
+        result = await manager.generate(rollout_id=37)
+
+        assert events == []
+        assert set(result) == {"sample_indices", "data_ref"}
+        assert all(isinstance(box.inner, ray.ObjectRef) for box in result["data_ref"])
+
+
+@pytest.mark.asyncio
+class TestEval:
+    async def test_delegates_to_session_on_manager_event_loop(
+        self,
+        ray_local_mode,
+        placement_group_factory,
+        tmp_path,
+        patch_low_level,
+    ):
+        args = _make_test_args(tmp_path, models=[("actor", True)])
+        args.debug_train_only = True
         pg = placement_group_factory(2)
 
         manager = _make_manager(args, pg)
-
-        captured: list = []
-
-        def fake_eval_fn(input):
-            captured.append(input)
-            return RolloutFnEvalOutput(
+        manager.args.debug_train_only = False
+        events: list[str] = []
+        session = _RecordingRolloutSession(
+            lease=None,
+            eval_output=RolloutFnEvalOutput(
                 data={"my_dataset": {"rewards": [0.5, 1.0]}},
                 metrics={},
-            )
-
-        manager.eval_generate_rollout = fake_eval_fn
+            ),
+            events=events,
+        )
+        manager.rollout_session = session
 
         await manager.eval(rollout_id=10)
 
-        assert len(captured) == 1
-        assert isinstance(captured[0], RolloutFnEvalInput)
-        assert captured[0].rollout_id == 10
+        assert events == ["evaluate:10"]
+        assert session.eval_loop is asyncio.get_running_loop()
 
     async def test_skipped_in_debug_train_only_mode(
         self,
@@ -576,10 +935,13 @@ class TestEval:
         pg = placement_group_factory(2)
 
         manager = _make_manager(args, pg)
-
-        called: list = []
-        manager.eval_generate_rollout = lambda inp: called.append(inp)
+        events: list[str] = []
+        manager.rollout_session = _RecordingRolloutSession(
+            lease=None,
+            eval_output=RolloutFnEvalOutput(data={}, metrics=None),
+            events=events,
+        )
 
         await manager.eval(rollout_id=10)
 
-        assert called == []
+        assert events == []
