@@ -175,11 +175,32 @@ def test_custom_megatron_post_save_hook_path_requires_save():
         miles_validate_args(args)
 
 
+def test_rollout_health_check_timeout_help_describes_fully_async_cancellation() -> None:
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+
+    action = next(action for action in parser._actions if "--rollout-health-check-timeout" in action.option_strings)
+
+    assert action.help == (
+        "Timeout in seconds to wait for a rollout engine /health_generate response before killing it. "
+        "Managed fully async cancellation applies this timeout separately to abort handling and "
+        "terminal generation settlement."
+    )
+
+
 class TestFullyAsyncLimitValidation:
     def _parse(self, extra: list[str]) -> argparse.Namespace:
         parser = argparse.ArgumentParser()
         get_miles_extra_args_provider()(parser)
         return parser.parse_args(REQUIRED_ARGS + extra)
+
+    def test_global_validation_normalizes_offload_alias(self) -> None:
+        args = self._parse(["--num-rollout", "1", "--offload"])
+
+        miles_validate_args(args)
+
+        assert not hasattr(args, "offload")
+        assert (args.offload_train, args.offload_rollout) == (True, True)
 
     def test_raw_defaults_do_not_change_ordinary_arguments(self) -> None:
         args = self._parse(["--num-rollout", "1"])

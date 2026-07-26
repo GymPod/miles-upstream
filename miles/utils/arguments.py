@@ -742,7 +742,11 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "--rollout-health-check-timeout",
                 type=float,
                 default=30.0,
-                help="Timeout in seconds to wait for a rollout engine /health_generate response before killing it.",
+                help=(
+                    "Timeout in seconds to wait for a rollout engine /health_generate response before killing it. "
+                    "Managed fully async cancellation applies this timeout separately to abort handling and "
+                    "terminal generation settlement."
+                ),
             )
             parser.add_argument(
                 "--rollout-health-check-first-wait",
