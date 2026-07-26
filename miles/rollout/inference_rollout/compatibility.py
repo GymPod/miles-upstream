@@ -437,11 +437,33 @@ def load_rollout_session(
         eval_path: Import path for the evaluation rollout function.
 
     Returns:
-        A session that constructs independent train and eval instances together
-        on its first asynchronous operation.
+        An explicitly configured session, or a compatibility session that
+        constructs independent train and eval instances together on its first
+        asynchronous operation.
     """
     train_definition = load_function(train_path)
     eval_definition = load_function(eval_path)
+    train_is_session = inspect.isclass(train_definition) and issubclass(train_definition, RolloutSession)
+    eval_is_session = inspect.isclass(eval_definition) and issubclass(eval_definition, RolloutSession)
+    if train_is_session or eval_is_session:
+        if not (train_is_session and eval_is_session and train_definition is eval_definition):
+            raise ValueError(
+                "Explicit RolloutSession definitions must use the same class for train and eval; got "
+                f"{train_path!r} and {eval_path!r}."
+            )
+        try:
+            inspect.signature(train_definition).bind(input)
+        except TypeError as error:
+            raise TypeError(
+                f"Rollout session {train_path!r} must accept one RolloutFnConstructorInput positional argument."
+            ) from error
+        constructor = cast(Callable[[RolloutFnConstructorInput], RolloutSession], train_definition)
+        session = constructor(input)
+        if not isinstance(session, RolloutSession):
+            raise TypeError(
+                f"Rollout session {train_path!r} produced {type(session).__name__}, expected RolloutSession."
+            )
+        return session
     return _CompatibilityRolloutSession(
         input=input,
         train_definition=train_definition,

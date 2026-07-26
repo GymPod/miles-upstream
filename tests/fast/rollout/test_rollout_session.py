@@ -17,7 +17,12 @@ from miles.rollout.base_types import (
 )
 from miles.rollout.data_source import DataSource
 from miles.rollout.inference_rollout.compatibility import _invoke_rollout_function, load_rollout_session
-from miles.rollout.rollout_session import BatchRollbackReason, BatchRollbackUnsupportedError, TrainBatchLease
+from miles.rollout.rollout_session import (
+    BatchRollbackReason,
+    BatchRollbackUnsupportedError,
+    RolloutSession,
+    TrainBatchLease,
+)
 from miles.utils.misc import function_registry
 
 
@@ -114,6 +119,154 @@ async def test_rollout_session_evaluates_with_its_separate_instance() -> None:
     assert output == RolloutFnEvalOutput(
         data={"benchmark": {"instance_id": 1}},
         metrics={"evaluation": True},
+    )
+
+
+async def test_loader_constructs_an_explicit_rollout_session_definition() -> None:
+    constructor_inputs: list[RolloutFnConstructorInput] = []
+
+    class DirectRolloutSession(RolloutSession):
+        def __init__(self, constructor_input: RolloutFnConstructorInput) -> None:
+            constructor_inputs.append(constructor_input)
+
+        async def acquire_train_batch(self, rollout_id: int) -> TrainBatchLease:
+            raise AssertionError(f"Unexpected train acquisition: {rollout_id}")
+
+        async def evaluate(self, rollout_id: int) -> RolloutFnEvalOutput:
+            return RolloutFnEvalOutput(data={"direct": {"rollout_id": rollout_id}})
+
+        async def prepare_checkpoint(self, rollout_id: int) -> None:
+            raise AssertionError(f"Unexpected checkpoint: {rollout_id}")
+
+        async def close(self) -> None:
+            return None
+
+    constructor_input = RolloutFnConstructorInput(
+        args=Namespace(),
+        data_source=MagicMock(spec=DataSource),
+    )
+    with function_registry.temporary("test:direct_rollout_session", DirectRolloutSession):
+        session = load_rollout_session(
+            constructor_input,
+            train_path="test:direct_rollout_session",
+            eval_path="test:direct_rollout_session",
+        )
+
+    assert isinstance(session, DirectRolloutSession)
+    assert constructor_inputs == [constructor_input]
+    assert await session.evaluate(rollout_id=17) == RolloutFnEvalOutput(data={"direct": {"rollout_id": 17}})
+
+
+async def test_loader_accepts_two_paths_for_the_same_explicit_session_class() -> None:
+    class DirectRolloutSession(RolloutSession):
+        def __init__(self, constructor_input: RolloutFnConstructorInput) -> None:
+            return
+
+        async def acquire_train_batch(self, rollout_id: int) -> TrainBatchLease:
+            raise AssertionError(f"Unexpected train acquisition: {rollout_id}")
+
+        async def evaluate(self, rollout_id: int) -> RolloutFnEvalOutput:
+            return RolloutFnEvalOutput(data={})
+
+        async def prepare_checkpoint(self, rollout_id: int) -> None:
+            raise AssertionError(f"Unexpected checkpoint: {rollout_id}")
+
+        async def close(self) -> None:
+            return None
+
+    constructor_input = RolloutFnConstructorInput(
+        args=Namespace(),
+        data_source=MagicMock(spec=DataSource),
+    )
+    with (
+        function_registry.temporary("test:direct_rollout_session_train", DirectRolloutSession),
+        function_registry.temporary("test:direct_rollout_session_eval", DirectRolloutSession),
+    ):
+        session = load_rollout_session(
+            constructor_input,
+            train_path="test:direct_rollout_session_train",
+            eval_path="test:direct_rollout_session_eval",
+        )
+
+    assert isinstance(session, DirectRolloutSession)
+
+
+async def test_loader_rejects_an_invalid_explicit_session_constructor() -> None:
+    class InvalidRolloutSession(RolloutSession):
+        def __init__(self) -> None:
+            return
+
+        async def acquire_train_batch(self, rollout_id: int) -> TrainBatchLease:
+            raise AssertionError(f"Unexpected train acquisition: {rollout_id}")
+
+        async def evaluate(self, rollout_id: int) -> RolloutFnEvalOutput:
+            raise AssertionError(f"Unexpected evaluation: {rollout_id}")
+
+        async def prepare_checkpoint(self, rollout_id: int) -> None:
+            raise AssertionError(f"Unexpected checkpoint: {rollout_id}")
+
+        async def close(self) -> None:
+            return None
+
+    constructor_input = RolloutFnConstructorInput(
+        args=Namespace(),
+        data_source=MagicMock(spec=DataSource),
+    )
+    with (
+        function_registry.temporary("test:invalid_rollout_session", InvalidRolloutSession),
+        pytest.raises(TypeError) as error,
+    ):
+        load_rollout_session(
+            constructor_input,
+            train_path="test:invalid_rollout_session",
+            eval_path="test:invalid_rollout_session",
+        )
+
+    assert str(error.value) == (
+        "Rollout session 'test:invalid_rollout_session' must accept one "
+        "RolloutFnConstructorInput positional argument."
+    )
+    assert isinstance(error.value.__cause__, TypeError)
+
+
+async def test_loader_rejects_mixed_session_and_function_definitions() -> None:
+    class DirectRolloutSession(RolloutSession):
+        def __init__(self, constructor_input: RolloutFnConstructorInput) -> None:
+            return
+
+        async def acquire_train_batch(self, rollout_id: int) -> TrainBatchLease:
+            raise AssertionError(f"Unexpected train acquisition: {rollout_id}")
+
+        async def evaluate(self, rollout_id: int) -> RolloutFnEvalOutput:
+            return RolloutFnEvalOutput(data={})
+
+        async def prepare_checkpoint(self, rollout_id: int) -> None:
+            raise AssertionError(f"Unexpected checkpoint: {rollout_id}")
+
+        async def close(self) -> None:
+            return None
+
+    async def eval_rollout_fn(rollout_input: RolloutFnInput) -> RolloutFnOutput:
+        return RolloutFnEvalOutput(data={})
+
+    constructor_input = RolloutFnConstructorInput(
+        args=Namespace(),
+        data_source=MagicMock(spec=DataSource),
+    )
+    with (
+        function_registry.temporary("test:mixed_direct_session", DirectRolloutSession),
+        function_registry.temporary("test:mixed_eval_function", eval_rollout_fn),
+        pytest.raises(ValueError) as error,
+    ):
+        load_rollout_session(
+            constructor_input,
+            train_path="test:mixed_direct_session",
+            eval_path="test:mixed_eval_function",
+        )
+
+    assert str(error.value) == (
+        "Explicit RolloutSession definitions must use the same class for train and eval; got "
+        "'test:mixed_direct_session' and 'test:mixed_eval_function'."
     )
 
 
@@ -486,9 +639,7 @@ async def test_rollout_session_rejects_checkpoint_with_an_open_batch_lease() -> 
         assert str(exc_info.value) == "Cannot prepare checkpoint 17 with open train batch leases: [17]."
 
         lease.commit()
-        result = await session.prepare_checkpoint(rollout_id=17)
-
-    assert result is None
+        await session.prepare_checkpoint(rollout_id=17)
 
 
 async def test_duplicate_rollout_id_is_rejected_before_generation() -> None:
