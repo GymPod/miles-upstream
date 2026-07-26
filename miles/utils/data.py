@@ -1,3 +1,4 @@
+import hashlib
 import itertools
 import json
 import logging
@@ -9,6 +10,7 @@ import numpy as np
 import ray
 
 from miles.ray.rollout.train_data_conversion import split_train_data_by_dp_raw
+
 from .audit_utils.witness.allocator import WitnessInfo
 
 try:
@@ -17,8 +19,8 @@ except ImportError:
     pq = None
 
 from miles.utils import chat_template_utils
+from miles.utils.source_fingerprint import canonical_source_digest
 from miles.utils.types import MultimodalTypes, Sample
-
 
 __all__ = ["Dataset"]
 
@@ -201,7 +203,12 @@ class Dataset:
         apply_chat_template_kwargs=None,
     ):
         origin_samples = []
+        source_fingerprint = hashlib.sha256()
         for data in read_file(path):
+            # Capture descriptors before templates or processors erase them. Decoded
+            # media are intentionally excluded, so durable callers must use immutable
+            # descriptors or include content checksums in the source row.
+            source_fingerprint.update(canonical_source_digest(data))
             # Both chat templates and multimodal inputs require conversation format (list of message dicts)
             as_conversation = apply_chat_template or (multimodal_keys is not None)
             prompt = _build_messages(data, prompt_key, as_conversation, multimodal_keys)
@@ -252,6 +259,27 @@ class Dataset:
             self.origin_samples = filter_long_prompt(origin_samples, tokenizer, processor, max_length)
         else:
             self.origin_samples = origin_samples
+
+        effective_fingerprint = hashlib.sha256()
+        for sample in self.origin_samples:
+            effective_fingerprint.update(
+                canonical_source_digest(
+                    (
+                        sample.prompt,
+                        sample.label,
+                        sample.metadata,
+                    )
+                )
+            )
+        self.fingerprint = (
+            "miles-dataset-v1:"
+            + canonical_source_digest(
+                (
+                    source_fingerprint.digest(),
+                    effective_fingerprint.digest(),
+                )
+            ).hex()
+        )
 
         self.epoch_id = -1
         self.seed = seed
