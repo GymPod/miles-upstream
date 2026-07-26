@@ -1,4 +1,5 @@
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass
 
 from miles.rollout.data_source import DataSource, SourceReservation
@@ -6,8 +7,11 @@ from miles.rollout.fully_async.execution import (
     FullyAsyncExecution,
     FullyAsyncExecutionFailure,
     FullyAsyncExecutionOutcome,
+    FullyAsyncExecutionRetry,
     FullyAsyncExecutionSuccess,
     FullyAsyncExecutor,
+    FullyAsyncRetryReason,
+    FullyAsyncTerminalPendingError,
 )
 from miles.rollout.fully_async.ownership import (
     ReservationExecutorReceipt,
@@ -23,6 +27,7 @@ from miles.utils.types import Sample
 @dataclass
 class _ExecutionRecord:
     reservation: SourceReservation
+    source_sample_identities: tuple[tuple[int | None, int | None], ...]
     receipt: ReservationExecutorReceipt
     execution: FullyAsyncExecution | None
     terminal_task: asyncio.Task[FullyAsyncExecutionOutcome] | None
@@ -64,6 +69,8 @@ class _FullyAsyncScheduler:
         self._execution_slots = asyncio.BoundedSemaphore(max_execution_samples // samples_per_group)
         self._retained_slots = asyncio.BoundedSemaphore(max_retained_groups)
         self._completed_slots = asyncio.BoundedSemaphore(max_completed_groups)
+        self._completed_capacity_available = asyncio.Event()
+        self._completed_capacity_available.set()
         self._active: dict[ReservationReceiptId, _ExecutionRecord] = {}
         self._ready: list[_ReadyGroup] = []
         self._ready_changed = asyncio.Event()
@@ -74,6 +81,7 @@ class _FullyAsyncScheduler:
         self._accepting = True
         self._closing = False
         self._fatal_error: BaseException | None = None
+        self._shutdown_failure: BaseException | None = None
         self._cleanup_error: BaseException | None = None
         self._pending_acquisition_capacity = False
         self._pending_reserved_rollbacks: list[SourceReservation] = []
@@ -112,6 +120,10 @@ class _FullyAsyncScheduler:
         if self._fatal_error is not None:
             raise self._fatal_error
 
+    @property
+    def has_active_executions(self) -> bool:
+        return bool(self._active)
+
     async def close(self) -> None:
         self._closing = True
         self._accepting = False
@@ -139,6 +151,10 @@ class _FullyAsyncScheduler:
                 raise self._cleanup_error
             raise RuntimeError("Fully async scheduler cleanup did not settle all retained groups.")
         self._cleanup_error = None
+        if self._shutdown_failure is not None:
+            shutdown_failure = self._shutdown_failure
+            self._shutdown_failure = None
+            raise shutdown_failure
 
     def _ensure_started(self) -> None:
         if self._closing:
@@ -168,6 +184,7 @@ class _FullyAsyncScheduler:
             self._ready_changed.set()
 
     async def _admit_one(self) -> None:
+        await self._completed_capacity_available.wait()
         await self._retained_slots.acquire()
         try:
             await self._execution_slots.acquire()
@@ -175,7 +192,7 @@ class _FullyAsyncScheduler:
             self._retained_slots.release()
             raise
 
-        if not self._accepting:
+        if not self._accepting or not self._completed_capacity_available.is_set():
             self._execution_slots.release()
             self._retained_slots.release()
             return
@@ -204,11 +221,25 @@ class _FullyAsyncScheduler:
                 f"expected {self._samples_per_group}."
             )
 
+        try:
+            source_sample_identities = tuple((sample.group_index, sample.index) for sample in reservation.samples)
+        except BaseException:
+            try:
+                self._ownership.rollback_reserved([reservation])
+            except BaseException as rollback_error:
+                self._pending_reserved_rollbacks.append(reservation)
+                self._record_cleanup_error(rollback_error)
+            else:
+                self._execution_slots.release()
+                self._retained_slots.release()
+            raise
+
         stage_id = ReservationStageId(f"execution-{self._next_stage_id}")
         self._next_stage_id += 1
         [receipt] = self._ownership.begin_execution([reservation], stage_id=stage_id)
         record = _ExecutionRecord(
             reservation=reservation,
+            source_sample_identities=source_sample_identities,
             receipt=receipt,
             execution=None,
             terminal_task=None,
@@ -216,7 +247,8 @@ class _FullyAsyncScheduler:
         self._active[receipt.receipt_id] = record
 
         try:
-            execution = self._executor.submit(reservation, receipt)
+            # Ownership retains the pristine attempt while execution mutates this copy.
+            execution = self._executor.submit(deepcopy(reservation), receipt)
         except BaseException as submit_error:
             record.terminal_observed = True
             settlement_error = self._settle_nontrainable(record)
@@ -261,14 +293,23 @@ class _FullyAsyncScheduler:
                 self._record_cleanup_error(receipt_error)
                 raise receipt_error from cancellation
             record.terminal_observed = True
+            payload_error = _validate_terminal_payload(
+                record,
+                terminal_outcome,
+                samples_per_group=self._samples_per_group,
+            )
+            if payload_error is not None:
+                self._record_execution_failure(payload_error)
+            elif isinstance(terminal_outcome, FullyAsyncExecutionFailure) and not isinstance(
+                terminal_outcome.error, asyncio.CancelledError
+            ):
+                self._record_execution_failure(terminal_outcome.error)
             settlement_error = self._settle_nontrainable(record)
             if settlement_error is not None:
                 self._record_cleanup_error(settlement_error)
                 raise settlement_error from cancellation
-            if isinstance(terminal_outcome, FullyAsyncExecutionFailure) and not isinstance(
-                terminal_outcome.error, asyncio.CancelledError
-            ):
-                self._record_fatal(terminal_outcome.error)
+            if payload_error is not None:
+                raise payload_error from cancellation
             raise
         except BaseException as observation_error:
             self._record_cleanup_error(observation_error)
@@ -280,38 +321,43 @@ class _FullyAsyncScheduler:
             raise receipt_error
         record.terminal_observed = True
 
-        if isinstance(outcome, FullyAsyncExecutionFailure):
-            failure_error = _normalize_execution_failure(record, outcome.error)
-            settlement_error = self._settle_nontrainable(record)
-            self._record_fatal(failure_error)
-            if settlement_error is not None:
-                raise failure_error from settlement_error
-            if failure_error is not outcome.error:
-                raise failure_error from outcome.error
-            raise failure_error
-
-        validation_error = _validate_execution_samples(
+        payload_error = _validate_terminal_payload(
             record,
-            outcome.samples,
+            outcome,
             samples_per_group=self._samples_per_group,
         )
-        if validation_error is not None:
+        if payload_error is not None:
             settlement_error = self._settle_nontrainable(record)
-            self._record_fatal(validation_error)
+            self._record_execution_failure(payload_error)
             if settlement_error is not None:
-                raise validation_error from settlement_error
-            raise validation_error
+                raise payload_error from settlement_error
+            raise payload_error
 
-        try:
-            await self._completed_slots.acquire()
-        except asyncio.CancelledError as cancellation:
-            self._request_cancellation(record)
-            record.terminal_observed = True
+        if isinstance(outcome, FullyAsyncExecutionRetry):
             settlement_error = self._settle_nontrainable(record)
             if settlement_error is not None:
-                self._record_cleanup_error(settlement_error)
-                raise settlement_error from cancellation
-            raise
+                raise settlement_error
+            return
+
+        if isinstance(outcome, FullyAsyncExecutionFailure):
+            if not isinstance(outcome.error, asyncio.CancelledError):
+                self._record_execution_failure(outcome.error)
+            settlement_error = self._settle_nontrainable(record)
+            if settlement_error is not None:
+                raise outcome.error from settlement_error
+            if isinstance(outcome.error, asyncio.CancelledError):
+                return
+            raise outcome.error
+
+        if self._completed_slots.locked():
+            settlement_error = self._settle_nontrainable(record)
+            if settlement_error is not None:
+                raise settlement_error
+            return
+
+        await self._completed_slots.acquire()
+        if self._completed_slots.locked():
+            self._completed_capacity_available.clear()
 
         try:
             [terminal_receipt] = self._ownership.record_terminal(
@@ -319,9 +365,11 @@ class _FullyAsyncScheduler:
                 stage_id=record.receipt.stage_id,
             )
         except BaseException as error:
+            self._release_completed_capacity()
             self._record_cleanup_error(error)
             raise
         if terminal_receipt.disposition is not ReservationTerminalDisposition.TRAINABLE:
+            self._release_completed_capacity()
             disposition_error = RuntimeError(
                 f"Execution receipt {record.receipt.receipt_id} completed with unexpected "
                 f"{terminal_receipt.disposition.name.lower()} disposition."
@@ -345,7 +393,9 @@ class _FullyAsyncScheduler:
                 return error
             record.cancellation_requested = True
         terminal_task = record.terminal_task
-        if record.execution is None or (terminal_task is not None and terminal_task.done()):
+        if record.execution is None:
+            return None
+        if terminal_task is not None and terminal_task.done() and not _terminal_observation_is_pending(terminal_task):
             return None
         try:
             record.execution.request_cancellation()
@@ -377,8 +427,18 @@ class _FullyAsyncScheduler:
         self._watcher_tasks.difference_update(tasks)
 
     def _settle_nontrainable(self, record: _ExecutionRecord) -> BaseException | None:
+        if not record.terminal_observed:
+            observation_error = RuntimeError(
+                f"Execution receipt {record.receipt.receipt_id} cannot settle before terminal observation."
+            )
+            self._record_cleanup_error(observation_error)
+            return observation_error
         try:
-            self._request_cancellation(record)
+            # Mark ownership nontrainable. Terminal tasks skip the executor's
+            # cancellation hook in _request_cancellation.
+            request_error = self._request_cancellation(record)
+            if request_error is not None:
+                raise request_error
             [terminal_receipt] = self._ownership.record_terminal(
                 [record.receipt],
                 stage_id=record.receipt.stage_id,
@@ -407,9 +467,13 @@ class _FullyAsyncScheduler:
 
     def _release_settled_batch(self, batch: _SchedulerBatch) -> None:
         for _ in batch.groups:
-            self._completed_slots.release()
+            self._release_completed_capacity()
             self._retained_slots.release()
         self._ready_changed.set()
+
+    def _release_completed_capacity(self) -> None:
+        self._completed_slots.release()
+        self._completed_capacity_available.set()
 
     def _retry_pending_acquisition_rollback(self) -> None:
         if not self._pending_acquisition_capacity:
@@ -436,12 +500,15 @@ class _FullyAsyncScheduler:
             self._retained_slots.release()
 
     async def _retry_active_shutdown(self) -> None:
+        cancellable_records: list[_ExecutionRecord] = []
         for record in list(self._active.values()):
             request_error = self._request_cancellation(record)
             if request_error is not None:
                 self._record_cleanup_error(request_error)
                 continue
+            cancellable_records.append(record)
 
+        for record in cancellable_records:
             if not record.terminal_observed:
                 terminal_task = record.terminal_task
                 if terminal_task is None:
@@ -450,6 +517,19 @@ class _FullyAsyncScheduler:
                     )
                     self._record_cleanup_error(terminal_error)
                     continue
+                if _terminal_observation_is_pending(terminal_task):
+                    execution = record.execution
+                    if execution is None:
+                        execution_error = RuntimeError(
+                            f"Execution receipt {record.receipt.receipt_id} has no execution handle."
+                        )
+                        self._record_cleanup_error(execution_error)
+                        continue
+                    terminal_task = asyncio.create_task(
+                        execution.wait_terminal(),
+                        name=f"fully-async-execution-retry-{record.receipt.receipt_id}",
+                    )
+                    record.terminal_task = terminal_task
                 outcome, observation_error = await _await_terminal_outcome(terminal_task)
                 if observation_error is not None:
                     self._record_cleanup_error(observation_error)
@@ -465,10 +545,17 @@ class _FullyAsyncScheduler:
                     self._record_cleanup_error(receipt_error)
                     continue
                 record.terminal_observed = True
-                if isinstance(outcome, FullyAsyncExecutionFailure) and not isinstance(
+                payload_error = _validate_terminal_payload(
+                    record,
+                    outcome,
+                    samples_per_group=self._samples_per_group,
+                )
+                if payload_error is not None:
+                    self._record_execution_failure(payload_error)
+                elif isinstance(outcome, FullyAsyncExecutionFailure) and not isinstance(
                     outcome.error, asyncio.CancelledError
                 ):
-                    self._record_fatal(outcome.error)
+                    self._record_execution_failure(outcome.error)
 
             settlement_error = self._settle_nontrainable(record)
             if settlement_error is not None:
@@ -485,7 +572,7 @@ class _FullyAsyncScheduler:
             raise
         self._ready.clear()
         for _ in groups:
-            self._completed_slots.release()
+            self._release_completed_capacity()
             self._retained_slots.release()
 
     def _record_fatal(self, error: BaseException) -> None:
@@ -493,6 +580,11 @@ class _FullyAsyncScheduler:
             self._fatal_error = error
         self._accepting = False
         self._ready_changed.set()
+
+    def _record_execution_failure(self, error: BaseException) -> None:
+        self._record_fatal(error)
+        if self._closing and self._shutdown_failure is None:
+            self._shutdown_failure = error
 
     def _record_cleanup_error(self, error: BaseException) -> None:
         if self._cleanup_error is None:
@@ -516,11 +608,20 @@ async def _await_terminal_outcome(
         return None, error
 
 
+def _terminal_observation_is_pending(task: asyncio.Task[FullyAsyncExecutionOutcome]) -> bool:
+    if not task.done() or task.cancelled():
+        return False
+    return isinstance(task.exception(), FullyAsyncTerminalPendingError)
+
+
 def _validate_terminal_outcome(
     record: _ExecutionRecord,
     outcome: FullyAsyncExecutionOutcome,
 ) -> RuntimeError | None:
-    if not isinstance(outcome, (FullyAsyncExecutionSuccess, FullyAsyncExecutionFailure)):
+    if not isinstance(
+        outcome,
+        (FullyAsyncExecutionSuccess, FullyAsyncExecutionFailure, FullyAsyncExecutionRetry),
+    ):
         return RuntimeError(
             f"Execution receipt {record.receipt.receipt_id} returned unsupported terminal outcome "
             f"{type(outcome).__name__}."
@@ -543,7 +644,13 @@ def _validate_execution_samples(
             f"Execution receipt {record.receipt.receipt_id} returned {len(samples)} samples; "
             f"expected {samples_per_group}."
         )
-    expected_identity = [(sample.group_index, sample.index) for sample in record.reservation.samples]
+    invalid_positions = [position for position, sample in enumerate(samples) if not isinstance(sample, Sample)]
+    if invalid_positions:
+        return ValueError(
+            f"Execution receipt {record.receipt.receipt_id} returned non-Sample values "
+            f"at positions {invalid_positions}."
+        )
+    expected_identity = list(record.source_sample_identities)
     actual_identity = [(sample.group_index, sample.index) for sample in samples]
     if actual_identity != expected_identity:
         return ValueError(
@@ -554,12 +661,48 @@ def _validate_execution_samples(
 
 
 def _normalize_execution_failure(record: _ExecutionRecord, error: BaseException) -> BaseException:
-    if isinstance(error, asyncio.CancelledError):
+    if not isinstance(error, BaseException):
+        return RuntimeError(f"Execution receipt {record.receipt.receipt_id} returned invalid failure {error!r}.")
+    if isinstance(error, asyncio.CancelledError) and not record.cancellation_requested:
         return RuntimeError(
             f"Execution receipt {record.receipt.receipt_id} reported cancellation "
             "before the scheduler requested it."
         )
     return error
+
+
+def _normalize_execution_retry(
+    record: _ExecutionRecord,
+    outcome: FullyAsyncExecutionRetry,
+) -> RuntimeError | None:
+    if not isinstance(outcome.reason, FullyAsyncRetryReason):
+        return RuntimeError(
+            f"Execution receipt {record.receipt.receipt_id} returned unsupported retry reason {outcome.reason!r}."
+        )
+    if outcome.reason is FullyAsyncRetryReason.CANCELLATION_REQUESTED and not record.cancellation_requested:
+        return RuntimeError(
+            f"Execution receipt {record.receipt.receipt_id} reported a cancellation retry "
+            "before the scheduler requested it."
+        )
+    return None
+
+
+def _validate_terminal_payload(
+    record: _ExecutionRecord,
+    outcome: FullyAsyncExecutionOutcome,
+    *,
+    samples_per_group: int,
+) -> BaseException | None:
+    if isinstance(outcome, FullyAsyncExecutionRetry):
+        return _normalize_execution_retry(record, outcome)
+    if isinstance(outcome, FullyAsyncExecutionFailure):
+        failure_error = _normalize_execution_failure(record, outcome.error)
+        return None if failure_error is outcome.error else failure_error
+    return _validate_execution_samples(
+        record,
+        outcome.samples,
+        samples_per_group=samples_per_group,
+    )
 
 
 async def _await_task_completion(task: asyncio.Task[None]) -> None:

@@ -1,9 +1,19 @@
 import abc
+from enum import Enum, auto
 from typing import NamedTuple
 
 from miles.rollout.data_source import SourceReservation
 from miles.rollout.fully_async.ownership import ReservationExecutorReceipt
 from miles.utils.types import Sample
+
+
+class FullyAsyncTerminalPendingError(RuntimeError):
+    """Signal that terminal observation can be retried without releasing ownership.
+
+    Executors must use this error only when a later ``wait_terminal`` call can
+    still observe the same attempt. Other observation errors poison the
+    scheduler and retain reservation ownership.
+    """
 
 
 class FullyAsyncExecutionSuccess(NamedTuple):
@@ -30,7 +40,26 @@ class FullyAsyncExecutionFailure(NamedTuple):
     error: BaseException
 
 
-FullyAsyncExecutionOutcome = FullyAsyncExecutionSuccess | FullyAsyncExecutionFailure
+class FullyAsyncRetryReason(Enum):
+    """Reason that terminal execution must replay its pristine reservation."""
+
+    EXECUTION_ABORTED = auto()
+    CANCELLATION_REQUESTED = auto()
+
+
+class FullyAsyncExecutionRetry(NamedTuple):
+    """Report terminal execution that produced no trainable group.
+
+    Attributes:
+        executor_receipt: Exact submitted attempt that reached terminal state.
+        reason: Reason that the source must replay the reservation.
+    """
+
+    executor_receipt: ReservationExecutorReceipt
+    reason: FullyAsyncRetryReason
+
+
+FullyAsyncExecutionOutcome = FullyAsyncExecutionSuccess | FullyAsyncExecutionFailure | FullyAsyncExecutionRetry
 
 
 class FullyAsyncExecution(abc.ABC):
@@ -75,7 +104,8 @@ class FullyAsyncExecutor(abc.ABC):
         """Submit one exact reservation attempt.
 
         Args:
-            reservation: Source-owned prompt group to execute.
+            reservation: Execution-owned prompt group copy. The executor may
+                mutate this copy.
             receipt: Exact ownership receipt for this execution.
 
         Returns:
