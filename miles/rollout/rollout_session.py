@@ -164,6 +164,30 @@ class RolloutSession(abc.ABC):
             RuntimeError: If an acquired train batch remains unsettled.
         """
 
+    @property
+    def supports_train_admission_control(self) -> bool:
+        """Return whether training admission can be quiesced and resumed."""
+        return False
+
+    async def quiesce_train_admission(self) -> None:
+        """Stop admitting new training work after draining admitted work.
+
+        Completed training work remains owned by the session for later batch
+        acquisition.
+
+        Raises:
+            RuntimeError: If this session does not support admission control.
+        """
+        raise RuntimeError(f"{type(self).__name__} does not support train admission quiescence.")
+
+    async def resume_train_admission(self) -> None:
+        """Resume admission of new training work.
+
+        Raises:
+            RuntimeError: If this session does not support admission control.
+        """
+        raise RuntimeError(f"{type(self).__name__} does not support train admission resumption.")
+
     @abc.abstractmethod
     async def close(self) -> None:
         """Close train and evaluation rollout resources.

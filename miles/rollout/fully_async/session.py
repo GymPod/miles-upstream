@@ -68,6 +68,11 @@ class FullyAsyncRolloutSession(RolloutSession):
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
 
+    @property
+    def supports_train_admission_control(self) -> bool:
+        """Return whether training admission can be quiesced and resumed."""
+        return True
+
     async def acquire_train_batch(self, rollout_id: int) -> TrainBatchLease:
         self._ensure_open()
         async with self._acquire_lock:
@@ -102,6 +107,16 @@ class FullyAsyncRolloutSession(RolloutSession):
                 raise RuntimeError(
                     f"Cannot prepare checkpoint {rollout_id} with open train batch leases: {open_rollout_ids}."
                 )
+
+    async def quiesce_train_admission(self) -> None:
+        """Stop new source reservations after admitted executions become terminal."""
+        self._ensure_open()
+        await self._scheduler.quiesce_train_admission()
+
+    async def resume_train_admission(self) -> None:
+        """Resume source reservations after admission was quiesced."""
+        self._ensure_open()
+        await self._scheduler.resume_train_admission()
 
     async def close(self) -> None:
         close_task = self._close_task

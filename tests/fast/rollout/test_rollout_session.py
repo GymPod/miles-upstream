@@ -154,7 +154,14 @@ async def test_loader_constructs_an_explicit_rollout_session_definition() -> Non
 
     assert isinstance(session, DirectRolloutSession)
     assert constructor_inputs == [constructor_input]
+    assert session.supports_train_admission_control is False
     assert await session.evaluate(rollout_id=17) == RolloutFnEvalOutput(data={"direct": {"rollout_id": 17}})
+    with pytest.raises(RuntimeError) as quiesce_error:
+        await session.quiesce_train_admission()
+    assert str(quiesce_error.value) == "DirectRolloutSession does not support train admission quiescence."
+    with pytest.raises(RuntimeError) as resume_error:
+        await session.resume_train_admission()
+    assert str(resume_error.value) == "DirectRolloutSession does not support train admission resumption."
 
 
 async def test_loader_accepts_two_paths_for_the_same_explicit_session_class() -> None:
