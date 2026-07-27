@@ -42,7 +42,13 @@ async def train(args):
 
     maybe_start_mini_ft_controller(args)
 
+    admission_control_enabled = await rollout_manager.supports_train_admission_control.remote()
+    admission_quiescent = False
+
     # always update weight first so that sglang has the loaded weights from training.
+    if admission_control_enabled:
+        await rollout_manager.quiesce_train_admission.remote()
+        admission_quiescent = True
     await actor_model.update_weights()
 
     if args.check_weight_update_equal:
@@ -56,16 +62,43 @@ async def train(args):
     if args.eval_interval is not None and args.start_rollout_id == 0 and not args.skip_eval_before_train:
         await rollout_manager.eval.remote(0)
 
+    async def start_generation(rollout_id: int, *, quiesce_after_handoff: bool):
+        nonlocal admission_quiescent
+        if admission_control_enabled and admission_quiescent:
+            await rollout_manager.resume_train_admission.remote()
+            admission_quiescent = False
+        if admission_control_enabled and quiesce_after_handoff:
+            return rollout_manager.generate_and_quiesce_train_admission.remote(rollout_id)
+        return rollout_manager.generate.remote(rollout_id)
+
     # async train loop.
-    rollout_data_next_future = rollout_manager.generate.remote(args.start_rollout_id)
+    rollout_data_next_future = await start_generation(args.start_rollout_id, quiesce_after_handoff=False)
+    next_generation_quiesces = False
+
+    async def finish_pending_generation():
+        nonlocal admission_quiescent, next_generation_quiesces, rollout_data_next_future
+        if rollout_data_next_future is None:
+            raise RuntimeError("No rollout generation is pending.")
+        rollout_data = await rollout_data_next_future
+        admission_quiescent = next_generation_quiesces
+        rollout_data_next_future = None
+        next_generation_quiesces = False
+        return rollout_data
+
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
         # Sync the last generation
         if rollout_data_next_future is not None:
-            rollout_data_curr_ref = await rollout_data_next_future
+            rollout_data_curr_ref = await finish_pending_generation()
 
         # Start the next rollout early.
         if rollout_id + 1 < args.num_rollout:
-            rollout_data_next_future = rollout_manager.generate.remote(rollout_id + 1)
+            next_generation_quiesces = (
+                admission_control_enabled and (rollout_id + 1) % args.update_weights_interval == 0
+            )
+            rollout_data_next_future = await start_generation(
+                rollout_id + 1,
+                quiesce_after_handoff=next_generation_quiesces,
+            )
 
         if args.use_critic:
             critic_task = await eager_create_task(critic_model.train(rollout_id, rollout_data_curr_ref))
@@ -79,6 +112,8 @@ async def train(args):
         if external_save or should_run_periodic_action(
             rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout
         ):
+            if admission_control_enabled and rollout_data_next_future is not None:
+                rollout_data_curr_ref = await finish_pending_generation()
             force_sync = external_save or rollout_id == args.num_rollout - 1
             await actor_model.save_model(rollout_id, force_sync=force_sync)
             if args.use_critic:
@@ -88,9 +123,11 @@ async def train(args):
                 os.remove(args.save_trigger_sentinel)
 
         if (rollout_id + 1) % args.update_weights_interval == 0:
-            # sync generate before update weights to prevent update weight in the middle of generation
-            rollout_data_curr_ref = (await x) if (x := rollout_data_next_future) is not None else None
-            rollout_data_next_future = None
+            if rollout_data_next_future is not None:
+                rollout_data_curr_ref = await finish_pending_generation()
+            if admission_control_enabled and not admission_quiescent:
+                await rollout_manager.quiesce_train_admission.remote()
+                admission_quiescent = True
             await actor_model.update_weights(rollout_id=rollout_id)
 
         if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):

@@ -168,7 +168,21 @@ class RolloutManager:
 
     # -------------------------- data generation -----------------------------
 
-    async def generate(self, rollout_id):
+    async def generate(self, rollout_id: int) -> dict[str, object]:
+        return await self._generate(rollout_id, quiesce_after_handoff=False)
+
+    async def generate_and_quiesce_train_admission(self, rollout_id: int) -> dict[str, object]:
+        """Generate and publish a training batch, then quiesce admission.
+
+        Args:
+            rollout_id: Identifier for the generated training batch.
+
+        Returns:
+            The sample indices and published training-data references.
+        """
+        return await self._generate(rollout_id, quiesce_after_handoff=True)
+
+    async def _generate(self, rollout_id: int, *, quiesce_after_handoff: bool) -> dict[str, object]:
         start_time = time.time()
         self.rollout_id = rollout_id
         self._health_monitoring_resume()
@@ -214,6 +228,8 @@ class RolloutManager:
             else:
                 data_ref = split_train_data_by_dp(self.args, data, self.train_parallel_config["dp_size"])
             result = dict(sample_indices=sample_indices, data_ref=data_ref)
+            if quiesce_after_handoff:
+                await self.rollout_session.quiesce_train_admission()
         except BaseException as handoff_error:
             if lease is not None:
                 try:
@@ -225,6 +241,18 @@ class RolloutManager:
         if lease is not None:
             lease.commit()
         return result
+
+    def supports_train_admission_control(self) -> bool:
+        """Return whether this manager's rollout session supports admission control."""
+        return self.rollout_session.supports_train_admission_control
+
+    async def quiesce_train_admission(self) -> None:
+        """Close train admission and drain work already admitted by the session."""
+        await self.rollout_session.quiesce_train_admission()
+
+    async def resume_train_admission(self) -> None:
+        """Resume train admission after a successful weight update."""
+        await self.rollout_session.resume_train_admission()
 
     async def eval(self, rollout_id):
         if self.args.debug_train_only:
