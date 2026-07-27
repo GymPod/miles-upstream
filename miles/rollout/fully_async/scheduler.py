@@ -75,7 +75,11 @@ class _FullyAsyncScheduler:
         self._ready: list[_ReadyGroup] = []
         self._ready_changed = asyncio.Event()
         self._acquire_lock = asyncio.Lock()
+        self._admission_transition_lock = asyncio.Lock()
+        self._quiesce_task: asyncio.Task[None] | None = None
+        self._quiesce_failure_reported = False
         self._producer_task: asyncio.Task[None] | None = None
+        self._producer_requested = False
         self._watcher_tasks: set[asyncio.Task[None]] = set()
         self._next_stage_id = 0
         self._accepting = True
@@ -118,16 +122,59 @@ class _FullyAsyncScheduler:
 
     def raise_if_failed(self) -> None:
         if self._fatal_error is not None:
+            if self._quiesce_task is not None:
+                self._quiesce_failure_reported = True
             raise self._fatal_error
 
     @property
     def has_active_executions(self) -> bool:
         return bool(self._active)
 
+    async def quiesce_train_admission(self) -> None:
+        async with self._admission_transition_lock:
+            self.raise_if_failed()
+            if self._closing:
+                raise RuntimeError("Fully async scheduler is closing.")
+
+            quiesce_task = self._quiesce_task
+            if quiesce_task is None:
+                self._accepting = False
+                producer_task = self._producer_task
+                if producer_task is not None and not producer_task.done():
+                    producer_task.cancel()
+                quiesce_task = asyncio.create_task(
+                    self._finish_quiescence(producer_task),
+                    name="fully-async-admission-quiescence",
+                )
+                self._quiesce_task = quiesce_task
+                self._quiesce_failure_reported = False
+
+        await self._await_quiescence(quiesce_task)
+
+    async def resume_train_admission(self) -> None:
+        while True:
+            async with self._admission_transition_lock:
+                self.raise_if_failed()
+                if self._closing:
+                    raise RuntimeError("Fully async scheduler is closing.")
+                quiesce_task = self._quiesce_task
+                if quiesce_task is not None and quiesce_task.done():
+                    quiesce_task.result()
+                    self._accepting = True
+                    self._quiesce_task = None
+                    if self._producer_requested:
+                        self._start_producer()
+                    return
+                if quiesce_task is None:
+                    return
+
+            await self._await_quiescence(quiesce_task)
+
     async def close(self) -> None:
-        self._closing = True
-        self._accepting = False
-        self._ready_changed.set()
+        async with self._admission_transition_lock:
+            self._closing = True
+            self._accepting = False
+            self._ready_changed.set()
 
         producer_task = self._producer_task
         if producer_task is not None and not producer_task.done():
@@ -140,6 +187,14 @@ class _FullyAsyncScheduler:
 
         if not producer_was_running:
             self._cleanup_error = None
+        await self._stop_watcher_tasks()
+        quiesce_task = self._quiesce_task
+        quiesce_failure: BaseException | None = None
+        if quiesce_task is not None:
+            try:
+                await _await_task_completion(quiesce_task)
+            except BaseException as error:
+                quiesce_failure = error
         self._retry_pending_acquisition_rollback()
         self._retry_reserved_rollbacks()
         if not producer_was_running:
@@ -154,33 +209,43 @@ class _FullyAsyncScheduler:
         if self._shutdown_failure is not None:
             shutdown_failure = self._shutdown_failure
             self._shutdown_failure = None
+            if quiesce_failure is shutdown_failure:
+                self._quiesce_failure_reported = True
             raise shutdown_failure
+        if quiesce_failure is not None and not self._quiesce_failure_reported:
+            self._quiesce_failure_reported = True
+            raise quiesce_failure
 
     def _ensure_started(self) -> None:
         if self._closing:
             raise RuntimeError("Fully async scheduler is closing.")
-        if self._producer_task is None:
-            self._producer_task = asyncio.create_task(
-                self._run_producer(),
-                name="fully-async-rollout-producer",
-            )
+        self._producer_requested = True
+        if self._accepting and (self._producer_task is None or self._producer_task.done()):
+            self._start_producer()
+
+    def _start_producer(self) -> None:
+        self._producer_task = asyncio.create_task(
+            self._run_producer(),
+            name="fully-async-rollout-producer",
+        )
 
     async def _run_producer(self) -> None:
         try:
             while self._accepting:
                 await self._admit_one()
         except asyncio.CancelledError as cancellation:
-            if not self._closing and self._fatal_error is None:
+            if self._accepting and not self._closing and self._fatal_error is None:
                 self._record_fatal(cancellation)
         except BaseException as error:
             if self._fatal_error is None:
                 self._record_fatal(error)
         finally:
-            await self._stop_watcher_tasks()
-            try:
-                self._rollback_ready()
-            except BaseException as error:
-                self._record_cleanup_error(error)
+            if self._closing or self._fatal_error is not None:
+                await self._stop_watcher_tasks()
+                try:
+                    self._rollback_ready()
+                except BaseException as error:
+                    self._record_cleanup_error(error)
             self._ready_changed.set()
 
     async def _admit_one(self) -> None:
@@ -192,20 +257,30 @@ class _FullyAsyncScheduler:
             self._retained_slots.release()
             raise
 
-        if not self._accepting or not self._completed_capacity_available.is_set():
+        try:
+            await self._admission_transition_lock.acquire()
+        except BaseException:
             self._execution_slots.release()
             self._retained_slots.release()
-            return
+            raise
 
         try:
-            [reservation] = self._ownership.reserve_samples(1)
-        except BaseException:
-            if self._ownership.has_pending_acquisition_rollback:
-                self._pending_acquisition_capacity = True
-            else:
+            if not self._accepting or not self._completed_capacity_available.is_set():
                 self._execution_slots.release()
                 self._retained_slots.release()
-            raise
+                return
+
+            try:
+                [reservation] = self._ownership.reserve_samples(1)
+            except BaseException:
+                if self._ownership.has_pending_acquisition_rollback:
+                    self._pending_acquisition_capacity = True
+                else:
+                    self._execution_slots.release()
+                    self._retained_slots.release()
+                raise
+        finally:
+            self._admission_transition_lock.release()
 
         if len(reservation.samples) != self._samples_per_group:
             try:
@@ -267,6 +342,34 @@ class _FullyAsyncScheduler:
         )
         self._watcher_tasks.add(watcher_task)
         watcher_task.add_done_callback(self._watcher_done)
+
+    async def _drain_admitted_executions(self) -> None:
+        while self._watcher_tasks and self._fatal_error is None:
+            await asyncio.wait(tuple(self._watcher_tasks), return_when=asyncio.FIRST_COMPLETED)
+        if self._fatal_error is None:
+            return
+        await self._stop_watcher_tasks()
+        try:
+            self._rollback_ready()
+        except BaseException:
+            # _rollback_ready records cleanup failure while the fatal error stays primary.
+            pass
+
+    async def _finish_quiescence(self, producer_task: asyncio.Task[None] | None) -> None:
+        if producer_task is not None:
+            await _await_task_completion(producer_task)
+        await self._drain_admitted_executions()
+        if self._fatal_error is not None:
+            raise self._fatal_error
+
+    async def _await_quiescence(self, quiesce_task: asyncio.Task[None]) -> None:
+        try:
+            await asyncio.shield(quiesce_task)
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            self._quiesce_failure_reported = True
+            raise
 
     async def _watch_execution(self, record: _ExecutionRecord) -> None:
         terminal_task = record.terminal_task

@@ -245,19 +245,31 @@ async def _wait_for_executions(executor: _ControlledExecutor, count: int) -> Non
     await asyncio.wait_for(wait(), timeout=1)
 
 
+async def _wait_for_requeued_groups(data_source: _RecordingDataSource, count: int) -> None:
+    async def wait() -> None:
+        while len(data_source.requeued) < count:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait(), timeout=1)
+
+
 def _session(
     *,
+    batch_groups: int = 1,
+    execution_samples: int = 1,
+    retained_groups: int = 1,
+    completed_groups: int = 1,
     cancel_completes: bool = True,
 ) -> tuple[FullyAsyncRolloutSession, _RecordingDataSource, _ControlledExecutor]:
     data_source = _RecordingDataSource()
     executor = _ControlledExecutor(cancel_completes=cancel_completes)
     session = FullyAsyncRolloutSession(
         args=Namespace(
-            rollout_batch_size=1,
+            rollout_batch_size=batch_groups,
             n_samples_per_prompt=1,
-            fully_async_max_execution_samples=1,
-            fully_async_max_retained_groups=1,
-            fully_async_max_completed_prefetch_groups=1,
+            fully_async_max_execution_samples=execution_samples,
+            fully_async_max_retained_groups=retained_groups,
+            fully_async_max_completed_prefetch_groups=completed_groups,
             async_max_concurrent_samples=None,
         ),
         data_source=data_source,
@@ -590,3 +602,410 @@ async def test_shutdown_retries_requeue_then_preserves_generation_failure() -> N
     await session.close()
     with pytest.raises(RuntimeError):
         await acquire_task
+
+
+@pytest.mark.parametrize(
+    ("execution_samples", "retained_groups"),
+    [
+        pytest.param(2, 1, id="before-retained-capacity"),
+        pytest.param(1, 2, id="after-retained-capacity"),
+    ],
+)
+async def test_quiesce_drains_admitted_execution_without_admitting_capacity_waiter(
+    execution_samples: int,
+    retained_groups: int,
+) -> None:
+    session, data_source, executor = _session(
+        execution_samples=execution_samples,
+        retained_groups=retained_groups,
+        completed_groups=retained_groups,
+    )
+    acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=31))
+    await _wait_for_executions(executor, 1)
+
+    quiesce_task = asyncio.create_task(session.quiesce_train_admission())
+    await asyncio.sleep(0)
+
+    assert quiesce_task.done() is False
+
+    executor.executions[0].succeed()
+    await quiesce_task
+    lease = await acquire_task
+
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert len(executor.executions) == 1
+    assert list(data_source.outstanding.values()) == [executor.executions[0].reservation]
+    assert lease.output.samples == [executor.executions[0].reservation.samples]
+
+    lease.rollback(BatchRollbackReason.HANDOFF_FAILED)
+    await session.close()
+
+
+async def test_quiesce_and_resume_are_idempotent_admission_transitions() -> None:
+    session, _, executor = _session(
+        execution_samples=1,
+        retained_groups=2,
+        completed_groups=2,
+    )
+    first_acquire = asyncio.create_task(session.acquire_train_batch(rollout_id=32))
+    await _wait_for_executions(executor, 1)
+
+    quiesce_task = asyncio.create_task(session.quiesce_train_admission())
+    executor.executions[0].succeed()
+    await quiesce_task
+    await session.quiesce_train_admission()
+    first_lease = await first_acquire
+
+    await session.resume_train_admission()
+    await session.resume_train_admission()
+    await _wait_for_executions(executor, 2)
+    executor.executions[1].succeed()
+    second_lease = await session.acquire_train_batch(rollout_id=33)
+
+    assert first_lease.output.samples == [executor.executions[0].reservation.samples]
+    assert second_lease.output.samples == [executor.executions[1].reservation.samples]
+
+    first_lease.rollback(BatchRollbackReason.HANDOFF_FAILED)
+    second_lease.rollback(BatchRollbackReason.HANDOFF_FAILED)
+    await session.close()
+
+
+async def test_concurrent_quiesce_callers_share_the_admission_transition() -> None:
+    session, _, executor = _session()
+    acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=39))
+    await _wait_for_executions(executor, 1)
+
+    first_quiesce = asyncio.create_task(session.quiesce_train_admission())
+    second_quiesce = asyncio.create_task(session.quiesce_train_admission())
+    await asyncio.sleep(0)
+
+    assert (first_quiesce.done(), second_quiesce.done()) == (False, False)
+
+    executor.executions[0].succeed()
+    assert await asyncio.gather(first_quiesce, second_quiesce) == [None, None]
+    lease = await acquire_task
+    lease.rollback(BatchRollbackReason.HANDOFF_FAILED)
+    await session.close()
+
+
+async def test_resume_during_quiescence_waits_then_reuses_released_capacity() -> None:
+    session, _, executor = _session()
+    first_acquire = asyncio.create_task(session.acquire_train_batch(rollout_id=40))
+    await _wait_for_executions(executor, 1)
+
+    quiesce_task = asyncio.create_task(session.quiesce_train_admission())
+    resume_task = asyncio.create_task(session.resume_train_admission())
+    await asyncio.sleep(0)
+
+    assert (quiesce_task.done(), resume_task.done()) == (False, False)
+
+    executor.executions[0].succeed()
+    assert await asyncio.gather(quiesce_task, resume_task) == [None, None]
+    first_lease = await first_acquire
+    await asyncio.sleep(0)
+    assert len(executor.executions) == 1
+
+    first_lease.rollback(BatchRollbackReason.HANDOFF_FAILED)
+    await _wait_for_executions(executor, 2)
+    executor.executions[1].succeed()
+    second_lease = await session.acquire_train_batch(rollout_id=41)
+
+    assert second_lease.output.samples == [executor.executions[1].reservation.samples]
+
+    second_lease.rollback(BatchRollbackReason.HANDOFF_FAILED)
+    await session.close()
+
+
+async def test_quiesce_retains_completed_group_until_close() -> None:
+    session, data_source, executor = _session()
+    acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=34))
+    await _wait_for_executions(executor, 1)
+    acquire_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await acquire_task
+
+    quiesce_task = asyncio.create_task(session.quiesce_train_admission())
+    executor.executions[0].succeed()
+    await quiesce_task
+
+    assert data_source.requeued == []
+    assert list(data_source.outstanding.values()) == [executor.executions[0].reservation]
+
+    await session.close()
+
+    assert data_source.requeued == [[executor.executions[0].reservation]]
+    assert executor.close_calls == 1
+
+
+async def test_quiesce_propagates_fatal_scheduler_error() -> None:
+    session, data_source, executor = _session()
+    acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=35))
+    await _wait_for_executions(executor, 1)
+    failure = RuntimeError("execution failed while quiescing")
+
+    quiesce_task = asyncio.create_task(session.quiesce_train_admission())
+    executor.executions[0].fail(failure)
+
+    with pytest.raises(RuntimeError) as quiesce_error:
+        await quiesce_task
+    with pytest.raises(RuntimeError) as acquisition_error:
+        await acquire_task
+
+    assert quiesce_error.value is failure
+    assert acquisition_error.value is failure
+    assert data_source.requeued == [[executor.executions[0].reservation]]
+    await session.close()
+
+
+async def test_fatal_quiescence_rolls_back_previously_completed_groups() -> None:
+    session, data_source, executor = _session(
+        batch_groups=2,
+        execution_samples=2,
+        retained_groups=2,
+        completed_groups=2,
+    )
+    acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=42))
+    await _wait_for_executions(executor, 2)
+    quiesce_task = asyncio.create_task(session.quiesce_train_admission())
+
+    executor.executions[0].succeed()
+    await asyncio.sleep(0)
+    failure = RuntimeError("second execution failed while quiescing")
+    executor.executions[1].fail(failure)
+
+    with pytest.raises(RuntimeError) as quiesce_error:
+        await quiesce_task
+    with pytest.raises(RuntimeError) as acquisition_error:
+        await acquire_task
+
+    assert quiesce_error.value is failure
+    assert acquisition_error.value is failure
+    assert data_source.requeued == [
+        [executor.executions[1].reservation],
+        [executor.executions[0].reservation],
+    ]
+    assert data_source.outstanding == {}
+    await session.close()
+
+
+async def test_fatal_quiescence_rolls_back_ready_groups_after_watchers_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, data_source, executor = _session(
+        batch_groups=2,
+        execution_samples=2,
+        retained_groups=2,
+        completed_groups=2,
+    )
+    scheduler = session._scheduler
+    original_drain = scheduler._drain_admitted_executions
+    drain_started = asyncio.Event()
+    allow_drain = asyncio.Event()
+
+    async def delayed_drain() -> None:
+        drain_started.set()
+        await allow_drain.wait()
+        await original_drain()
+
+    monkeypatch.setattr(scheduler, "_drain_admitted_executions", delayed_drain)
+    acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=47))
+    await _wait_for_executions(executor, 2)
+    quiesce_task = asyncio.create_task(session.quiesce_train_admission())
+    await drain_started.wait()
+
+    executor.executions[0].succeed()
+    failure = RuntimeError("watchers finished before quiescence drain")
+    executor.executions[1].fail(failure)
+    while scheduler._watcher_tasks:
+        await asyncio.sleep(0)
+
+    allow_drain.set()
+    with pytest.raises(RuntimeError) as quiesce_error:
+        await quiesce_task
+    with pytest.raises(RuntimeError) as acquisition_error:
+        await acquire_task
+
+    assert quiesce_error.value is failure
+    assert acquisition_error.value is failure
+    assert data_source.requeued == [
+        [executor.executions[1].reservation],
+        [executor.executions[0].reservation],
+    ]
+    assert data_source.outstanding == {}
+    await session.close()
+
+
+async def test_close_preempts_an_inflight_quiescence_drain() -> None:
+    session, data_source, executor = _session()
+    acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=36))
+    await _wait_for_executions(executor, 1)
+
+    quiesce_task = asyncio.create_task(session.quiesce_train_admission())
+    await asyncio.sleep(0)
+    close_task = asyncio.create_task(session.close())
+
+    await asyncio.wait_for(asyncio.gather(quiesce_task, close_task), timeout=1)
+
+    assert executor.executions[0].cancellation_requests == 1
+    assert data_source.requeued == [[executor.executions[0].reservation]]
+    assert executor.close_calls == 1
+    with pytest.raises(RuntimeError) as acquisition_error:
+        await acquire_task
+    assert str(acquisition_error.value) == "Rollout session is closed."
+
+
+async def test_close_joins_quiescence_after_its_caller_is_cancelled() -> None:
+    session, _, executor = _session(cancel_completes=False)
+    acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=43))
+    await _wait_for_executions(executor, 1)
+
+    quiesce_caller = asyncio.create_task(session.quiesce_train_admission())
+    await asyncio.sleep(0)
+    quiesce_caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await quiesce_caller
+
+    close_task = asyncio.create_task(session.close())
+    while executor.executions[0].cancellation_requests == 0:
+        await asyncio.sleep(0)
+    executor.executions[0].succeed()
+    await close_task
+
+    current_task = asyncio.current_task()
+    pending_task_names = sorted(
+        task.get_name() for task in asyncio.all_tasks() if task is not current_task and not task.done()
+    )
+    assert "fully-async-admission-quiescence" not in pending_task_names
+    with pytest.raises(RuntimeError) as acquisition_error:
+        await acquire_task
+    assert str(acquisition_error.value) == "Rollout session is closed."
+
+
+async def test_close_surfaces_unobserved_quiescence_failure_after_callers_are_cancelled() -> None:
+    session, data_source, executor = _session()
+    acquire_caller = asyncio.create_task(session.acquire_train_batch(rollout_id=44))
+    await _wait_for_executions(executor, 1)
+
+    quiesce_caller = asyncio.create_task(session.quiesce_train_admission())
+    await asyncio.sleep(0)
+    acquire_caller.cancel()
+    quiesce_caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await acquire_caller
+    with pytest.raises(asyncio.CancelledError):
+        await quiesce_caller
+
+    failure = RuntimeError("unobserved execution failure while quiescing")
+    executor.executions[0].fail(failure)
+    await _wait_for_requeued_groups(data_source, 1)
+
+    with pytest.raises(RuntimeError) as close_error:
+        await session.close()
+
+    assert close_error.value is failure
+    assert data_source.requeued == [[executor.executions[0].reservation]]
+    assert data_source.outstanding == {}
+    assert executor.close_calls == 1
+    await session.close()
+
+
+async def test_close_does_not_repeat_quiescence_failure_observed_by_acquisition() -> None:
+    session, data_source, executor = _session()
+    acquire_caller = asyncio.create_task(session.acquire_train_batch(rollout_id=45))
+    await _wait_for_executions(executor, 1)
+
+    quiesce_caller = asyncio.create_task(session.quiesce_train_admission())
+    await asyncio.sleep(0)
+    quiesce_caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await quiesce_caller
+
+    failure = RuntimeError("execution failure observed by acquisition")
+    executor.executions[0].fail(failure)
+
+    with pytest.raises(RuntimeError) as acquisition_error:
+        await acquire_caller
+    assert acquisition_error.value is failure
+
+    await session.close()
+
+    assert data_source.requeued == [[executor.executions[0].reservation]]
+    assert executor.close_calls == 1
+
+
+async def test_close_does_not_repeat_quiescence_failure_observed_by_resume() -> None:
+    session, data_source, executor = _session()
+    acquire_caller = asyncio.create_task(session.acquire_train_batch(rollout_id=46))
+    await _wait_for_executions(executor, 1)
+
+    quiesce_caller = asyncio.create_task(session.quiesce_train_admission())
+    resume_caller = asyncio.create_task(session.resume_train_admission())
+    await asyncio.sleep(0)
+    acquire_caller.cancel()
+    quiesce_caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await acquire_caller
+    with pytest.raises(asyncio.CancelledError):
+        await quiesce_caller
+
+    failure = RuntimeError("execution failure observed by resume")
+    executor.executions[0].fail(failure)
+
+    with pytest.raises(RuntimeError) as resume_error:
+        await resume_caller
+    assert resume_error.value is failure
+
+    await session.close()
+
+    assert data_source.requeued == [[executor.executions[0].reservation]]
+    assert executor.close_calls == 1
+
+
+async def test_cancelled_quiesce_caller_does_not_complete_the_transition() -> None:
+    session, _, executor = _session()
+    acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=37))
+    await _wait_for_executions(executor, 1)
+
+    cancelled_quiesce = asyncio.create_task(session.quiesce_train_admission())
+    await asyncio.sleep(0)
+    cancelled_quiesce.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_quiesce
+
+    retry_quiesce = asyncio.create_task(session.quiesce_train_admission())
+    await asyncio.sleep(0)
+    assert retry_quiesce.done() is False
+
+    executor.executions[0].succeed()
+    await retry_quiesce
+    lease = await acquire_task
+    lease.rollback(BatchRollbackReason.HANDOFF_FAILED)
+    await session.close()
+
+
+async def test_resume_starts_admission_requested_during_initial_quiescence() -> None:
+    session, _, executor = _session()
+    await session.quiesce_train_admission()
+
+    acquire_task = asyncio.create_task(session.acquire_train_batch(rollout_id=38))
+    await asyncio.sleep(0)
+    assert executor.executions == []
+
+    await session.resume_train_admission()
+    await _wait_for_executions(executor, 1)
+    executor.executions[0].succeed()
+    lease = await acquire_task
+
+    assert lease.output.samples == [executor.executions[0].reservation.samples]
+
+    lease.rollback(BatchRollbackReason.HANDOFF_FAILED)
+    await session.close()
+
+
+async def test_fully_async_session_supports_train_admission_control() -> None:
+    session, _, _ = _session()
+
+    assert session.supports_train_admission_control is True
+
+    await session.close()
