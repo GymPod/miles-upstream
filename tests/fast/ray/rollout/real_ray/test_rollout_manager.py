@@ -81,6 +81,10 @@ class _RecordingRolloutSession(RolloutSession):
         self.train_loop: asyncio.AbstractEventLoop | None = None
         self.eval_loop: asyncio.AbstractEventLoop | None = None
 
+    @property
+    def supports_train_admission_control(self) -> bool:
+        return True
+
     async def acquire_train_batch(self, rollout_id: int) -> TrainBatchLease:
         self.train_loop = asyncio.get_running_loop()
         self._events.append(f"acquire:{rollout_id}")
@@ -96,8 +100,28 @@ class _RecordingRolloutSession(RolloutSession):
     async def prepare_checkpoint(self, rollout_id: int) -> None:
         self._events.append(f"prepare_checkpoint:{rollout_id}")
 
+    async def quiesce_train_admission(self) -> None:
+        self._events.append("quiesce_train_admission")
+
+    async def resume_train_admission(self) -> None:
+        self._events.append("resume_train_admission")
+
     async def close(self) -> None:
         self._events.append("session_close")
+
+
+class _FailingQuiesceRolloutSession(_RecordingRolloutSession):
+    def __init__(self, *, lease: TrainBatchLease, events: list[str], quiesce_error: BaseException) -> None:
+        super().__init__(
+            lease=lease,
+            eval_output=RolloutFnEvalOutput(data={}, metrics=None),
+            events=events,
+        )
+        self._quiesce_error = quiesce_error
+
+    async def quiesce_train_admission(self) -> None:
+        await super().quiesce_train_admission()
+        raise self._quiesce_error
 
 
 class _BlockingCloseRolloutSession(_RecordingRolloutSession):
@@ -775,6 +799,86 @@ class TestGenerate:
             # 8 samples / 2 dp = 4 per rank
             assert len(partition["tokens"]) == 4
 
+    async def test_quiesces_admission_after_publication_and_before_commit(
+        self,
+        ray_local_mode,
+        placement_group_factory,
+        tmp_path,
+        patch_low_level,
+        monkeypatch,
+    ):
+        args = _make_test_args(tmp_path, models=[("actor", True)])
+        args.global_batch_size = 8
+        args.delay_split_train_data_by_dp = True
+        args.debug_train_only = True
+        pg = placement_group_factory(2)
+        manager = _make_manager(args, pg)
+        manager.train_parallel_config = {"dp_size": 2}
+        events: list[str] = []
+        lease = _RecordingTrainBatchLease(
+            rollout_id=43,
+            output=_make_train_output(),
+            events=events,
+            commit_error=None,
+            rollback_error=None,
+        )
+        manager.rollout_session = _RecordingRolloutSession(
+            lease=lease,
+            eval_output=RolloutFnEvalOutput(data={}, metrics=None),
+            events=events,
+        )
+        original_ray_put = ray.put
+
+        def recording_ray_put(value):
+            object_ref = original_ray_put(value)
+            events.append("ray_put")
+            return object_ref
+
+        monkeypatch.setattr(ray, "put", recording_ray_put)
+
+        result = await manager.generate_and_quiesce_train_admission(rollout_id=43)
+
+        assert events == ["acquire:43", "ray_put", "quiesce_train_admission", "commit:43"]
+        assert set(result) == {"sample_indices", "data_ref"}
+
+    async def test_rolls_back_when_admission_quiescence_fails(
+        self,
+        ray_local_mode,
+        placement_group_factory,
+        tmp_path,
+        patch_low_level,
+    ):
+        class QuiesceFailure(BaseException):
+            pass
+
+        args = _make_test_args(tmp_path, models=[("actor", True)])
+        args.global_batch_size = 8
+        args.delay_split_train_data_by_dp = True
+        args.debug_train_only = True
+        pg = placement_group_factory(2)
+        manager = _make_manager(args, pg)
+        manager.train_parallel_config = {"dp_size": 2}
+        events: list[str] = []
+        lease = _RecordingTrainBatchLease(
+            rollout_id=44,
+            output=_make_train_output(),
+            events=events,
+            commit_error=None,
+            rollback_error=None,
+        )
+        failure = QuiesceFailure("quiesce failed")
+        manager.rollout_session = _FailingQuiesceRolloutSession(
+            lease=lease,
+            events=events,
+            quiesce_error=failure,
+        )
+
+        with pytest.raises(QuiesceFailure) as exc_info:
+            await manager.generate_and_quiesce_train_admission(rollout_id=44)
+
+        assert exc_info.value is failure
+        assert events == ["acquire:44", "quiesce_train_admission", "rollback:HANDOFF_FAILED"]
+
     @pytest.mark.parametrize(
         "rollback_failure",
         [
@@ -915,12 +1019,14 @@ class TestGenerate:
         assert exc_info.value is failure
         assert events == ["acquire:29", "commit:29"]
 
+    @pytest.mark.parametrize("quiesce_after_handoff", [False, True])
     async def test_has_no_suspension_after_commit(
         self,
         ray_local_mode,
         placement_group_factory,
         tmp_path,
         patch_low_level,
+        quiesce_after_handoff,
     ):
         args = _make_test_args(tmp_path, models=[("actor", True)])
         args.global_batch_size = 8
@@ -943,13 +1049,42 @@ class TestGenerate:
             events=events,
         )
 
-        generate_task = asyncio.create_task(manager.generate(rollout_id=31))
+        generate = manager.generate_and_quiesce_train_admission if quiesce_after_handoff else manager.generate
+        generate_task = asyncio.create_task(generate(rollout_id=31))
         result = await generate_task
 
         assert generate_task.cancelled() is False
-        assert events == ["acquire:31", "commit:31"]
+        expected_events = ["acquire:31"]
+        if quiesce_after_handoff:
+            expected_events.append("quiesce_train_admission")
+        expected_events.append("commit:31")
+        assert events == expected_events
         assert set(result) == {"sample_indices", "data_ref"}
         assert isinstance(result["data_ref"].inner, ray.ObjectRef)
+
+    async def test_delegates_train_admission_state_changes_to_session(
+        self,
+        ray_local_mode,
+        placement_group_factory,
+        tmp_path,
+        patch_low_level,
+    ):
+        args = _make_test_args(tmp_path, models=[("actor", True)])
+        args.debug_train_only = True
+        pg = placement_group_factory(2)
+        manager = _make_manager(args, pg)
+        events: list[str] = []
+        manager.rollout_session = _RecordingRolloutSession(
+            lease=None,
+            eval_output=RolloutFnEvalOutput(data={}, metrics=None),
+            events=events,
+        )
+
+        assert manager.supports_train_admission_control() is True
+        await manager.quiesce_train_admission()
+        await manager.resume_train_admission()
+
+        assert events == ["quiesce_train_admission", "resume_train_admission"]
 
     async def test_debug_data_bypasses_session_acquisition(
         self,
