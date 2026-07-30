@@ -1,7 +1,7 @@
 """Fully asynchronous rollout generation.
 
-A persistent background worker keeps up to ``rollout_batch_size`` prompt groups in
-flight at all times; each training step only drains already-completed groups from the
+A persistent background worker keeps prompt groups in flight up to the configured
+concurrency limit. Each training step only drains already-completed groups from the
 worker's output queue. Rollout production and training consumption run in parallel,
 so per-iteration wall time moves from ``rollout_time + train_time`` toward
 ``max(rollout_time, train_time)``.
@@ -97,6 +97,17 @@ class FullyAsyncRolloutFn:
 
     def __init__(self, input: RolloutFnConstructorInput):
         self.args = input.args
+        if self.args.async_max_concurrent_samples is not None:
+            client_capacity = (
+                self.args.sglang_server_concurrency
+                * self.args.rollout_num_gpus
+                // self.args.rollout_num_gpus_per_engine
+            )
+            if self.args.async_max_concurrent_samples > client_capacity:
+                logger.warning(
+                    f"--async-max-concurrent-samples ({self.args.async_max_concurrent_samples}) exceeds the "
+                    f"client concurrency cap ({client_capacity}); the excess queues on the semaphore"
+                )
         self.data_source = input.data_source
         self.state = GenerateState(input.args)
         self._weight_version = _CachedWeightVersion()
@@ -132,7 +143,9 @@ class FullyAsyncRolloutFn:
     # -------------------------- producer --------------------------
 
     def _max_in_flight_groups(self) -> int:
-        return self.args.rollout_batch_size
+        if self.args.async_max_concurrent_samples is None:
+            return self.args.rollout_batch_size
+        return max(1, self.args.async_max_concurrent_samples // self.args.n_samples_per_prompt)
 
     def _submit_one_group(self) -> asyncio.Task:
         [group] = self.data_source.get_samples(1)

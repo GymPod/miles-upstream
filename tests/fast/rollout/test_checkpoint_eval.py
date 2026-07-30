@@ -61,6 +61,7 @@ def _eval_dataset_env(monkeypatch, generate):
         chat_template_path=None,
         reward_key=None,
         eval_reward_key=None,
+        sglang_router_policy="round_robin",
     )
     dataset_cfg = SimpleNamespace(
         name="ds",

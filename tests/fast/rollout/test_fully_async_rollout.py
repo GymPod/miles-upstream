@@ -70,6 +70,10 @@ def make_args(**overrides) -> Namespace:
         rollout_batch_size=2,
         n_samples_per_prompt=N_SAMPLES_PER_PROMPT,
         max_weight_staleness=None,
+        async_max_concurrent_samples=None,
+        sglang_server_concurrency=8,
+        rollout_num_gpus=4,
+        rollout_num_gpus_per_engine=1,
         sglang_router_ip="127.0.0.1",
         sglang_router_port=30000,
         eval_num_gpus=0,
@@ -253,3 +257,44 @@ async def test_worker_bounds_in_flight_groups(monkeypatch):
     release.set()
     output = await drain
     assert len(output.samples) == 2
+
+
+async def test_legacy_concurrency_flag_bounds_in_flight_groups(monkeypatch):
+    release = asyncio.Event()
+
+    async def blocking_generate(state, group, sampling_params, evaluation=False):
+        await release.wait()
+        return group
+
+    data_source = FakeDataSource()
+    fn = make_fn(
+        monkeypatch,
+        make_args(rollout_batch_size=4, async_max_concurrent_samples=5),
+        data_source,
+        generate=blocking_generate,
+    )
+
+    drain = asyncio.create_task(fn(RolloutFnTrainInput(rollout_id=0)))
+    await asyncio.sleep(0.05)
+    assert data_source.num_get_calls == 2
+
+    release.set()
+    output = await drain
+    assert len(output.samples) == 4
+
+
+def test_legacy_concurrency_flag_warns_above_client_capacity(monkeypatch, caplog):
+    args = make_args(
+        async_max_concurrent_samples=17,
+        sglang_server_concurrency=4,
+        rollout_num_gpus=4,
+        rollout_num_gpus_per_engine=1,
+    )
+
+    with caplog.at_level("WARNING"):
+        make_fn(monkeypatch, args, FakeDataSource())
+
+    assert caplog.messages == [
+        "--async-max-concurrent-samples (17) exceeds the client concurrency cap (16); "
+        "the excess queues on the semaphore"
+    ]
