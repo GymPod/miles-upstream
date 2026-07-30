@@ -3,6 +3,7 @@ import logging
 import os
 
 from miles.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
+from miles.ray.rollout.eval_dispatch import EvalDispatcher
 from miles.utils import object_store
 from miles.utils.arguments import parse_args, validate_async_off_policy_correction
 from miles.utils.async_utils import eager_create_task
@@ -18,7 +19,7 @@ from miles.utils.tracking_utils.tracking import finish_tracking, init_tracking
 logger = logging.getLogger(__name__)
 
 
-# The framework supports other asynchronous approaches such as fully async (which is shown in examples/fully_async).
+# The framework supports other asynchronous approaches such as fully async (see miles/rollout/fully_async_rollout.py).
 async def train(args):
     assert not args.colocate, "Colocation is not supported for async training."
     validate_async_off_policy_correction(args)
@@ -57,8 +58,10 @@ async def train(args):
             skip_list=args.check_weight_update_skip_list,
         )
 
+    eval_dispatcher = EvalDispatcher(args, actor_model, rollout_manager)
+
     if args.eval_interval is not None and args.start_rollout_id == 0 and not args.skip_eval_before_train:
-        await rollout_manager.eval.remote(0)
+        await eval_dispatcher.dispatch(0, hf_dir=args.hf_checkpoint)
 
     # async train loop.
     rollout_data_next_future = rollout_manager.generate.remote(args.start_rollout_id)
@@ -98,8 +101,8 @@ async def train(args):
             rollout_data_next_future = None
             await actor_model.update_weights(rollout_id=rollout_id)
 
-        if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):
-            await rollout_manager.eval.remote(rollout_id)
+        if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch, args.num_rollout):
+            await eval_dispatcher.dispatch(rollout_id, force=rollout_id == args.num_rollout - 1)
 
         if (
             args.debug_exit_after_rollout is not None
@@ -112,6 +115,7 @@ async def train(args):
             )
             break
 
+    await eval_dispatcher.drain()
     await rollout_manager.dispose.remote()
 
 

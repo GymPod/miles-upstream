@@ -26,16 +26,20 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any] 
 
     log_dict = extra_metrics or {}
     for key in data.keys():
+        if (num_failed := data[key].get("failed_samples")) is not None and num_failed > 0:
+            log_dict[f"eval/{key}/failed_samples"] = num_failed
         rewards = data[key]["rewards"]
+        if not rewards:
+            continue
         num_none = sum(1 for r in rewards if r is None)
-        log_dict[f"eval/{key}-none_reward_ratio"] = num_none / len(rewards) if len(rewards) > 0 else 0.0
+        log_dict[f"eval/{key}-none_reward_ratio"] = num_none / len(rewards)
         if num_none:
             logger.warning(
                 f"eval/{key}: {num_none}/{len(rewards)} samples have reward=None "
                 "(likely errored/aborted trials); treating as 0.0 for metrics."
             )
             rewards = [0.0 if r is None else r for r in rewards]
-        log_dict[f"eval/{key}"] = sum(rewards) / len(rewards) if len(rewards) > 0 else 0.0
+        log_dict[f"eval/{key}"] = sum(rewards) / len(rewards)
         if (samples := data[key].get("samples")) is not None:
             log_dict |= dict_add_prefix(_compute_metrics_from_samples(args, samples), f"eval/{key}/")
         if "truncated" in data[key]:
@@ -57,6 +61,16 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any] 
     tracking.log(args, log_dict, step_key="eval/step")
 
     return log_dict
+
+
+def log_eval_skip(rollout_id, args, reason: str):
+    """Log a skipped eval point at ``rollout_id`` so curve gaps are attributable."""
+    log_dict = {
+        f"eval/skipped_{reason}": 1,
+        "eval/step": compute_rollout_step(args, rollout_id),
+    }
+    logger.warning(f"eval {rollout_id} skipped: {reason}")
+    tracking.log(args, log_dict, step_key="eval/step")
 
 
 def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_time):
