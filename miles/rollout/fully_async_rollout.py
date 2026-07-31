@@ -74,7 +74,13 @@ WEIGHT_VERSION_QUERY_TIMEOUT_SECS = 2.0
 # A finished group is list[Sample], or list[list[Sample]] when a generate function
 # returns multiple samples per trajectory (e.g. multi-agent).
 Group = list[Sample | list[Sample]]
-LegacyBufferedGroup = tuple[list[Sample], Group]
+
+
+@dataclass(frozen=True)
+class _LegacyCompletedGroup:
+    source_samples: list[Sample]
+    samples: Group
+    weight_update_epoch: int
 
 
 @dataclass(frozen=True)
@@ -82,6 +88,7 @@ class _OwnedCompletedGroup:
     terminal_receipt: ReservationTerminalReceipt
     samples: Group
     expected_parent_identities: tuple[tuple[int | None, int | None], ...]
+    weight_update_epoch: int
 
 
 @dataclass(frozen=True)
@@ -98,8 +105,8 @@ class _OwnedExecutionRetry:
 
 _OwnedTerminalResult = _OwnedCompletedGroup | _OwnedExecutionRetry | _OwnedExecutionFailure
 _OwnedTerminalObserver = Callable[[], Coroutine[object, object, _OwnedTerminalResult]]
-_WorkerResult = LegacyBufferedGroup | _OwnedTerminalResult
-_TrainAdmissionFrontierTask = asyncio.Task[LegacyBufferedGroup] | asyncio.Task[_OwnedTerminalResult]
+_WorkerResult = _LegacyCompletedGroup | _OwnedTerminalResult
+_TrainAdmissionFrontierTask = asyncio.Task[_LegacyCompletedGroup] | asyncio.Task[_OwnedTerminalResult]
 
 
 @dataclass(frozen=True)
@@ -108,7 +115,9 @@ class _ActiveOwnedExecution:
     observe_terminal: _OwnedTerminalObserver
 
 
-BufferSource = list[Sample] | _OwnedCompletedGroup
+LegacyBufferSource = list[Sample] | _LegacyCompletedGroup
+LegacyBufferedGroup = tuple[LegacyBufferSource, Group]
+BufferSource = LegacyBufferSource | _OwnedCompletedGroup
 BufferEntry = tuple[BufferSource, Group]
 
 
@@ -124,6 +133,9 @@ class _OwnedTrainAdmissionHold(TrainAdmissionHold):
 
     async def _wait_terminal(self) -> None:
         await self._owner._wait_train_admission_frontier(self)
+
+    def _record_weight_update(self) -> None:
+        self._owner._record_weight_update(self)
 
     def _release(self) -> None:
         self._owner._release_train_admission_hold(self)
@@ -445,6 +457,9 @@ class _CachedWeightVersion:
             self._last_query = time.monotonic()
         return self._value
 
+    def invalidate(self) -> None:
+        self._last_query = -self._ttl
+
 
 class FullyAsyncRolloutFn(RolloutFnLifecycle):
     """Continuous rollout generation decoupled from training steps.
@@ -474,7 +489,7 @@ class FullyAsyncRolloutFn(RolloutFnLifecycle):
         self._executor_closed = False
         self._worker_error: BaseException | None = None
         self._worker_failure_reported = False
-        self._legacy_executions: dict[asyncio.Task[LegacyBufferedGroup], list[Sample]] = {}
+        self._legacy_executions: dict[asyncio.Task[_LegacyCompletedGroup], list[Sample]] = {}
         self._legacy_requeued_groups: deque[LegacyBufferedGroup] = deque()
         self._legacy_close_pending_groups: deque[list[Sample]] = deque()
         self._active_drains: set[asyncio.Task[RolloutFnTrainOutput]] = set()
@@ -487,6 +502,7 @@ class FullyAsyncRolloutFn(RolloutFnLifecycle):
         self._train_batch_lease_admission_open = asyncio.Event()
         self._train_batch_lease_admission_open.set()
         self._train_admission_epoch = 0
+        self._weight_update_epoch = 0
         self._train_admission_holds: set[_OwnedTrainAdmissionHold] = set()
         self._open_train_batch_leases: set[TrainBatchLease] = set()
         execution_samples = getattr(self.args, "fully_async_max_execution_samples", None)
@@ -587,6 +603,12 @@ class FullyAsyncRolloutFn(RolloutFnLifecycle):
         hold = _OwnedTrainAdmissionHold(self, terminal_frontier)
         self._train_admission_holds.add(hold)
         return hold
+
+    def _record_weight_update(self, hold: _OwnedTrainAdmissionHold) -> None:
+        if hold not in self._train_admission_holds:
+            raise RuntimeError("Train admission hold is not active on this rollout function.")
+        self._weight_update_epoch += 1
+        self._weight_version.invalidate()
 
     async def _wait_train_admission_frontier(self, hold: _OwnedTrainAdmissionHold) -> None:
         outcomes = await asyncio.gather(
@@ -711,14 +733,16 @@ class FullyAsyncRolloutFn(RolloutFnLifecycle):
             def retain_legacy_source(source: BufferSource) -> None:
                 if isinstance(source, _OwnedCompletedGroup):
                     raise RuntimeError("Legacy fully async output buffer contained an owned group.")
-                self._legacy_close_pending_groups.append(source)
+                source_samples = source.source_samples if isinstance(source, _LegacyCompletedGroup) else source
+                self._legacy_close_pending_groups.append(source_samples)
 
             buffered_retain_error = await output.discard_all(retain_legacy_source)
             if buffered_retain_error is not None:
                 cleanup_error = buffered_retain_error
             while self._legacy_requeued_groups:
-                source_group, _ = self._legacy_requeued_groups.popleft()
-                self._legacy_close_pending_groups.append(source_group)
+                source, _ = self._legacy_requeued_groups.popleft()
+                source_samples = source.source_samples if isinstance(source, _LegacyCompletedGroup) else source
+                self._legacy_close_pending_groups.append(source_samples)
 
         legacy_recycle_error = self._retry_pending_legacy_recycles()
         if legacy_recycle_error is not None:
@@ -876,9 +900,14 @@ class FullyAsyncRolloutFn(RolloutFnLifecycle):
             prompt_groups = self.data_source.get_samples(1)
             self._scheduler.on_submit(prompt_groups)
             [prompt_group] = prompt_groups
+            weight_update_epoch = self._weight_update_epoch
 
-            async def execute_legacy() -> LegacyBufferedGroup:
-                return prompt_group, await self._generate_group(prompt_group)
+            async def execute_legacy() -> _LegacyCompletedGroup:
+                return _LegacyCompletedGroup(
+                    source_samples=prompt_group,
+                    samples=await self._generate_group(prompt_group),
+                    weight_update_epoch=weight_update_epoch,
+                )
 
             task = asyncio.create_task(execute_legacy())
             self._legacy_executions[task] = prompt_group
@@ -888,6 +917,7 @@ class FullyAsyncRolloutFn(RolloutFnLifecycle):
         retained_slots = self._retained_slots
         if ownership is None or retained_slots is None:
             raise RuntimeError("Fully async ownership is not initialized.")
+        weight_update_epoch = self._weight_update_epoch
         try:
             [reservation] = ownership.reserve_samples(1)
         except Exception:
@@ -965,6 +995,7 @@ class FullyAsyncRolloutFn(RolloutFnLifecycle):
                 terminal_receipt=terminal_receipt,
                 samples=outcome.samples,
                 expected_parent_identities=expected_parent_identities,
+                weight_update_epoch=weight_update_epoch,
             )
 
         terminal_task = asyncio.create_task(observe_terminal())
@@ -1242,11 +1273,11 @@ class FullyAsyncRolloutFn(RolloutFnLifecycle):
             if not done:
                 continue
             if not self._uses_owned_capacity:
-                completed_groups: list[LegacyBufferedGroup] = []
+                completed_groups: list[_LegacyCompletedGroup] = []
                 done_source_groups: list[list[Sample]] = []
                 task_error: BaseException | None = None
                 for task in done:
-                    legacy_task = cast(asyncio.Task[LegacyBufferedGroup], task)
+                    legacy_task = cast(asyncio.Task[_LegacyCompletedGroup], task)
                     source_group = self._legacy_executions[legacy_task]
                     done_source_groups.append(source_group)
                     try:
@@ -1257,7 +1288,7 @@ class FullyAsyncRolloutFn(RolloutFnLifecycle):
                     else:
                         completed_groups.append(completed_group)
                 if task_error is not None:
-                    active_tasks = [cast(asyncio.Task[LegacyBufferedGroup], task) for task in active]
+                    active_tasks = [cast(asyncio.Task[_LegacyCompletedGroup], task) for task in active]
                     active_source_groups = [self._legacy_executions[task] for task in active_tasks]
                     for task in active_tasks:
                         task.cancel()
@@ -1265,19 +1296,21 @@ class FullyAsyncRolloutFn(RolloutFnLifecycle):
                     self._legacy_close_pending_groups.extend(done_source_groups)
                     self._legacy_close_pending_groups.extend(active_source_groups)
                     for task in done:
-                        self._legacy_executions.pop(cast(asyncio.Task[LegacyBufferedGroup], task), None)
+                        self._legacy_executions.pop(cast(asyncio.Task[_LegacyCompletedGroup], task), None)
                     for task in active_tasks:
                         self._legacy_executions.pop(task, None)
                     self._record_worker_error(task_error)
                     raise task_error
                 for task in done:
-                    self._legacy_executions.pop(cast(asyncio.Task[LegacyBufferedGroup], task), None)
+                    self._legacy_executions.pop(cast(asyncio.Task[_LegacyCompletedGroup], task), None)
                 for position, completed_group in enumerate(completed_groups):
                     try:
                         version = await self._weight_version.get(self.args) if output.wants_weight_version else None
-                        await output.put(completed_group, current_version=version)
+                        await output.put((completed_group, completed_group.samples), current_version=version)
                     except BaseException as error:
-                        self._legacy_requeued_groups.extend(completed_groups[position:])
+                        self._legacy_requeued_groups.extend(
+                            (group, group.samples) for group in completed_groups[position:]
+                        )
                         self._record_worker_error(error)
                         raise
                 continue
@@ -1407,6 +1440,7 @@ class FullyAsyncRolloutFn(RolloutFnLifecycle):
         claimed_legacy_group: LegacyBufferedGroup | None = None
         terminal_receipts: list[ReservationTerminalReceipt] = []
         validated_admission_epochs: list[int] = []
+        weight_update_epochs: list[int] = []
         aborted_groups_recycled = 0
         stale_groups_recycled = 0
         staleness_values: list[int] = []
@@ -1423,10 +1457,17 @@ class FullyAsyncRolloutFn(RolloutFnLifecycle):
                         prompt_group = None
                         terminal_receipt = source.terminal_receipt
                         terminal_receipts.append(terminal_receipt)
+                        weight_update_epoch = source.weight_update_epoch
+                    elif isinstance(source, _LegacyCompletedGroup):
+                        prompt_group = source.source_samples
+                        terminal_receipt = None
+                        claimed_legacy_group = buffered_group
+                        weight_update_epoch = source.weight_update_epoch
                     else:
                         prompt_group = source
                         terminal_receipt = None
                         claimed_legacy_group = buffered_group
+                        weight_update_epoch = self._weight_update_epoch
 
                     if len(group) != args.n_samples_per_prompt:
                         if terminal_receipt is None:
@@ -1453,6 +1494,21 @@ class FullyAsyncRolloutFn(RolloutFnLifecycle):
                             self._rollback_owned_terminal(terminal_receipt, completed_slot_held=True)
                             assert terminal_receipts.pop() is terminal_receipt
                         aborted_groups_recycled += 1
+                        continue
+
+                    if args.max_weight_staleness is None and weight_update_epoch != self._weight_update_epoch:
+                        if terminal_receipt is None:
+                            assert prompt_group is not None
+                            self._recycle(prompt_group)
+                            claimed_legacy_group = None
+                        else:
+                            self._rollback_owned_terminal(terminal_receipt, completed_slot_held=True)
+                            assert terminal_receipts.pop() is terminal_receipt
+                        stale_groups_recycled += 1
+                        logger.info(
+                            "Recycled group admitted before the latest weight update "
+                            f"(group_epoch={weight_update_epoch}, current_epoch={self._weight_update_epoch})"
+                        )
                         continue
 
                     validation_epoch = self._train_admission_epoch
@@ -1505,18 +1561,66 @@ class FullyAsyncRolloutFn(RolloutFnLifecycle):
                         accepted_legacy_groups.append(buffered_group)
                     if args.max_weight_staleness is not None:
                         validated_admission_epochs.append(validation_epoch)
+                    else:
+                        weight_update_epochs.append(weight_update_epoch)
                     claimed_legacy_group = None
 
                 buffer_stats_weight_version = await self._weight_version.get(args)
                 if self._retained_slots is None:
+                    # Legacy outputs have no batch lease, and train_async drains generate before an update hold.
+                    if args.max_weight_staleness is None:
+                        current_weight_update_epoch = self._weight_update_epoch
+                        stale_epoch_indices = [
+                            index
+                            for index, weight_update_epoch in enumerate(weight_update_epochs)
+                            if weight_update_epoch != current_weight_update_epoch
+                        ]
+                        for index in reversed(stale_epoch_indices):
+                            completed = accepted_legacy_groups[index]
+                            source, _ = completed
+                            source_samples = (
+                                source.source_samples if isinstance(source, _LegacyCompletedGroup) else source
+                            )
+                            self._recycle(source_samples)
+                            assert accepted_legacy_groups.pop(index) is completed
+                            del data[index]
+                            stale_weight_update_epoch = weight_update_epochs.pop(index)
+                            stale_groups_recycled += 1
+                            logger.info(
+                                "Recycled group admitted before the latest weight update "
+                                f"(group_epoch={stale_weight_update_epoch}, "
+                                f"current_epoch={current_weight_update_epoch})"
+                            )
+                        if stale_epoch_indices:
+                            continue
                     break
                 await self._train_batch_lease_admission_open.wait()
                 if self._closing:
                     raise RuntimeError("Fully async rollout closed before the train batch lease was issued.")
+                if args.max_weight_staleness is None:
+                    current_weight_update_epoch = self._weight_update_epoch
+                    stale_epoch_indices = [
+                        index
+                        for index, weight_update_epoch in enumerate(weight_update_epochs)
+                        if weight_update_epoch != current_weight_update_epoch
+                    ]
+                    for index in reversed(stale_epoch_indices):
+                        terminal_receipt = terminal_receipts[index]
+                        self._rollback_owned_terminal(terminal_receipt, completed_slot_held=True)
+                        assert terminal_receipts.pop(index) is terminal_receipt
+                        del data[index]
+                        stale_weight_update_epoch = weight_update_epochs.pop(index)
+                        stale_groups_recycled += 1
+                        logger.info(
+                            "Recycled group admitted before the latest weight update "
+                            f"(group_epoch={stale_weight_update_epoch}, current_epoch={current_weight_update_epoch})"
+                        )
+                    if stale_epoch_indices:
+                        continue
+                    break
+
                 admission_epoch = self._train_admission_epoch
-                if args.max_weight_staleness is None or all(
-                    epoch == admission_epoch for epoch in validated_admission_epochs
-                ):
+                if all(epoch == admission_epoch for epoch in validated_admission_epochs):
                     break
 
                 current = await self._weight_version.refresh(args)
@@ -1620,7 +1724,9 @@ class FullyAsyncRolloutFn(RolloutFnLifecycle):
                 if claimed_legacy_group is not None:
                     retained_groups.append(claimed_legacy_group)
                 if self._closing or (worker is not None and worker.done()):
-                    self._legacy_close_pending_groups.extend(source_group for source_group, _ in retained_groups)
+                    for source, _ in retained_groups:
+                        source_samples = source.source_samples if isinstance(source, _LegacyCompletedGroup) else source
+                        self._legacy_close_pending_groups.append(source_samples)
                 else:
                     self._legacy_requeued_groups.extend(retained_groups)
             if terminal_receipts:
@@ -1640,7 +1746,8 @@ class FullyAsyncRolloutFn(RolloutFnLifecycle):
         if isinstance(source, _OwnedCompletedGroup):
             self._rollback_owned_terminal(source.terminal_receipt, completed_slot_held=True)
             return
-        self._recycle(source)
+        source_samples = source.source_samples if isinstance(source, _LegacyCompletedGroup) else source
+        self._recycle(source_samples)
 
     def _recycle(self, prompt_group: list[Sample]) -> None:
         for sample in prompt_group:

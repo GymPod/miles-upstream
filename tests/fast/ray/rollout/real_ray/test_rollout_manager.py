@@ -62,6 +62,9 @@ class RecordingTrainAdmissionHold(TrainAdmissionHold):
         self._lifecycle.loops.append(asyncio.get_running_loop())
         self._lifecycle.events.append(f"wait:{self._hold_index}")
 
+    def _record_weight_update(self) -> None:
+        pass
+
     def _release(self) -> None:
         self._lifecycle.release_started.set()
         if not self._lifecycle.allow_release.wait(timeout=5):
@@ -677,6 +680,9 @@ class TestRolloutLifecycle:
             async def _wait_terminal(self) -> None:
                 raise AssertionError("checkpoint save must not wait for terminal work")
 
+            def _record_weight_update(self) -> None:
+                raise AssertionError("checkpoint save must not record a weight update")
+
             def _release(self) -> None:
                 events.append("release")
                 raise release_failure
@@ -715,6 +721,9 @@ class TestRolloutLifecycle:
         class FailingReleaseHold(TrainAdmissionHold):
             async def _wait_terminal(self) -> None:
                 raise AssertionError("checkpoint save must not wait for terminal work")
+
+            def _record_weight_update(self) -> None:
+                raise AssertionError("checkpoint save must not record a weight update")
 
             def _release(self) -> None:
                 events.append("release")
@@ -925,6 +934,9 @@ class TestRolloutLifecycle:
         class FailingReleaseHold(TrainAdmissionHold):
             async def _wait_terminal(self) -> None:
                 raise AssertionError("shared eval must not wait for terminal work")
+
+            def _record_weight_update(self) -> None:
+                raise AssertionError("shared eval must not record a weight update")
 
             def _release(self) -> None:
                 events.append("release")
