@@ -604,6 +604,22 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "You could use `miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std` as an example."
                 ),
             )
+            parser.add_argument(
+                "--rollout-submission-granularity",
+                type=str,
+                choices=["group", "sample"],
+                default=None,
+                help=(
+                    "Granularity at which a completed unit frees rollout submission capacity. "
+                    "`group` holds a slot until the whole prompt group returns; `sample` frees each "
+                    "slot as its own sample finishes, so a replacement group goes out once "
+                    "n_samples_per_prompt samples complete, whichever groups they came from. "
+                    "Prompt groups are submitted whole either way. Unset picks the driver default: "
+                    "`sample` under --fully-async, where groups completed beyond the batch are queued "
+                    "for later steps; `group` otherwise, where they are aborted at the end of the step "
+                    "and, without --partial-rollout, discarded."
+                ),
+            )
 
             # partial rollout
             parser.add_argument(
