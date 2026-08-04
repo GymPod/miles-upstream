@@ -197,7 +197,22 @@ def split_train_data_by_dp(args, data, dp_size):
     """Split the train data by data parallel size."""
     rollout_data_list = split_train_data_by_dp_raw(args, data, dp_size=dp_size)
     store = object_store.get_instance()
-    return [store.put(value=rollout_data, value_spec=ROLLOUT_DATA_VALUE_SPEC) for rollout_data in rollout_data_list]
+    published_refs: list[object_store.StoreObjectRef] = []
+    try:
+        for rollout_data in rollout_data_list:
+            published_refs.append(store.put(value=rollout_data, value_spec=ROLLOUT_DATA_VALUE_SPEC))
+    except BaseException as publication_error:
+        cleanup_error: BaseException | None = None
+        for ref in published_refs:
+            try:
+                store.remove(ref)
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+        if cleanup_error is not None:
+            raise publication_error from cleanup_error
+        raise
+    return published_refs
 
 
 def split_train_data_by_dp_raw(args, data: dict[str, Any], *, dp_size: int) -> list[dict[str, Any]]:
