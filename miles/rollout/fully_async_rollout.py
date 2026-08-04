@@ -18,8 +18,9 @@ rollout engines, pausing producer submissions for the duration of the
 
 import asyncio
 import logging
+import random
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import httpx
 
@@ -52,6 +53,10 @@ WEIGHT_VERSION_QUERY_TIMEOUT_SECS = 2.0
 # returns multiple samples per trajectory (e.g. multi-agent).
 Group = list[Sample | list[Sample]]
 
+# A finished group next to the prompt group that produced it, kept together so a
+# recycled group can be resubmitted.
+BufferEntry = tuple[list[Sample], Group]
+
 
 def _iter_samples(group: Group) -> Iterator[Sample]:
     for item in group:
@@ -69,6 +74,123 @@ def group_oldest_weight_version(group: Group) -> int | None:
     """Return the minimum weight version across all trajectories and turns in a group."""
     versions = [v for s in _iter_samples(group) if (v := s.oldest_weight_version) is not None]
     return min(versions) if versions else None
+
+
+def _eviction_key(group: Group) -> tuple[float, float]:
+    """Sort key ranking groups stalest-first for eviction.
+
+    Ranking by (min weight version, summed weight versions) equals ranking by
+    (largest per-sample staleness, largest summed staleness): with equal group
+    sizes the current engine version is a constant offset that cancels out.
+    Groups with no recorded versions rank freshest — never evicted while a
+    versioned group is available.
+    """
+    versions = [v for s in _iter_samples(group) if (v := s.oldest_weight_version) is not None]
+    if not versions:
+        return (float("inf"), float("inf"))
+    return (min(versions), sum(versions))
+
+
+class GroupBuffer:
+    """Finished groups waiting between the producer worker and the training consumer.
+
+    Without ``max_groups`` this is the legacy bounded queue: the producer blocks
+    once ``OUTPUT_QUEUE_MAX_GROUPS`` groups wait. With ``max_groups`` set the
+    producer never blocks; an overflow evicts to ``on_evict`` (recycling the
+    prompts into the data source) — first every group already beyond
+    ``max_staleness`` (when configured and the engine version is known), then
+    one group at a time by ``_eviction_key``, ties broken randomly.
+
+    ``order`` picks the consumption end: ``"fifo"`` serves the oldest group,
+    ``"lifo"`` the freshest. LIFO keeps training near on-policy without
+    throttling production, but old groups sink and only leave through eviction
+    or a late, stale drain — pair it with ``max_groups``/``max_staleness``.
+    """
+
+    def __init__(
+        self,
+        *,
+        order: str,
+        max_groups: int | None,
+        max_staleness: int | None,
+        on_evict: Callable[[list[Sample]], None],
+    ):
+        assert order in ("fifo", "lifo"), f"unknown buffer order: {order}"
+        self._order = order
+        self._capacity = max_groups if max_groups is not None else OUTPUT_QUEUE_MAX_GROUPS
+        self._evict_on_overflow = max_groups is not None
+        self._max_staleness = max_staleness
+        self._on_evict = on_evict
+        self._entries: list[BufferEntry] = []
+        self._cond = asyncio.Condition()
+        self.entered_groups = 0
+        self.evicted_stale_groups = 0
+        self.evicted_overflow_groups = 0
+
+    @property
+    def wants_weight_version(self) -> bool:
+        """Whether ``put`` can use ``current_version`` (threshold eviction active)."""
+        return self._evict_on_overflow and self._max_staleness is not None
+
+    def qsize(self) -> int:
+        return len(self._entries)
+
+    async def put(self, entry: BufferEntry, *, current_version: int | None = None) -> None:
+        async with self._cond:
+            if not self._evict_on_overflow:
+                while len(self._entries) >= self._capacity:
+                    await self._cond.wait()
+            self._entries.append(entry)
+            self.entered_groups += 1
+            if self._evict_on_overflow and len(self._entries) > self._capacity:
+                self._evict_overflow(current_version)
+            self._cond.notify_all()
+
+    async def get(self) -> BufferEntry:
+        async with self._cond:
+            while not self._entries:
+                await self._cond.wait()
+            entry = self._entries.pop() if self._order == "lifo" else self._entries.pop(0)
+            self._cond.notify_all()
+            return entry
+
+    def _evict_overflow(self, current_version: int | None) -> None:
+        if self._max_staleness is not None and current_version is not None:
+            fresh: list[BufferEntry] = []
+            stale: list[BufferEntry] = []
+            for entry in self._entries:
+                oldest = group_oldest_weight_version(entry[1])
+                too_stale = oldest is not None and current_version - oldest > self._max_staleness
+                (stale if too_stale else fresh).append(entry)
+            if stale:
+                self._entries = fresh
+                self.evicted_stale_groups += len(stale)
+                for prompt_group, _ in stale:
+                    self._on_evict(prompt_group)
+        while len(self._entries) > self._capacity:
+            keys = [_eviction_key(group) for _, group in self._entries]
+            stalest = min(keys)
+            index = random.choice([i for i, key in enumerate(keys) if key == stalest])
+            self.evicted_overflow_groups += 1
+            self._on_evict(self._entries.pop(index)[0])
+
+    def staleness_stats(self, current_version: int | None) -> tuple[float, int] | None:
+        """(average, max) staleness across buffered groups, or None when unknown."""
+        if current_version is None:
+            return None
+        values = [
+            current_version - oldest
+            for _, group in self._entries
+            if (oldest := group_oldest_weight_version(group)) is not None
+        ]
+        if not values:
+            return None
+        return sum(values) / len(values), max(values)
+
+    def reset_counters(self) -> None:
+        self.entered_groups = 0
+        self.evicted_stale_groups = 0
+        self.evicted_overflow_groups = 0
 
 
 class _CachedWeightVersion:
@@ -122,13 +244,18 @@ class FullyAsyncRolloutFn:
         self._eval_prompt_dataset_cache: dict = {}
         self._producer_resumed = asyncio.Event()
         self._producer_resumed.set()
-        self._output: asyncio.Queue[tuple[list[Sample], Group]] | None = None
+        self._output: GroupBuffer | None = None
 
     async def __call__(self, input: RolloutFnInput) -> RolloutFnOutput:
         if input.evaluation:
             return await self._call_eval(input)
         if self._worker is None:
-            self._output = asyncio.Queue(maxsize=OUTPUT_QUEUE_MAX_GROUPS)
+            self._output = GroupBuffer(
+                order=self.args.async_buffer_order,
+                max_groups=self.args.async_buffer_max_groups,
+                max_staleness=self.args.max_weight_staleness,
+                on_evict=self._recycle,
+            )
             self._worker = asyncio.create_task(self._worker_loop())
             logger.info("Started fully-async rollout worker")
         return await self._drain(input.rollout_id)
@@ -188,13 +315,15 @@ class FullyAsyncRolloutFn:
                 active.add(self._submit_one_group())
             done, active = await self._scheduler.wait_for_progress(active)
             for task in done:
-                # Blocks when the queue is full: training lagging behind rollout
-                # production pauses submission instead of growing the queue unboundedly.
-                await self._output.put(task.result())
+                # Without a capacity this blocks when the queue is full, pausing
+                # submission instead of growing the queue unboundedly; with
+                # --async-buffer-max-groups the buffer evicts by staleness instead.
+                version = await self._weight_version.get(self.args) if self._output.wants_weight_version else None
+                await self._output.put(task.result(), current_version=version)
 
     # -------------------------- consumer --------------------------
 
-    async def _next_group(self) -> tuple[list[Sample], Group]:
+    async def _next_group(self) -> BufferEntry:
         queue_get = asyncio.create_task(self._output.get())
         try:
             while True:
@@ -239,20 +368,19 @@ class FullyAsyncRolloutFn:
                 aborted_groups_recycled += 1
                 continue
 
-            if args.max_weight_staleness is not None:
-                oldest = group_oldest_weight_version(group)
-                current = await self._weight_version.get(args)
-                if oldest is not None and current is not None:
-                    staleness = current - oldest
-                    staleness_values.append(staleness)
-                    if staleness > args.max_weight_staleness:
-                        self._recycle(prompt_group)
-                        stale_groups_recycled += 1
-                        logger.info(
-                            f"Recycled stale group (oldest_version={oldest}, current={current}, "
-                            f"staleness={staleness} > max={args.max_weight_staleness})"
-                        )
-                        continue
+            oldest = group_oldest_weight_version(group)
+            current = await self._weight_version.get(args)
+            if oldest is not None and current is not None:
+                staleness = current - oldest
+                staleness_values.append(staleness)
+                if args.max_weight_staleness is not None and staleness > args.max_weight_staleness:
+                    self._recycle(prompt_group)
+                    stale_groups_recycled += 1
+                    logger.info(
+                        f"Recycled stale group (oldest_version={oldest}, current={current}, "
+                        f"staleness={staleness} > max={args.max_weight_staleness})"
+                    )
+                    continue
 
             filter_output = call_dynamic_filter(self._dynamic_filter, args, group)
             if not filter_output.keep:
@@ -281,15 +409,27 @@ class FullyAsyncRolloutFn:
         if self._sample_filter is not None:
             self._sample_filter(args, data)
 
+        buffer = self._output
         metrics = {
-            "rollout/fully_async/queue_size": self._output.qsize(),
+            "rollout/fully_async/queue_size": buffer.qsize(),
             "rollout/fully_async/aborted_groups_recycled": aborted_groups_recycled,
             "rollout/fully_async/stale_groups_recycled": stale_groups_recycled,
+            "rollout/fully_async/evicted_stale_groups": buffer.evicted_stale_groups,
+            "rollout/fully_async/evicted_overflow_groups": buffer.evicted_overflow_groups,
             **metric_gatherer.collect(),
         }
+        if buffer.entered_groups:
+            evicted = buffer.evicted_stale_groups + buffer.evicted_overflow_groups
+            metrics["rollout/fully_async/evict_rate"] = evicted / buffer.entered_groups
+        buffer.reset_counters()
         if staleness_values:
             metrics["rollout/fully_async/avg_staleness"] = sum(staleness_values) / len(staleness_values)
             metrics["rollout/fully_async/max_staleness"] = max(staleness_values)
+        if (stats := buffer.staleness_stats(await self._weight_version.get(args))) is not None:
+            (
+                metrics["rollout/fully_async/buffer_avg_staleness"],
+                metrics["rollout/fully_async/buffer_max_staleness"],
+            ) = stats
 
         return RolloutFnTrainOutput(samples=data, metrics=metrics)
 
