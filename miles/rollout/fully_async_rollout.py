@@ -34,8 +34,10 @@ from miles.rollout.base_types import (
     RolloutFnEvalInput,
     RolloutFnEvalOutput,
     RolloutFnInput,
+    RolloutFnLifecycle,
     RolloutFnOutput,
     RolloutFnTrainOutput,
+    TrainAdmissionHold,
     TrainBatchLease,
     TrainBatchRollbackReason,
 )
@@ -97,6 +99,7 @@ class _OwnedExecutionRetry:
 _OwnedTerminalResult = _OwnedCompletedGroup | _OwnedExecutionRetry | _OwnedExecutionFailure
 _OwnedTerminalObserver = Callable[[], Coroutine[object, object, _OwnedTerminalResult]]
 _WorkerResult = LegacyBufferedGroup | _OwnedTerminalResult
+_TrainAdmissionFrontierTask = asyncio.Task[LegacyBufferedGroup] | asyncio.Task[_OwnedTerminalResult]
 
 
 @dataclass(frozen=True)
@@ -109,6 +112,23 @@ BufferSource = list[Sample] | _OwnedCompletedGroup
 BufferEntry = tuple[BufferSource, Group]
 
 
+class _OwnedTrainAdmissionHold(TrainAdmissionHold):
+    def __init__(
+        self,
+        owner: "FullyAsyncRolloutFn",
+        terminal_frontier: tuple[_TrainAdmissionFrontierTask, ...],
+    ) -> None:
+        super().__init__()
+        self._owner = owner
+        self._terminal_frontier = terminal_frontier
+
+    async def _wait_terminal(self) -> None:
+        await self._owner._wait_train_admission_frontier(self)
+
+    def _release(self) -> None:
+        self._owner._release_train_admission_hold(self)
+
+
 class _OwnedTrainBatchLease(TrainBatchLease):
     def __init__(
         self,
@@ -119,6 +139,8 @@ class _OwnedTrainBatchLease(TrainBatchLease):
         retained_slots: asyncio.BoundedSemaphore,
         completed_slots: asyncio.Queue[object],
         completed_slot_available: asyncio.Event,
+        on_settled: Callable[[TrainBatchLease], None],
+        on_rollback_failed: Callable[[list[ReservationTerminalReceipt]], None],
     ) -> None:
         super().__init__(rollout_id=rollout_id)
         self._owner_loop = asyncio.get_running_loop()
@@ -127,20 +149,40 @@ class _OwnedTrainBatchLease(TrainBatchLease):
         self._retained_slots = retained_slots
         self._completed_slots = completed_slots
         self._completed_slot_available = completed_slot_available
+        self._on_settled = on_settled
+        self._on_rollback_failed = on_rollback_failed
 
     def _commit(self) -> None:
         self._run_on_owner_loop(self._commit_on_owner_loop)
 
     def _commit_on_owner_loop(self) -> None:
-        self._ownership.commit_batch(self._terminal_receipts, rollout_id=self.rollout_id)
+        try:
+            self._ownership.commit_batch(self._terminal_receipts, rollout_id=self.rollout_id)
+        except BaseException as commit_error:
+            try:
+                self._ownership.rollback_batch(self._terminal_receipts)
+            except BaseException as rollback_error:
+                self._on_rollback_failed(self._terminal_receipts)
+                self._on_settled(self)
+                raise commit_error from rollback_error
+            self._release_capacity()
+            self._on_settled(self)
+            raise
         self._release_capacity()
+        self._on_settled(self)
 
     def _rollback(self, reason: TrainBatchRollbackReason) -> None:
         self._run_on_owner_loop(lambda: self._rollback_on_owner_loop(reason))
 
     def _rollback_on_owner_loop(self, reason: TrainBatchRollbackReason) -> None:
-        self._ownership.rollback_batch(self._terminal_receipts)
+        try:
+            self._ownership.rollback_batch(self._terminal_receipts)
+        except BaseException:
+            self._on_rollback_failed(self._terminal_receipts)
+            self._on_settled(self)
+            raise
         self._release_capacity()
+        self._on_settled(self)
 
     def _run_on_owner_loop(self, operation: Callable[[], None]) -> None:
         try:
@@ -225,8 +267,8 @@ def _eviction_key(group: Group) -> tuple[float, float]:
 class GroupBuffer:
     """Finished source/result entries waiting between the producer and consumer.
 
-    Without ``max_groups`` this is the legacy bounded queue: the producer blocks
-    once ``OUTPUT_QUEUE_MAX_GROUPS`` groups wait. With ``max_groups`` set the
+    Without ``max_groups`` the producer blocks once ``blocking_capacity`` groups
+    wait. With ``max_groups`` set the
     producer never blocks; an overflow evicts to ``on_evict`` (recycling the
     prompts into the data source) — first every group already beyond
     ``max_staleness`` (when configured and the engine version is known), then
@@ -242,13 +284,14 @@ class GroupBuffer:
         self,
         *,
         order: str,
+        blocking_capacity: int,
         max_groups: int | None,
         max_staleness: int | None,
         on_evict: Callable[[BufferSource], None],
     ) -> None:
         assert order in ("fifo", "lifo"), f"unknown buffer order: {order}"
         self._order = order
-        self._capacity = max_groups if max_groups is not None else OUTPUT_QUEUE_MAX_GROUPS
+        self._capacity = max_groups if max_groups is not None else blocking_capacity
         self._evict_on_overflow = max_groups is not None
         self._max_staleness = max_staleness
         self._on_evict = on_evict
@@ -372,15 +415,18 @@ class _CachedWeightVersion:
         self._value: int | None = None
         self._last_query = float("-inf")
 
+    async def _query(self, args) -> int:
+        url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/model_info"
+        data = await asyncio.wait_for(get(url), timeout=WEIGHT_VERSION_QUERY_TIMEOUT_SECS)
+        return int(data["weight_version"])
+
     async def get(self, args) -> int | None:
         # Throttles failures too: the drain queries once per group, and an unreachable
         # router would otherwise cost every one of them the full timeout.
         if (time.monotonic() - self._last_query) < self._ttl:
             return self._value
-        url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/model_info"
         try:
-            data = await asyncio.wait_for(get(url), timeout=WEIGHT_VERSION_QUERY_TIMEOUT_SECS)
-            self._value = int(data["weight_version"])
+            self._value = await self._query(args)
         except (httpx.HTTPError, asyncio.TimeoutError) as e:
             # Transient router unavailability; the staleness filter is best-effort.
             logger.debug(f"Failed to query engine weight version: {e}")
@@ -389,8 +435,18 @@ class _CachedWeightVersion:
             self._last_query = time.monotonic()
         return self._value
 
+    async def refresh(self, args) -> int | None:
+        """Require a fresh router value without falling back to the cached version."""
+        self._last_query = -self._ttl
+        self._value = None
+        try:
+            self._value = await self._query(args)
+        finally:
+            self._last_query = time.monotonic()
+        return self._value
 
-class FullyAsyncRolloutFn:
+
+class FullyAsyncRolloutFn(RolloutFnLifecycle):
     """Continuous rollout generation decoupled from training steps.
 
     The worker runs as a long-lived task on the shared rollout event loop, created
@@ -426,6 +482,13 @@ class FullyAsyncRolloutFn:
         self._producer_resumed = asyncio.Event()
         self._producer_resumed.set()
         self._output: GroupBuffer | None = None
+        self._train_admission_open = asyncio.Event()
+        self._train_admission_open.set()
+        self._train_batch_lease_admission_open = asyncio.Event()
+        self._train_batch_lease_admission_open.set()
+        self._train_admission_epoch = 0
+        self._train_admission_holds: set[_OwnedTrainAdmissionHold] = set()
+        self._open_train_batch_leases: set[TrainBatchLease] = set()
         execution_samples = getattr(self.args, "fully_async_max_execution_samples", None)
         retained_groups = getattr(self.args, "fully_async_max_retained_groups", None)
         completed_groups = getattr(self.args, "fully_async_max_completed_prefetch_groups", None)
@@ -470,8 +533,12 @@ class FullyAsyncRolloutFn:
         if input.evaluation:
             return await self._call_eval(input)
         if self._worker is None:
+            blocking_capacity = (
+                self._completed_groups if self._completed_groups is not None else OUTPUT_QUEUE_MAX_GROUPS
+            )
             self._output = GroupBuffer(
                 order=self.args.async_buffer_order,
+                blocking_capacity=blocking_capacity,
                 max_groups=self.args.async_buffer_max_groups,
                 max_staleness=self.args.max_weight_staleness,
                 on_evict=self._recycle_buffer_source,
@@ -484,6 +551,88 @@ class FullyAsyncRolloutFn:
             return await drain_task
         finally:
             self._active_drains.discard(drain_task)
+
+    async def prepare_checkpoint(self, rollout_id: int) -> None:
+        """Prepare rollout-owned state for checkpoint publication.
+
+        Args:
+            rollout_id: Rollout identifier that the checkpoint will publish.
+        """
+        if self._closing:
+            raise RuntimeError("Fully async rollout function is closed.")
+        if not self._train_admission_holds:
+            raise RuntimeError("Checkpoint preparation requires an active train admission hold.")
+        if self._open_train_batch_leases:
+            open_rollout_ids = sorted(lease.rollout_id for lease in self._open_train_batch_leases)
+            raise RuntimeError(
+                f"Cannot prepare checkpoint {rollout_id} with open train batch leases: {open_rollout_ids}."
+            )
+        pending_rollback_error = self._retry_pending_terminal_rollbacks()
+        if pending_rollback_error is not None:
+            raise pending_rollback_error
+        if self._worker_error is not None:
+            raise self._worker_error
+
+    async def acquire_train_admission_hold(self) -> TrainAdmissionHold:
+        """Close training admission and return its owned claim."""
+        if self._closing:
+            raise RuntimeError("Fully async rollout function is closed.")
+        self._train_admission_open.clear()
+        self._train_batch_lease_admission_open.clear()
+        self._train_admission_epoch += 1
+        if self._uses_owned_capacity:
+            terminal_frontier: tuple[_TrainAdmissionFrontierTask, ...] = tuple(self._active_executions)
+        else:
+            terminal_frontier = tuple(self._legacy_executions)
+        hold = _OwnedTrainAdmissionHold(self, terminal_frontier)
+        self._train_admission_holds.add(hold)
+        return hold
+
+    async def _wait_train_admission_frontier(self, hold: _OwnedTrainAdmissionHold) -> None:
+        outcomes = await asyncio.gather(
+            *(asyncio.shield(task) for task in hold._terminal_frontier),
+            return_exceptions=True,
+        )
+        worker = self._worker
+        # Owned tasks stay registered through receipt publication or rollback. Legacy
+        # tasks have no receipt, so their terminal frontier ends with the task itself.
+        while (
+            self._worker_error is None
+            and any(task in self._active_executions for task in hold._terminal_frontier)
+            and (worker is None or not worker.done())
+        ):
+            await asyncio.sleep(0)
+        if self._worker_error is not None:
+            raise self._worker_error
+        if worker is not None and worker.done() and not worker.cancelled():
+            worker_error = worker.exception()
+            if worker_error is not None:
+                raise worker_error
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
+            if isinstance(outcome, _OwnedExecutionFailure):
+                raise outcome.error
+
+    def _release_train_admission_hold(self, hold: _OwnedTrainAdmissionHold) -> None:
+        if hold not in self._train_admission_holds:
+            raise RuntimeError("Train admission hold is not active on this rollout function.")
+        self._train_admission_holds.remove(hold)
+        if not self._train_admission_holds and not self._closing:
+            self._train_admission_epoch += 1
+            self._train_admission_open.set()
+            self._train_batch_lease_admission_open.set()
+
+    def _settle_train_batch_lease(self, lease: TrainBatchLease) -> None:
+        if lease not in self._open_train_batch_leases:
+            raise RuntimeError(f"Train batch lease for rollout {lease.rollout_id} is not open.")
+        self._open_train_batch_leases.remove(lease)
+
+    def _retain_failed_train_batch_rollback(
+        self,
+        terminal_receipts: list[ReservationTerminalReceipt],
+    ) -> None:
+        self._pending_terminal_rollbacks.extend((terminal_receipt, True) for terminal_receipt in terminal_receipts)
 
     async def close(self) -> None:
         """Stop rollout production and settle every retained reservation.
@@ -516,6 +665,12 @@ class FullyAsyncRolloutFn:
 
     async def _close(self) -> None:
         self._closing = True
+        self._train_admission_holds.clear()
+        self._train_admission_open.clear()
+        self._train_batch_lease_admission_open.set()
+        if self._open_train_batch_leases:
+            open_rollout_ids = sorted(lease.rollout_id for lease in self._open_train_batch_leases)
+            raise RuntimeError(f"Cannot close fully async rollout with open train batch leases: {open_rollout_ids}.")
         cleanup_error: BaseException | None = None
         shutdown_error: BaseException | None = None
 
@@ -823,7 +978,7 @@ class FullyAsyncRolloutFn:
         if self._retained_slots is None:
             return False
         await self._retained_slots.acquire()
-        if self._producer_resumed.is_set():
+        if self._producer_resumed.is_set() and self._train_admission_open.is_set():
             return True
         self._retained_slots.release()
         return False
@@ -832,10 +987,11 @@ class FullyAsyncRolloutFn:
         self,
         active: set[asyncio.Task[_WorkerResult]],
     ) -> bool:
-        if self._uses_owned_capacity:
-            retained_slot_acquired = await self._acquire_retained_slot()
-            if not retained_slot_acquired:
-                return False
+        retained_slot_acquired = await self._acquire_retained_slot()
+        if self._uses_owned_capacity and not retained_slot_acquired:
+            return False
+        if not self._producer_resumed.is_set() or not self._train_admission_open.is_set():
+            return False
         active.add(self._submit_one_group())
         return True
 
@@ -995,32 +1151,36 @@ class FullyAsyncRolloutFn:
         fatal_error: BaseException | None = None
         fatal_settlement_error: BaseException | None = None
         while True:
-            if fatal_error is None and self._producer_resumed.is_set():
-                self._scheduler.arm(pending_groups=len(active))
-                while self._scheduler.has_capacity(
-                    pending_groups=len(active),
-                    group_budget=self._max_in_flight_groups(),
-                ):
-                    if self._uses_owned_capacity and not self._owned_completed_capacity_available():
-                        break
-                    if self._uses_owned_capacity and active and not self._owned_retained_capacity_available():
-                        break
-                    try:
-                        submitted = await self._submit_active_group(active)
-                    except Exception as submission_error:
-                        if not self._uses_owned_capacity:
-                            self._record_worker_error(submission_error)
-                            raise
-                        fatal_error = self._record_worker_error(submission_error)
-                        break
-                    if not submitted:
-                        break
-                    if self._uses_owned_capacity:
-                        # Let terminal work claim reopened prefetch capacity before
-                        # another reservation is admitted.
-                        await asyncio.sleep(0)
-                        if any(task.done() for task in active):
+            if fatal_error is None:
+                if not active:
+                    await self._producer_resumed.wait()
+                    await self._train_admission_open.wait()
+                if self._producer_resumed.is_set() and self._train_admission_open.is_set():
+                    self._scheduler.arm(pending_groups=len(active))
+                    while self._scheduler.has_capacity(
+                        pending_groups=len(active),
+                        group_budget=self._max_in_flight_groups(),
+                    ):
+                        if self._uses_owned_capacity and not self._owned_completed_capacity_available():
                             break
+                        if self._uses_owned_capacity and active and not self._owned_retained_capacity_available():
+                            break
+                        try:
+                            submitted = await self._submit_active_group(active)
+                        except Exception as submission_error:
+                            if not self._uses_owned_capacity:
+                                self._record_worker_error(submission_error)
+                                raise
+                            fatal_error = self._record_worker_error(submission_error)
+                            break
+                        if not submitted:
+                            break
+                        if self._uses_owned_capacity:
+                            # Let terminal work claim reopened prefetch capacity before
+                            # another reservation is admitted.
+                            await asyncio.sleep(0)
+                            if any(task.done() for task in active):
+                                break
             if fatal_error is not None:
                 queued_settlement_error = await self._rollback_queued_owned_groups(output)
                 if fatal_settlement_error is None:
@@ -1058,9 +1218,25 @@ class FullyAsyncRolloutFn:
                 if not self._producer_resumed.is_set():
                     await self._producer_resumed.wait()
                     continue
+                if not self._train_admission_open.is_set():
+                    await self._train_admission_open.wait()
+                    continue
                 raise RuntimeError("Fully async scheduler has admission capacity but no active work.")
             if fatal_error is None and self._producer_resumed.is_set():
-                done, active = await self._scheduler.wait_for_progress(active)
+                if self._train_admission_open.is_set():
+                    done, active = await self._scheduler.wait_for_progress(active)
+                else:
+                    admission_waiter = asyncio.create_task(self._train_admission_open.wait())
+                    try:
+                        ready, _ = await asyncio.wait(
+                            [*active, admission_waiter],
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                    finally:
+                        admission_waiter.cancel()
+                        await asyncio.gather(admission_waiter, return_exceptions=True)
+                    done = active.intersection(ready)
+                    active.difference_update(done)
             else:
                 done, active = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
             if not done:
@@ -1230,58 +1406,45 @@ class FullyAsyncRolloutFn:
         accepted_legacy_groups: list[LegacyBufferedGroup] = []
         claimed_legacy_group: LegacyBufferedGroup | None = None
         terminal_receipts: list[ReservationTerminalReceipt] = []
+        validated_admission_epochs: list[int] = []
         aborted_groups_recycled = 0
         stale_groups_recycled = 0
         staleness_values: list[int] = []
         metric_gatherer = MetricGatherer()
         do_print = True
+        buffer_stats_weight_version: int | None = None
 
         try:
-            while len(data) < target_data_size:
-                buffered_group = await self._next_group()
-                source, group = buffered_group
-                if isinstance(source, _OwnedCompletedGroup):
-                    prompt_group = None
-                    terminal_receipt = source.terminal_receipt
-                    terminal_receipts.append(terminal_receipt)
-                else:
-                    prompt_group = source
-                    terminal_receipt = None
-                    claimed_legacy_group = buffered_group
-
-                if len(group) != args.n_samples_per_prompt:
-                    if terminal_receipt is None:
-                        raise AssertionError(
-                            f"Generated group contains {len(group)} parent slots; "
-                            f"expected {args.n_samples_per_prompt}."
-                        )
-                    raise ValueError(
-                        f"Source reservation {terminal_receipt.executor_receipt.reservation_id} returned "
-                        f"{len(group)} parent slots; expected {args.n_samples_per_prompt}."
-                    )
-                if isinstance(source, _OwnedCompletedGroup):
-                    identity_error = _owned_group_identity_error(source)
-                    if identity_error is not None:
-                        raise identity_error
-
-                # A weight update paused generation mid-group: return it for re-sampling.
-                if any(s.status == Sample.Status.ABORTED for s in _iter_samples(group)):
-                    if terminal_receipt is None:
-                        assert prompt_group is not None
-                        self._recycle(prompt_group)
-                        claimed_legacy_group = None
+            while True:
+                while len(data) < target_data_size:
+                    buffered_group = await self._next_group()
+                    source, group = buffered_group
+                    if isinstance(source, _OwnedCompletedGroup):
+                        prompt_group = None
+                        terminal_receipt = source.terminal_receipt
+                        terminal_receipts.append(terminal_receipt)
                     else:
-                        self._rollback_owned_terminal(terminal_receipt, completed_slot_held=True)
-                        assert terminal_receipts.pop() is terminal_receipt
-                    aborted_groups_recycled += 1
-                    continue
+                        prompt_group = source
+                        terminal_receipt = None
+                        claimed_legacy_group = buffered_group
 
-                oldest = group_oldest_weight_version(group)
-                current = await self._weight_version.get(args)
-                if oldest is not None and current is not None:
-                    staleness = current - oldest
-                    staleness_values.append(staleness)
-                    if args.max_weight_staleness is not None and staleness > args.max_weight_staleness:
+                    if len(group) != args.n_samples_per_prompt:
+                        if terminal_receipt is None:
+                            raise AssertionError(
+                                f"Generated group contains {len(group)} parent slots; "
+                                f"expected {args.n_samples_per_prompt}."
+                            )
+                        raise ValueError(
+                            f"Source reservation {terminal_receipt.executor_receipt.reservation_id} returned "
+                            f"{len(group)} parent slots; expected {args.n_samples_per_prompt}."
+                        )
+                    if isinstance(source, _OwnedCompletedGroup):
+                        identity_error = _owned_group_identity_error(source)
+                        if identity_error is not None:
+                            raise identity_error
+
+                    # A weight update paused generation mid-group: return it for re-sampling.
+                    if any(s.status == Sample.Status.ABORTED for s in _iter_samples(group)):
                         if terminal_receipt is None:
                             assert prompt_group is not None
                             self._recycle(prompt_group)
@@ -1289,40 +1452,107 @@ class FullyAsyncRolloutFn:
                         else:
                             self._rollback_owned_terminal(terminal_receipt, completed_slot_held=True)
                             assert terminal_receipts.pop() is terminal_receipt
-                        stale_groups_recycled += 1
-                        logger.info(
-                            f"Recycled stale group (oldest_version={oldest}, current={current}, "
-                            f"staleness={staleness} > max={args.max_weight_staleness})"
-                        )
+                        aborted_groups_recycled += 1
                         continue
 
-                filter_output = call_dynamic_filter(self._dynamic_filter, args, group)
-                if not filter_output.keep:
-                    if terminal_receipt is not None:
-                        self._commit_owned_terminal(
-                            terminal_receipt,
-                            rollout_id=rollout_id,
-                            completed_slot_held=True,
+                    validation_epoch = self._train_admission_epoch
+                    oldest = group_oldest_weight_version(group)
+                    current = await self._weight_version.get(args)
+                    if oldest is not None and current is not None:
+                        staleness = current - oldest
+                        staleness_values.append(staleness)
+                        if args.max_weight_staleness is not None and staleness > args.max_weight_staleness:
+                            if terminal_receipt is None:
+                                assert prompt_group is not None
+                                self._recycle(prompt_group)
+                                claimed_legacy_group = None
+                            else:
+                                self._rollback_owned_terminal(terminal_receipt, completed_slot_held=True)
+                                assert terminal_receipts.pop() is terminal_receipt
+                            stale_groups_recycled += 1
+                            logger.info(
+                                f"Recycled stale group (oldest_version={oldest}, current={current}, "
+                                f"staleness={staleness} > max={args.max_weight_staleness})"
+                            )
+                            continue
+
+                    filter_output = call_dynamic_filter(self._dynamic_filter, args, group)
+                    if not filter_output.keep:
+                        if terminal_receipt is not None:
+                            self._commit_owned_terminal(
+                                terminal_receipt,
+                                rollout_id=rollout_id,
+                                completed_slot_held=True,
+                            )
+                            assert terminal_receipts.pop() is terminal_receipt
+                        else:
+                            claimed_legacy_group = None
+                        # Filtered groups are consumed, not replayed: they have no usable gradient signal.
+                        metric_gatherer.on_dynamic_filter_drop(reason=filter_output.reason)
+                        continue
+
+                    if do_print:
+                        sample = group[0][0] if isinstance(group[0], list) else group[0]
+                        logger.info(
+                            f"First rollout sample: {[str(sample.prompt) + sample.response]}, "
+                            f"label: {sample.label}, reward: {sample.reward}"
                         )
-                        assert terminal_receipts.pop() is terminal_receipt
-                    else:
-                        claimed_legacy_group = None
-                    # Filtered groups are consumed, not replayed: they have no usable gradient signal.
-                    metric_gatherer.on_dynamic_filter_drop(reason=filter_output.reason)
+                        do_print = False
+
+                    data.append(group)
+                    if terminal_receipt is None:
+                        assert not isinstance(source, _OwnedCompletedGroup)
+                        accepted_legacy_groups.append(buffered_group)
+                    if args.max_weight_staleness is not None:
+                        validated_admission_epochs.append(validation_epoch)
+                    claimed_legacy_group = None
+
+                buffer_stats_weight_version = await self._weight_version.get(args)
+                if self._retained_slots is None:
+                    break
+                await self._train_batch_lease_admission_open.wait()
+                if self._closing:
+                    raise RuntimeError("Fully async rollout closed before the train batch lease was issued.")
+                admission_epoch = self._train_admission_epoch
+                if args.max_weight_staleness is None or all(
+                    epoch == admission_epoch for epoch in validated_admission_epochs
+                ):
+                    break
+
+                current = await self._weight_version.refresh(args)
+                if self._closing:
+                    raise RuntimeError("Fully async rollout closed before the train batch lease was issued.")
+                if (
+                    not self._train_batch_lease_admission_open.is_set()
+                    or admission_epoch != self._train_admission_epoch
+                ):
                     continue
 
-                if do_print:
-                    sample = _first_sample(group)
+                stale_groups: list[tuple[int, int, int]] = []
+                if current is not None:
+                    for index, group in enumerate(data):
+                        oldest = group_oldest_weight_version(group)
+                        if oldest is None:
+                            continue
+                        staleness = current - oldest
+                        staleness_values.append(staleness)
+                        if staleness > args.max_weight_staleness:
+                            stale_groups.append((index, oldest, staleness))
+                for index, oldest, staleness in reversed(stale_groups):
+                    terminal_receipt = terminal_receipts[index]
+                    self._rollback_owned_terminal(terminal_receipt, completed_slot_held=True)
+                    assert terminal_receipts.pop(index) is terminal_receipt
+                    del data[index]
+                    del validated_admission_epochs[index]
+                    stale_groups_recycled += 1
                     logger.info(
-                        f"First rollout sample: {[str(sample.prompt) + sample.response]}, "
-                        f"label: {sample.label}, reward: {sample.reward}"
+                        f"Recycled stale group (oldest_version={oldest}, current={current}, "
+                        f"staleness={staleness} > max={args.max_weight_staleness})"
                     )
-                    do_print = False
-
-                data.append(group)
-                if terminal_receipt is None:
-                    accepted_legacy_groups.append(buffered_group)
-                claimed_legacy_group = None
+                if stale_groups:
+                    continue
+                buffer_stats_weight_version = current
+                break
 
             sample = _first_sample(data[-1])
             logger.info(
@@ -1355,7 +1585,7 @@ class FullyAsyncRolloutFn:
             if staleness_values:
                 metrics["rollout/fully_async/avg_staleness"] = sum(staleness_values) / len(staleness_values)
                 metrics["rollout/fully_async/max_staleness"] = max(staleness_values)
-            if (stats := output.staleness_stats(await self._weight_version.get(args))) is not None:
+            if (stats := output.staleness_stats(buffer_stats_weight_version)) is not None:
                 (
                     metrics["rollout/fully_async/buffer_avg_staleness"],
                     metrics["rollout/fully_async/buffer_max_staleness"],
@@ -1366,17 +1596,21 @@ class FullyAsyncRolloutFn:
                 completed_slots = self._completed_slots
                 if ownership is None or completed_slots is None:
                     raise RuntimeError("Fully async ownership is not initialized.")
+                lease = _OwnedTrainBatchLease(
+                    rollout_id=rollout_id,
+                    ownership=ownership,
+                    terminal_receipts=terminal_receipts,
+                    retained_slots=self._retained_slots,
+                    completed_slots=completed_slots,
+                    completed_slot_available=self._completed_slot_available,
+                    on_settled=self._settle_train_batch_lease,
+                    on_rollback_failed=self._retain_failed_train_batch_rollback,
+                )
+                self._open_train_batch_leases.add(lease)
                 return LeasedRolloutFnTrainOutput(
                     samples=cast(list[list[Sample]], data),
                     metrics=metrics,
-                    lease=_OwnedTrainBatchLease(
-                        rollout_id=rollout_id,
-                        ownership=ownership,
-                        terminal_receipts=terminal_receipts,
-                        retained_slots=self._retained_slots,
-                        completed_slots=completed_slots,
-                        completed_slot_available=self._completed_slot_available,
-                    ),
+                    lease=lease,
                 )
             return RolloutFnTrainOutput(samples=data, metrics=metrics)
         except BaseException as error:

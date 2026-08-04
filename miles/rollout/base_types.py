@@ -54,15 +54,104 @@ class TrainBatchRollbackReason(Enum):
     HANDOFF_FAILED = auto()
 
 
+class TrainAdmissionHold(ABC):
+    """Own one claim that keeps training admission closed.
+
+    Active holds block both new source reservations and owned train-batch
+    lease issuance. Admission remains closed until every active hold is
+    released or the rollout lifecycle begins closing.
+    """
+
+    def __init__(self) -> None:
+        self._release_attempted = False
+
+    async def wait_terminal(self) -> None:
+        """Wait until every execution before this hold's frontier is terminal.
+
+        This does not consume completed groups, settle train-batch leases, or
+        request execution cancellation. Calls may be repeated while the hold
+        remains unreleased, including after lifecycle close begins.
+
+        Raises:
+            RuntimeError: If release was already attempted.
+            BaseException: A terminal execution or lifecycle failure.
+        """
+        if self._release_attempted:
+            raise RuntimeError("Train admission hold already has a release attempt.")
+        await self._wait_terminal()
+
+    @abstractmethod
+    async def _wait_terminal(self) -> None:
+        """Implement terminal observation for this hold's admission frontier."""
+
+    def release(self) -> None:
+        """Release this hold's claim on training admission.
+
+        A release attempt claims the handle even if its implementation raises.
+        Source reservation and owned lease issuance reopen only after every
+        active hold is released.
+
+        Raises:
+            RuntimeError: If release was already attempted.
+        """
+        if self._release_attempted:
+            raise RuntimeError("Train admission hold already has a release attempt.")
+        self._release_attempted = True
+        self._release()
+
+    @abstractmethod
+    def _release(self) -> None:
+        """Implement release of this exact admission claim."""
+
+
+class RolloutFnLifecycle(ABC):
+    """Expose optional ownership and resource lifecycle controls."""
+
+    @abstractmethod
+    async def prepare_checkpoint(self, rollout_id: int) -> None:
+        """Prepare rollout-owned state for checkpoint publication.
+
+        The caller must own an active train-admission hold so no owned batch
+        lease can be issued while checkpoint publication is prepared.
+
+        Args:
+            rollout_id: Rollout identifier that the checkpoint will publish.
+
+        Raises:
+            RuntimeError: If no train-admission hold is active.
+            RuntimeError: If train-batch ownership remains unsettled.
+            BaseException: A rollout lifecycle failure.
+        """
+
+    @abstractmethod
+    async def acquire_train_admission_hold(self) -> TrainAdmissionHold:
+        """Close training admission and return its owned claim.
+
+        The return linearizes after every later source reservation and owned
+        train-batch lease issuance is blocked. Work admitted before that point
+        continues until terminal.
+        """
+
+    @abstractmethod
+    async def close(self) -> None:
+        """Close rollout-owned resources.
+
+        Repeated calls have no effect after a successful close. A failed close
+        may be retried when its reported ownership or cleanup blocker changes.
+        Close permanently dominates outstanding admission holds.
+        """
+
+
 class TrainBatchLease(ABC):
     """Own a rollout batch until its train-data handoff settles.
 
     Args:
         rollout_id: Training rollout that requested the batch.
 
-    A successful commit transfers ownership to downstream train data.
-    Settlement may be attempted only once, including when its implementation
-    raises.
+    A successful commit transfers ownership to downstream train data. A failed
+    commit must recover ownership or retain it for lifecycle cleanup because
+    the caller discards the failed handoff. Settlement may be attempted only
+    once, including when its implementation raises.
     """
 
     def __init__(self, rollout_id: int) -> None:
